@@ -1,0 +1,128 @@
+/* entries.def -- the Glide 2.x entry points this provider implements.
+ * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
+ *
+ * ONE table, included by the C source (to build the export stubs, the index
+ * enum and the runtime descriptor array) and by the Makefile (to build the
+ * .def that gives each export its leading underscore). Nothing else may carry
+ * a second copy of this list.
+ *
+ *      VGL_ENTRY(name, argbytes, payload, state)
+ *
+ * `argbytes` is the __stdcall stack argument size, and it is a measured fact
+ * rather than a declaration: both readings of it come from the games
+ * themselves, scripts/gen-gamedefs.py taking the `add esp, N` call-site cleanup
+ * where the compiler emitted one and scripts/glide2_pushes.py counting the
+ * pushes belonging to the call where it did not. The two titles agree on every
+ * one of the 69, so one table serves both.
+ *
+ * `payload` says what a call REFERENCES that is not in its argument bytes,
+ * because a capture that records only the arguments records a pointer whose
+ * contents are gone by the time anyone replays it. It is the only per-entry
+ * semantic knowledge in this file:
+ *
+ *   PL_NONE       everything the call means is in its argument bytes
+ *   PL_V2/PL_V3   the first 2/3 arguments are GrVertex pointers
+ *   PL_VLIST      arg0 = vertex count, arg1 = array of that many vertices
+ *   PL_FOG        arg0 -> the fog table
+ *   PL_TEXDOWN    arg3 -> GrTexInfo, whose own data pointer is followed
+ *   PL_TEXINFO3   arg3 -> GrTexInfo, struct only (no upload happens)
+ *   PL_TEXINFO1   arg1 -> GrTexInfo, struct only (the size query)
+ *   PL_TEXPART    a single mip level, arg7 -> its data
+ *   PL_TEXTABLE   arg2 -> a palette or NCC table, sized by arg1
+ *   PL_VIDTIMING  arg1 -> the caller's CRT timing table
+ *   PL_STATE_IN   arg0 -> a state blob the callee READS
+ *   PL_STATE_OUT  arg0 -> a state blob the callee WRITES
+ *   PL_HWCFG      arg0 -> a hardware descriptor the callee WRITES
+ *   PL_CALLBACK   arg0 is a function pointer belonging to the caller
+ *   PL_LFBINFO    arg5 -> an info block the callee WRITES
+ *   PL_LFBUNLOCK  the write region locked earlier has to be captured here
+ *   PL_WINOPEN    arg0 is a window handle belonging to the caller
+ *   PL_SWAP       a frame boundary
+ *
+ * `state` says whether the call changes anything the GPU backend resolves into
+ * a draw state, so that backend's cache knows to rebuild. ST_DRAW is the
+ * answer for every entry that writes the pixel pipeline, a texture unit, the
+ * clip or the origin; ST_NONE for everything else, including the primitives
+ * themselves, which consume the state rather than setting it.
+ *
+ * It lives HERE rather than as a forty-case switch in native.c, beside the
+ * switch that does the work. Two lists over one set of entry points agree by
+ * inspection, which is to say they do not: an entry added
+ * to the dispatch and forgotten in the other one leaves the GPU serving a stale
+ * draw state, which is a wrong picture with no error anywhere. Same reason
+ * src/settings.def exists.
+ *
+ * Ordering is alphabetical and is NOT part of any file format: a capture names
+ * its entries in its own header, so this list may grow without invalidating
+ * one.
+ */
+
+VGL_ENTRY(grAADrawLine,                     8,  PL_V2,                           ST_NONE)
+VGL_ENTRY(grAADrawTriangle,                24,  PL_V3,                           ST_NONE)
+VGL_ENTRY(grAlphaBlendFunction,            16,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grAlphaCombine,                  20,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grAlphaControlsITRGBLighting,     4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grAlphaTestFunction,              4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grAlphaTestReferenceValue,        4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grBufferClear,                   12,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grBufferSwap,                     4,  PL_SWAP,                         ST_NONE)
+VGL_ENTRY(grChromakeyMode,                  4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grChromakeyValue,                 4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grClipWindow,                    16,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grColorCombine,                  20,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grColorMask,                      8,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grConstantColorValue,             4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grCullMode,                       4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grDepthBiasLevel,                 4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grDepthBufferFunction,            4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grDepthBufferMode,                4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grDepthMask,                      4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grDisableAllEffects,              0,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grDitherMode,                     4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grDrawLine,                       8,  PL_V2,                           ST_NONE)
+VGL_ENTRY(grDrawPlanarPolygonVertexList,    8,  PL_VLIST,                        ST_NONE)
+VGL_ENTRY(grDrawPolygonVertexList,          8,  PL_VLIST,                        ST_NONE)
+VGL_ENTRY(grDrawTriangle,                  12,  PL_V3,                           ST_NONE)
+VGL_ENTRY(grErrorSetCallback,               4,  PL_CALLBACK,                     ST_NONE)
+VGL_ENTRY(grFogColorValue,                  4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grFogMode,                        4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grFogTable,                       4,  PL_FOG,                          ST_DRAW)
+VGL_ENTRY(grGammaCorrectionValue,           4,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grGlideGetState,                  4,  PL_STATE_OUT,                    ST_NONE)
+VGL_ENTRY(grGlideInit,                      0,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grGlideSetState,                  4,  PL_STATE_IN,                     ST_DRAW)
+VGL_ENTRY(grGlideShutdown,                  0,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grHints,                          8,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grLfbConstantAlpha,               4,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grLfbConstantDepth,               4,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grLfbLock,                       24,  PL_LFBINFO,                      ST_NONE)
+VGL_ENTRY(grLfbUnlock,                      8,  PL_LFBUNLOCK,                    ST_NONE)
+VGL_ENTRY(grLfbWriteColorFormat,            4,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grSplash,                        20,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grSstIdle,                        0,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grSstOrigin,                      4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grSstQueryHardware,               4,  PL_HWCFG,                        ST_NONE)
+VGL_ENTRY(grSstSelect,                      4,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grSstStatus,                      0,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grSstVidMode,                     8,  PL_VIDTIMING,                    ST_NONE)
+VGL_ENTRY(grSstWinClose,                    0,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grSstWinOpen,                    28,  PL_WINOPEN,                      ST_NONE)
+VGL_ENTRY(grTexClampMode,                  12,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grTexCombine,                    28,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grTexCombineFunction,             8,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grTexDetailControl,              16,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grTexDownloadMipMap,             16,  PL_TEXDOWN,                      ST_DRAW)
+VGL_ENTRY(grTexDownloadMipMapLevelPartial, 40,  PL_TEXPART,                      ST_DRAW)
+VGL_ENTRY(grTexDownloadTable,              12,  PL_TEXTABLE,                     ST_DRAW)
+VGL_ENTRY(grTexFilterMode,                 12,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grTexLodBiasValue,                8,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grTexMaxAddress,                  4,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grTexMinAddress,                  4,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grTexMipMapMode,                 12,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(grTexMultibase,                   8,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grTexNCCTable,                    8,  PL_NONE,                         ST_NONE)
+VGL_ENTRY(grTexSource,                     16,  PL_TEXINFO3,                     ST_DRAW)
+VGL_ENTRY(grTexTextureMemRequired,          8,  PL_TEXINFO1,                     ST_NONE)
+VGL_ENTRY(guColorCombineFunction,           4,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(guTexCombineFunction,             8,  PL_NONE,                         ST_DRAW)
+VGL_ENTRY(guTexMemReset,                    0,  PL_NONE,                         ST_NONE)

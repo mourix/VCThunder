@@ -1,0 +1,48 @@
+/* vcthunder.rc -- the pack's resources, and they belong to VCThunder.DLL.
+ * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
+ *
+ * Not to the exe: the loader maps the game over our own image and the exe's PE
+ * headers do not survive it, so a resource lookup against the exe at the moment
+ * a window exists would be reading whatever the game left there. The DLL is an
+ * ordinary module outside the span and keeps everything it was built with.
+ *
+ * The .ico itself is generated: tools/make-icon.py holds the shape as
+ * coordinates. Redraw it there, not in a paint program.
+ */
+#include <windows.h>
+#include "src/resource.h"
+
+IDI_VCTHUNDER ICON "res/vcthunder.ico"
+
+/* What Explorer's Properties tab and every crash reporter read. It carries no
+ * timestamp and no build counter on purpose: two builds of identical source
+ * must stay byte-identical, which is how a change is signed off here. The
+ * version numbers come from src/resource.h and from nowhere else. */
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     VCT_VERSION_MAJOR, VCT_VERSION_MINOR, 0, 0
+PRODUCTVERSION  VCT_VERSION_MAJOR, VCT_VERSION_MINOR, 0, 0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_DLL
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"                    /* US English, Unicode */
+        BEGIN
+            VALUE "CompanyName",      "VCThunder contributors"
+            VALUE "FileDescription",  "VCThunder: a Windows host for Hydro Thunder and Offroad Thunder"
+            VALUE "FileVersion",      VCT_VERSION
+            VALUE "InternalName",     "VCThunder"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 VCThunder contributors. MIT licence."
+            VALUE "OriginalFilename", "VCThunder.dll"
+            VALUE "ProductName",      "VCThunder"
+            VALUE "ProductVersion",   VCT_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 0x04B0
+    END
+END

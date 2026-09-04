@@ -1,0 +1,56 @@
+# This directory is the repository; the workspace around it is not, so most of
+# what used to need excluding is now physically out of reach. What remains:
+
+/build/
+
+# Written by tools/ingest-chd.py from the user's own CHDs: the unpacked games.
+# Game material, so it can never be committed; the extension bans below would
+# catch most of it, but this is the rule that is actually meant.
+/data/
+
+# Written by `make pack`, always, in whichever tree the build ran. It is the
+# user's: tuned ini, both dumps, NVRAM, and none of it is reproducible from this
+# repository. `make clean` does not touch it. `git clean -xdf` WOULD: it deletes
+# ignored files by definition, so use `git clean -xdf -e /run/`.
+/run/
+
+# Derived from the user's own game dump by `make defs`; never committed.
+# NOTE: this comment is on its own line deliberately. A `#` part-way through a
+# gitignore line is NOT a comment, it is part of the pattern, so a trailing
+# comment here silently disables the rule. That had already happened to this
+# exact line, and `git add -A` staged all of generated/ before it was caught.
+/generated/
+
+*.log
+
+# Pre-git snapshots. This repository IS the undo now; what used to live here
+# moved to the workspace's archive/, and nothing new should be snapshotted
+# here again.
+/archive/
+
+__pycache__/
+*.pyc
+
+# Belt and braces. This repository has no reason to contain a binary, a game
+# asset, a disk image or an archive, and every one of those has a way of
+# arriving by accident.
+#
+# `chd/` is what the user supplies: their own CHDs and MAME's chdman. 1.5 GB of
+# CHDs sat untracked in this tree once, one `git add -A` from a public push.
+# The README explaining the directory is kept; anything dropped in is not.
+/chd/*
+!/chd/README.md
+*.chd
+*.exe
+*.dll
+*.img
+*.iso
+*.rar
+*.zip
+*.7z
+*.r2
+*.csh
+*.nvr
+*.omf
+*.bin
+!res/*.ico

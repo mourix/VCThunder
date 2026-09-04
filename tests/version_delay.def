@@ -1,0 +1,8 @@
+; version_delay.def -- the one delay-loaded import build/vcprobe.dll carries.
+; SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
+;
+; dlltool -k turns the decorated stdcall name into the undecorated one
+; version.dll exports.
+LIBRARY version.dll
+EXPORTS
+GetFileVersionInfoSizeA@8

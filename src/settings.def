@@ -1,0 +1,392 @@
+/* settings.def -- every configuration key this host reads, once.
+ * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
+ *
+ * ONE table, three consumers: config.c builds both its defaults and its parser
+ * from it, launcher.c builds its catalogue from it, and
+ * tools/check-launcher-settings.py holds it against the shipped vcthunder.ini.
+ * Nothing else may carry a second copy of any column here: that is the whole
+ * point of the file. src/settings.h carries the row's shape and says why one
+ * table is the only arrangement that can be held to itself.
+ *
+ *      SETTING(section, key, STORE(...), SHOW(...))
+ *          A key the shipped ini carries and the launcher edits. The checker
+ *          requires exactly one of these per shipped key and vice versa.
+ *
+ *      SETTING_DEV(section, key, STORE(...))
+ *          A developer switch: parsed, never shown, and deliberately absent
+ *          from the shipped file (docs/configuration.md §6).
+ *
+ *      STORE(kind, field, default, choices, min, max)
+ *          `field` is a member of shim_config_t. The DEFAULT IS INI TEXT and
+ *          is parsed by the same code the file goes through, so a default that
+ *          could not be written in the file cannot exist.
+ *
+ *      STORE_ELSEWHERE(default, choices, min, max)
+ *          diego.c, dinput.c and input_probe.c read [analog], [ffb] and the
+ *          binding sections from the file themselves, through their own
+ *          section-precedence rule. config.c must not touch those keys; the
+ *          launcher still edits them and the ini still ships them.
+ *
+ * `section` is the CANONICAL section. config.c accepts a known key found in
+ * another section too, because docs/configuration.md §6 promises exactly that
+ * ("the parser takes any key it knows, wherever it finds it"), but it now
+ * says so in the log instead of silently. That fallback needs key names to be
+ * unique across sections, which the checker enforces.
+ */
+
+
+/* ---- PAGE_GRAPHICS: the picture. [graphics] ---------------------------- */
+SETTING("graphics", "vcglide_renderer",
+        STORE(VCT_STORE_ENUM, vcglide_renderer, "auto", "auto|gpu|cpu", 0, 0),
+        SHOW(PAGE_GRAPHICS, "Renderer", ST_ENUM, SF_NONE, WARNING_NONE,
+             "Automatic tries the GPU and safely falls back to the CPU renderer."))
+SETTING("graphics", "vcglide_threads",
+        STORE(VCT_STORE_UINT, vcglide_threads, "0", NULL, 0, 16),
+        SHOW(PAGE_GRAPHICS, "CPU renderer workers", ST_UINT, SF_NONE, WARNING_NONE,
+             "0 uses one worker per physical core; 1 disables threading."))
+SETTING("graphics", "fullscreen",
+        STORE(VCT_STORE_BOOL, fullscreen, "false", NULL, 0, 0),
+        SHOW(PAGE_GRAPHICS, "Start borderless fullscreen", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("graphics", "window_scale",
+        STORE(VCT_STORE_UINT_AUTO, window_scale, "1", NULL, 1, 8),
+        SHOW(PAGE_GRAPHICS, "Window scale", ST_AUTO_UINT, SF_NONE, WARNING_NONE,
+             "Automatic selects the largest fitting integer scale."))
+SETTING("graphics", "render_scale",
+        STORE(VCT_STORE_UINT, render_scale, "1", NULL, 1, 8),
+        SHOW(PAGE_GRAPHICS, "Internal 3D scale", ST_UINT, SF_NONE, WARNING_NONE,
+             "GPU renderer only; software HUD and menus remain native resolution."))
+SETTING("graphics", "aspect",
+        STORE(VCT_STORE_ENUM, aspect, "raster", "raster|4:3|16:9|stretch", 0, 0),
+        SHOW(PAGE_GRAPHICS, "Aspect ratio", ST_ENUM,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("graphics", "widescreen",
+        STORE(VCT_STORE_BOOL, widescreen, "false", NULL, 0, 0),
+        SHOW(PAGE_GRAPHICS, "Widescreen hack", ST_BOOL, SF_NONE, WARNING_NONE,
+             "Hor+ widens the frustum instead of stretching; off is the cabinet raster."))
+SETTING("graphics", "raster_height",
+        STORE(VCT_STORE_UINT_AUTO, raster_height, "400", NULL, 1, 4096),
+        SHOW(PAGE_GRAPHICS, "Cabinet raster height", ST_AUTO_UINT, SF_NONE, WARNING_NONE,
+             "400 preserves the cabinet's full artwork; automatic crops 400-row pages."))
+SETTING("graphics", "video_mode",
+        STORE(VCT_STORE_MODE, video_mode, "auto", "auto|0|1|2", 0, 2),
+        SHOW(PAGE_GRAPHICS, "Game video-mode table entry", ST_ENUM,
+             SF_NONE, WARNING_DANGER,
+             "Mode 2 is a bench/emulator mode and can damage an original arcade monitor."))
+
+/* ---- PAGE_AUDIO: [audio] ----------------------------------------------- */
+SETTING("audio", "audio",
+        STORE(VCT_STORE_BOOL, audio, "true", NULL, 0, 0),
+        SHOW(PAGE_AUDIO, "Enable audio", ST_BOOL, SF_NONE, WARNING_NONE, NULL))
+SETTING("audio", "volume",
+        STORE(VCT_STORE_UINT, audio_volume, "100", NULL, 0, 400),
+        SHOW(PAGE_AUDIO, "Host volume (%)", ST_UINT, SF_NONE, WARNING_NONE, NULL))
+SETTING("audio", "output",
+        STORE(VCT_STORE_ENUM, audio_routing, "mix", "mix|cabinet|front", 0, 0),
+        SHOW(PAGE_AUDIO, "Output routing", ST_ENUM, SF_NONE, WARNING_NONE,
+             "Cabinet keeps the front-speaker and seat-woofer buses on separate channels."))
+SETTING("audio", "balance",
+        STORE(VCT_STORE_UINT, audio_balance, "15", NULL, 0, 100),
+        SHOW(PAGE_AUDIO, "Audio balance", ST_UINT, SF_NONE, WARNING_NONE,
+             "50 is both buses at unity; below it attenuates the seat woofer, "
+             "above it the front speakers. Never adds gain."))
+SETTING("audio", "dcs_ms",
+        /* audio_shutdown() waits up to 500 ms for the worker; the ceiling keeps
+         * its uninterruptible fallback sleep comfortably inside that bound. */
+        STORE(VCT_STORE_UINT, dcs_ms, "5", NULL, 1, 100),
+        SHOW(PAGE_AUDIO, "Audio interrupt period (ms)", ST_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+
+/* ---- PAGE_DEVICES: [analog], read by diego.c and dinput.c -------------- */
+SETTING("analog", "provider",
+        STORE_ELSEWHERE("auto", "auto|dinput|xinput|winmm|none", 0, 0),
+        SHOW(PAGE_DEVICES, "Analogue provider", ST_ENUM,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "deadzone_percent",
+        STORE_ELSEWHERE("12", NULL, 0, 49),
+        SHOW(PAGE_DEVICES, "Pad deadzone (%)", ST_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "pov_digital",
+        STORE_ELSEWHERE("true", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "POV/D-pad overrides analogue axes", ST_BOOL,
+             SF_NONE, WARNING_NONE, "Normally disable this for a wheel."))
+SETTING("analog", "xinput_device",
+        STORE_ELSEWHERE("0", NULL, 0, 3),
+        SHOW(PAGE_DEVICES, "XInput device index", ST_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "xinput_steering_axis",
+        STORE_ELSEWHERE("lx", "lx|ly|rx|ry|lt|rt|none", 0, 0),
+        SHOW(PAGE_DEVICES, "XInput steering axis", ST_ENUM,
+             SF_AXIS, WARNING_NONE, NULL))
+SETTING("analog", "xinput_throttle_axis",
+        STORE_ELSEWHERE("rt", "lx|ly|rx|ry|lt|rt|none", 0, 0),
+        SHOW(PAGE_DEVICES, "XInput throttle axis", ST_ENUM,
+             SF_AXIS, WARNING_NONE, NULL))
+SETTING("analog", "xinput_brake_axis",
+        STORE_ELSEWHERE("lt", "lx|ly|rx|ry|lt|rt|none", 0, 0),
+        SHOW(PAGE_DEVICES, "XInput brake axis", ST_ENUM,
+             SF_AXIS, WARNING_NONE, NULL))
+SETTING("analog", "xinput_steering_invert",
+        STORE_ELSEWHERE("false", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "Invert XInput steering", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "xinput_throttle_invert",
+        STORE_ELSEWHERE("false", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "Invert XInput throttle", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "xinput_brake_invert",
+        STORE_ELSEWHERE("false", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "Invert XInput brake", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "winmm_device",
+        STORE_ELSEWHERE("0", NULL, 0, 65535),
+        SHOW(PAGE_DEVICES, "WinMM device index", ST_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "winmm_steering_axis",
+        STORE_ELSEWHERE("x", "x|y|z|r|u|v|none", 0, 0),
+        SHOW(PAGE_DEVICES, "WinMM steering axis", ST_ENUM,
+             SF_AXIS, WARNING_NONE, NULL))
+SETTING("analog", "winmm_throttle_axis",
+        STORE_ELSEWHERE("y", "x|y|z|r|u|v|none", 0, 0),
+        SHOW(PAGE_DEVICES, "WinMM throttle axis", ST_ENUM,
+             SF_AXIS, WARNING_NONE, NULL))
+SETTING("analog", "winmm_brake_axis",
+        STORE_ELSEWHERE("none", "x|y|z|r|u|v|none", 0, 0),
+        SHOW(PAGE_DEVICES, "WinMM brake axis", ST_ENUM,
+             SF_AXIS, WARNING_NONE, NULL))
+SETTING("analog", "winmm_pedal_mode",
+        STORE_ELSEWHERE("combined", "combined|separate", 0, 0),
+        SHOW(PAGE_DEVICES, "WinMM pedal mode", ST_ENUM,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "winmm_steering_invert",
+        STORE_ELSEWHERE("false", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "Invert WinMM steering", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "winmm_throttle_invert",
+        STORE_ELSEWHERE("true", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "Invert WinMM throttle", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "winmm_brake_invert",
+        STORE_ELSEWHERE("false", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "Invert WinMM brake", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "dinput_device",
+        STORE_ELSEWHERE("auto", NULL, 0, 15),
+        SHOW(PAGE_DEVICES, "DirectInput device index", ST_AUTO_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "dinput_name",
+        STORE_ELSEWHERE("", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "DirectInput name match", ST_TEXT,
+             SF_NONE, WARNING_NONE,
+             "A case-insensitive product-name substring; takes precedence over the index."))
+SETTING("analog", "dinput_deadzone_percent",
+        STORE_ELSEWHERE("0", NULL, 0, 49),
+        SHOW(PAGE_DEVICES, "Wheel deadzone (%)", ST_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "dinput_steering_axis",
+        STORE_ELSEWHERE("x", "x|y|z|rx|ry|rz|slider0|slider1|none", 0, 0),
+        SHOW(PAGE_DEVICES, "DirectInput steering axis", ST_ENUM,
+             SF_AXIS, WARNING_NONE, NULL))
+SETTING("analog", "dinput_throttle_axis",
+        STORE_ELSEWHERE("y", "x|y|z|rx|ry|rz|slider0|slider1|none", 0, 0),
+        SHOW(PAGE_DEVICES, "DirectInput throttle axis", ST_ENUM,
+             SF_AXIS, WARNING_NONE, NULL))
+SETTING("analog", "dinput_brake_axis",
+        STORE_ELSEWHERE("rz", "x|y|z|rx|ry|rz|slider0|slider1|none", 0, 0),
+        SHOW(PAGE_DEVICES, "DirectInput brake axis", ST_ENUM,
+             SF_AXIS, WARNING_NONE, NULL))
+SETTING("analog", "dinput_pedal_mode",
+        STORE_ELSEWHERE("separate", "combined|separate", 0, 0),
+        SHOW(PAGE_DEVICES, "DirectInput pedal mode", ST_ENUM,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "dinput_steering_invert",
+        STORE_ELSEWHERE("false", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "Invert DirectInput steering", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "dinput_throttle_invert",
+        STORE_ELSEWHERE("true", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "Invert DirectInput throttle", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "dinput_brake_invert",
+        STORE_ELSEWHERE("true", NULL, 0, 0),
+        SHOW(PAGE_DEVICES, "Invert DirectInput brake", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("analog", "dinput_steering_range_percent",
+        STORE_ELSEWHERE("100", NULL, 5, 100),
+        SHOW(PAGE_DEVICES, "Wheel travel used (%)", ST_UINT,
+             SF_NONE, WARNING_NONE,
+             "100 suits a wheel set to the cabinet's roughly 270-degree range."))
+
+/* ---- PAGE_FFB: [ffb], read by dinput.c --------------------------------- */
+SETTING("ffb", "enabled",
+        STORE_ELSEWHERE("true", NULL, 0, 0),
+        SHOW(PAGE_FFB, "Enable force feedback", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("ffb", "invert",
+        STORE_ELSEWHERE("true", NULL, 0, 0),
+        SHOW(PAGE_FFB, "Invert motor direction", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("ffb", "strength_percent",
+        STORE_ELSEWHERE("100", NULL, 0, 200),
+        SHOW(PAGE_FFB, "Game-force scale (%)", ST_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("ffb", "device_gain_percent",
+        STORE_ELSEWHERE("100", NULL, 0, 100),
+        SHOW(PAGE_FFB, "Device gain (%)", ST_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("ffb", "autocenter",
+        STORE_ELSEWHERE("false", NULL, 0, 0),
+        SHOW(PAGE_FFB, "Driver autocentre", ST_BOOL, SF_NONE, WARNING_CAUTION,
+             "Normally keep this off: it adds a second force to the arcade game's own motor command."))
+
+/* ---- PAGE_SYSTEM: [timing] and [controls] ------------------------------ */
+SETTING("timing", "cpu_hz",
+        STORE(VCT_STORE_UINT, cpu_hz, "333000000", NULL, 1000000, 4000000000ul),
+        SHOW(PAGE_SYSTEM, "Cabinet CPU identity (MHz)", ST_MHZ_UINT,
+             SF_NONE, WARNING_NONE,
+             "This identifies the emulated Celeron; it does not control game speed."))
+SETTING("timing", "speed_percent",
+        STORE(VCT_STORE_UINT, speed_percent, "100", NULL, 25, 400),
+        SHOW(PAGE_SYSTEM, "Game-clock speed (%)", ST_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("controls", "dip_switches",
+        STORE(VCT_STORE_UINT, dip_switches, "0xFF", NULL, 0, 255),
+        SHOW(PAGE_SYSTEM, "DIP switch byte", ST_UINT,
+             SF_HEX, WARNING_NONE, NULL))
+SETTING("controls", "io_ms",
+        STORE(VCT_STORE_UINT, io_ms, "16", NULL, 1, 60000),
+        SHOW(PAGE_SYSTEM, "I/O board poll period (ms)", ST_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("controls", "input_background",
+        STORE(VCT_STORE_BOOL, input_background, "true", NULL, 0, 0),
+        SHOW(PAGE_SYSTEM, "Sample controls in the background", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+
+/* ---- PAGE_LINK: [link], the arcade link's transport -------------------- */
+/* Both titles carry packets here with two instances on one machine:
+ * discovery, a linked race, and a peer dropping and recovering. Two machines
+ * and a cabinet have not been tried, so `off` stays the default and `lan` says
+ * in its own help that its second machine is unmeasured. Whether the link is
+ * enabled and which unit this cabinet is stay the GAME'S own operator
+ * settings, in NVRAM: nothing here duplicates them, because two places to set
+ * one thing is a trap, and the launcher page says so on screen. */
+SETTING("link", "link",
+        STORE(VCT_STORE_ENUM, link, "off", "off|lan|local", 0, 0),
+        SHOW(PAGE_LINK, "Arcade link", ST_ENUM, SF_NONE, WARNING_CAUTION,
+             "Local is two instances on this machine; lan is a second machine, "
+             "which has never been measured."))
+SETTING("link", "link_rx_budget",
+        STORE(VCT_STORE_UINT, link_rx_budget, "64", NULL, 1, 4096),
+        SHOW(PAGE_LINK, "Receive budget (datagrams per frame)", ST_UINT,
+             SF_NONE, WARNING_NONE,
+             "Hydro's drain has no upper bound of its own; this supplies one."))
+
+/* ---- PAGE_FILES: [paths] and the two log files ------------------------- */
+SETTING("paths", "data_dir",
+        STORE(VCT_STORE_STR, data_dir, "data", NULL, 0, 0),
+        SHOW(PAGE_FILES, "Game data folder", ST_TEXT,
+             SF_REQUIRED | SF_DIR, WARNING_NONE, NULL))
+SETTING("paths", "save_dir",
+        STORE(VCT_STORE_STR, save_dir, "save", NULL, 0, 0),
+        SHOW(PAGE_FILES, "Save-data folder", ST_TEXT,
+             SF_REQUIRED | SF_DIR, WARNING_NONE, NULL))
+SETTING("diagnostics", "log_file",
+        STORE(VCT_STORE_STR, log_file, "vcthunder.log", NULL, 0, 0),
+        SHOW(PAGE_FILES, "Host log file", ST_TEXT,
+             SF_REQUIRED | SF_SAVE_FILE, WARNING_NONE, NULL))
+SETTING("diagnostics", "log_level",
+        STORE(VCT_STORE_LEVEL, log_level, "info", "error|warn|info|trace", 0, 0),
+        SHOW(PAGE_FILES, "Host log level", ST_ENUM,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("graphics", "vcglide_log",
+        STORE(VCT_STORE_STR, vcglide_log, "vcglide.log", NULL, 0, 0),
+        SHOW(PAGE_FILES, "Renderer log file", ST_TEXT,
+             SF_REQUIRED | SF_SAVE_FILE, WARNING_NONE, NULL))
+
+/* ---- PAGE_TROUBLE: the switches that are safe to leave on -------------- */
+SETTING("diagnostics", "r2_cache",
+        STORE(VCT_STORE_BOOL, r2_cache, "true", NULL, 0, 0),
+        SHOW(PAGE_TROUBLE, "Enable R2 directory cache", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("diagnostics", "stall_ms",
+        STORE(VCT_STORE_UINT, stall_ms, "60", NULL, 0, 60000),
+        SHOW(PAGE_TROUBLE, "Frame-stall threshold (ms)", ST_UINT,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("graphics", "vcglide_verbose",
+        STORE(VCT_STORE_BOOL, vcglide_verbose, "false", NULL, 0, 0),
+        SHOW(PAGE_TROUBLE, "Verbose renderer entry log", ST_BOOL,
+             SF_NONE, WARNING_NONE, NULL))
+SETTING("graphics", "glide_capture",
+        STORE(VCT_STORE_STR, glide_capture, "", NULL, 0, 0),
+        SHOW(PAGE_TROUBLE, "Glide capture file", ST_TEXT,
+             SF_SAVE_FILE, WARNING_NONE,
+             "Capturing is expensive; do not time a capture run."))
+SETTING("graphics", "glide_capture_frames",
+        STORE(VCT_STORE_UINT, glide_capture_frames, "60", NULL, 0, 0xFFFFFFFFul),
+        SHOW(PAGE_TROUBLE, "Capture/frame-dump length", ST_UINT,
+             SF_NONE, WARNING_NONE,
+             "0 continues until the game exits."))
+SETTING("graphics", "glide_frames",
+        STORE(VCT_STORE_STR, glide_frames, "", NULL, 0, 0),
+        SHOW(PAGE_TROUBLE, "Frame-dump folder", ST_TEXT, SF_DIR, WARNING_NONE,
+             "Frame dumping reads back and writes PNG files on the render thread."))
+
+/* ---- Not shown, and not shipped ---------------------------------------- */
+/*
+ * Parsed wherever they are found, absent from vcthunder.ini, and absent
+ * from the launcher's array on purpose: save_settings() writes every entry of
+ * that array back to the file, so one of these in it would be injected into
+ * the user's ini the first time they opened the window.
+ * docs/configuration.md §6 says what they are and why none of them ships.
+ */
+/* Empty on purpose: both paths are derived from the selected title once it is
+ * known (game_resolve_paths). A default of data\HYDRO.EXE would silently win
+ * over an Offroad-only pack. --exe overrides it from the command line. */
+SETTING_DEV("paths", "exe",
+        STORE(VCT_STORE_STR, exe, "", NULL, 0, 0))
+/* Only `sim` is implemented; `serial` is M6's, when there is a board to reach.
+ * The selector is parsed so asking for one that is not built yet gets diego.c's
+ * explicit warning, but it is not advertised in the shipped file. */
+SETTING_DEV("controls", "backend",
+        STORE(VCT_STORE_STR, io_backend, "sim", NULL, 0, 0))
+SETTING_DEV("controls", "port",
+        STORE(VCT_STORE_STR, io_port, "", NULL, 0, 0))
+/* The developer switches. Each is off by default, each ruins or slows
+ * something on purpose, and each stays implemented to re-falsify a closed
+ * result. docs/configuration.md §6 says why none of them ships. */
+SETTING_DEV("diagnostics", "profile_ms",
+        STORE(VCT_STORE_UINT, profile_ms, "0", NULL, 0, 100))
+SETTING_DEV("diagnostics", "time_calls",
+        STORE(VCT_STORE_BOOL, time_calls, "false", NULL, 0, 0))
+/* On, and it should stay on: unfenced, the timer's two rdtsc reads retire
+ * together and the interval is not the interval that elapsed. */
+SETTING_DEV("diagnostics", "time_fence",
+        STORE(VCT_STORE_BOOL, time_fence, "true", NULL, 0, 0))
+SETTING_DEV("diagnostics", "glide_timing",
+        STORE(VCT_STORE_BOOL, glide_timing, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "glide_first_call",
+        STORE(VCT_STORE_BOOL, glide_first_call, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "win32_counting",
+        STORE(VCT_STORE_BOOL, win32_counting, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "count_loops",
+        STORE(VCT_STORE_BOOL, count_loops, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "margin_census",
+        STORE(VCT_STORE_BOOL, margin_census, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "margin_trace",
+        STORE(VCT_STORE_BOOL, margin_trace, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "null_draw",
+        STORE(VCT_STORE_UINT, null_draw, "0", NULL, 0, 3))
+SETTING_DEV("diagnostics", "null_water",
+        STORE(VCT_STORE_BOOL, null_water, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "null_fog",
+        STORE(VCT_STORE_BOOL, null_fog, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "no_additive_light",
+        STORE(VCT_STORE_BOOL, no_additive_light, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "trace_draw_state",
+        STORE(VCT_STORE_UINT, trace_draw_state, "0", NULL, 0, 86400))
+SETTING_DEV("diagnostics", "trace_lod",
+        STORE(VCT_STORE_UINT, trace_lod, "0", NULL, 0, 86400))
+SETTING_DEV("diagnostics", "lfb_shadow",
+        STORE(VCT_STORE_BOOL, lfb_shadow, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "sse_ftz",
+        STORE(VCT_STORE_BOOL, sse_ftz, "false", NULL, 0, 0))

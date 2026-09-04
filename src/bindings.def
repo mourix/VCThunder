@@ -1,0 +1,106 @@
+/* bindings.def -- every cabinet control this host binds, once.
+ * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
+ *
+ * ONE table, three consumers, and they read different columns:
+ *
+ *   io_config.c  the DEFAULTS and the ini keys: what `[digital] boost` and
+ *                `[gamepad] boost` fall back to when the file does not carry
+ *                them, per cabinet.
+ *   io_board.c   which SWITCH LINE each logical button lands on, so the packer
+ *                can place it in whichever of the two wire formats is running.
+ *   launcher.c   the LABELS, and the same defaults again as the text it writes
+ *                back into the file.
+ *
+ * Nothing else may carry a second copy of any column here. A binding present
+ * in one consumer and missing from another is a control the user can configure
+ * and the cabinet never reads, and this file is the only thing holding the
+ * three to each other. tools/check-launcher-settings.py holds this file to the
+ * shipped ini. Same arrangement, and for the same reason, as src/settings.def.
+ *
+ *      BINDING(key, hydro, offroad, pad_default, button, hydro_label,
+ *              offroad_label)
+ *          A control with both halves: a keyboard key in [digital] and a
+ *          controller button ordinal in [gamepad].
+ *
+ *      BINDING_AXIS(key, hydro, offroad, hydro_label, offroad_label)
+ *          Keyboard only. These four are MAME's digital increment/decrement
+ *          inputs for an analogue field; a controller drives the axis itself,
+ *          so there is no ordinal to bind.
+ *
+ *      BINDING_PAD(key, pad_default, hydro_label, offroad_label)
+ *          Controller only: Offroad's three-position gate as two paddles,
+ *          which no keyboard key corresponds to (the three gears do).
+ *
+ * `key` is a bare identifier, and it is three things at once, which is the
+ * point: the ini key in BOTH sections, the `controls_config_t` member holding
+ * the resolved key code, and -- with a `pad_` prefix -- the member holding the
+ * ordinal. A row cannot name one of those and not the others.
+ *
+ * `hydro` and `offroad` are MAME key NAMES and not key codes, so a default goes
+ * through parse_vk() exactly as a value from the file does: a default that
+ * could not be written in the ini cannot exist. `NONE` is a real answer and
+ * means the cabinet has no such control.
+ *
+ * `button` is the logical switch line in src/io.h, or BTN_NONE for a control
+ * that is not one: the coin slots are counters, and the shifter paddles drive
+ * a latch that produces one of the three gear lines.
+ *
+ * A NULL `hydro_label` means the control is Offroad's alone; the launcher hides
+ * it while Hydro is selected. Nothing else distinguishes a per-title action.
+ */
+
+/* ---- coins and the operator panel --------------------------------------- */
+BINDING     (coin1,        "5",      "5",      7, BTN_NONE,
+             "Coin 1",      "Coin 1")
+BINDING     (coin2,        "6",      "6",      0, BTN_NONE,
+             "Coin 2",      "Coin 2")
+BINDING     (start1,       "1",      "1",      8, BTN_START,
+             "Start",       "Start")
+BINDING     (service1,     "9",      "9",      0, BTN_SERVICE,
+             "Service credit", "Service credit")
+BINDING     (service_mode, "F2",     "F2",     0, BTN_TEST,
+             "Operator menu", "Operator menu")
+
+/* ---- the analogue fields, as digital overrides --------------------------- */
+BINDING_AXIS(steer_left,   "LEFT",   "LEFT",
+             "Steer left",  "Steer left")
+BINDING_AXIS(steer_right,  "RIGHT",  "RIGHT",
+             "Steer right", "Steer right")
+/* Offroad has a pedal box where Hydro has a throttle lever, so gas and brake
+ * move off the arrows onto Ctrl and Alt. That frees the modifiers Hydro used
+ * for its views, which is why the two cabinets disagree from here down. */
+BINDING_AXIS(throttle,     "UP",     "LCTRL",
+             "Throttle",    "Throttle")
+BINDING_AXIS(brake,        "DOWN",   "LALT",
+             "Brake",       "Brake")
+
+/* ---- what the player's hands are on -------------------------------------- */
+BINDING     (boost,        "LCTRL",  "SPACE",  1, BTN_BOOST,
+             "Boost",       "Nitro")
+BINDING     (view_high,    "LALT",   "V",      2, BTN_VIEW1,
+             "High view",   "Slam cam")
+BINDING     (view_low,     "SPACE",  "B",      3, BTN_VIEW2,
+             "Low view",    "Chase cam")
+BINDING     (view_pilot,   "LSHIFT", "N",      4, BTN_VIEW3,
+             "Pilot view",  "Chopper cam")
+BINDING     (volume_down,  "MINUS",  "MINUS",  0, BTN_VOL_DN,
+             "Volume down", "Volume down")
+BINDING     (volume_up,    "EQUALS", "EQUALS", 0, BTN_VOL_UP,
+             "Volume up",   "Volume up")
+
+/* ---- Offroad's three-speed shifter --------------------------------------- */
+/* Maintained lines, not edges: no SHIFT bit set is how the game derives
+ * neutral. Hydro has no shifter, so its default is NONE rather than a key it
+ * would ignore. */
+BINDING     (shift1,       "NONE",   "Z",      0, BTN_SHIFT1,
+             NULL,          "Gear 1")
+BINDING     (shift2,       "NONE",   "X",      0, BTN_SHIFT2,
+             NULL,          "Gear 2")
+BINDING     (shift3,       "NONE",   "C",      0, BTN_SHIFT3,
+             NULL,          "Gear 3")
+/* The same gate on two paddles: each rising edge steps a latch that produces
+ * one of the three lines above. See sequential_shift() in io_board.c. */
+BINDING_PAD (shift_up,                         0,
+             NULL,          "Shift up")
+BINDING_PAD (shift_down,                       0,
+             NULL,          "Shift down")

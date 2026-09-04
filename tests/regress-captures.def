@@ -1,0 +1,51 @@
+# regress-captures.def -- the captures `make regress` replays, and which tier.
+# SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
+#
+# ONE TABLE, so that "which captures does a renderer change have to survive"
+# stops being something each session works out again from prose. Every row
+# is a capture of a real game and therefore CANNOT live in this repository:
+# tools/scan-contraband.py refuses game material, correctly. What lives here is
+# a path, a frame count and a reason.
+#
+# The paths are relative to the WORKSPACE the maintainer's checkout sits in
+# (the directory holding analysis/, see scripts/titles.py). A clone has no
+# workspace and no captures, and `make regress` there reports that it did not
+# run, exactly as the dump, capstone and CHD checks in `make check` do. It is
+# not a check a stranger can run, and it must not pretend to be.
+#
+#     tier   quick = seconds, the boot of both titles. full = quick, and then
+#            the three long captures the renderer's results were derived from.
+#            THE TWO ARE NOT THE SAME CHECK. A one-line change to the CPU fog
+#            interpolation, measured 2026-08-31 against every row here, ran
+#            clean through the whole of quick and moved 423 of 1,600 frames in
+#            hydro-m3 and 535 of 1,800 in offroad-mode2. It moved nothing
+#            through the GPU backend (fog is in the shader there) and nothing
+#            in hydro-texfix, which is 1,500 frames of the same game captured
+#            with the shipped workaround and reaching different state. Two long
+#            captures of one title are not interchangeable; that is why each row
+#            below carries a reason and not just a path.
+#     title  which game, so a failure names one.
+#     frames what the capture holds. A replay that produces a different number
+#            is a truncated or a mis-read capture, and the comparison that
+#            follows would be meaningless rather than failing.
+#     path   relative to the workspace root.
+#
+# tier   title    frames  path
+quick    hydro       60   analysis/hydro/m2-seam/hydro-boot.vglc
+quick    offroad     60   analysis/offroad/m2-seam/offroad-boot.vglc
+
+# The M3 capture: rendered entirely by vcglide.dll with detail_texture on, so
+# the LOD-fraction combine across the split even/odd chain is IN it. A capture
+# taken with the shipped workaround cannot express the defect M3 exists for.
+full     hydro     1600   analysis/hydro/m3-live/hydro-m3.vglc
+
+# 408 palette downloads in 60 frames, against Hydro's one in 1,500. That
+# difference alone caught a texture-cache bug that 1,600 identical Hydro frames
+# called perfect, which is why no renderer change is signed off on one title.
+full     offroad   1800   analysis/offroad/oracle/run-mode2/offroad-mode2.vglc
+
+# The corrected 1,500-frame Hydro capture: sizes a grTexDownloadMipMap payload
+# as the parity evenOdd selects rather than as the whole chain. Its predecessor
+# in m2-long/ under-reads every split mip chain and is kept as evidence, not as
+# an input.
+full     hydro     1500   analysis/hydro/m2-texfix/hydro-texfix.vglc
