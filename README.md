@@ -9,7 +9,14 @@ This project was a personal challenge to see how far Claude Opus 5 could be leve
 
 ## Building
 
-Use **WSL** or an **MSYS2 MINGW32** shell. You need `i686-w64-mingw32-gcc`, `make`, and `python3`.
+Build from **WSL** or from an **MSYS2 MINGW32** shell, **not from PowerShell or `cmd`**.
+
+**0. Get the toolchain.** `i686-w64-mingw32-gcc`, `make` and `python3`.
+
+```sh
+sudo apt install gcc-mingw-w64-i686 make python3   # WSL / Debian / Ubuntu
+pacman -S mingw-w64-i686-toolchain make python     # MSYS2, from the MINGW32 shell
+```
 
 **1. Put your two game CHDs in `chd/`.** You supply the legal dumps.
 

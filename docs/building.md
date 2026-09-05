@@ -77,15 +77,31 @@ make defs PYTHON=/ucrt64/bin/python3
 make defs PYTHON=/c/Python313/python.exe      # or a native Windows Python: pip install capstone
 ```
 
+### WSL
+
+Install the cross toolchain; nothing else is needed and no Python packages are:
+
+```sh
+sudo apt install gcc-mingw-w64-i686 make python3
+```
+
+`gcc-mingw-w64-i686` pulls in `binutils-mingw-w64-i686`, which is where the `objdump` the exe link
+checks with comes from.
+
 ### MSYS2
 
 Install the 32-bit toolchain and build from the **MINGW32** shell:
 
 ```sh
-pacman -S mingw-w64-i686-toolchain make
+pacman -S mingw-w64-i686-toolchain make python
 ```
 
 `windres` is not cross-prefixed under MSYS2 and the Makefile handles that.
+
+**MINGW32 is on a clock.** MSYS2 began phasing out its 32-bit environments on 2023-12-13 and
+removed CLANG32 on 2024-12-18; `mingw-w64-i686-*` packages are dropped as they go. The toolchain
+itself is current. `mingw-w64-i686-gcc` 16.2.0-3, built 2026-08-09, so this route works today
+and WSL is the one that is not on anyone else's schedule.
 
 ## Targets
 

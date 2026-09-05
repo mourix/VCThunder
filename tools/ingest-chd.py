@@ -907,6 +907,13 @@ def run_auto(a):
         print("    make setup")
         print("\nThat builds the address tables from your dump, builds the")
         print("host, and stages a run directory you can launch.")
+        # This script runs happily under a native Windows Python in PowerShell,
+        # and then hands the reader a command that cannot work there: the
+        # Makefile is POSIX shell throughout. Say so at the handoff rather than
+        # letting make say it with CreateProcess(NULL, echo, ...) failed.
+        if os.name == "nt" and "MSYSTEM" not in os.environ:
+            print("\nRun it from WSL or an MSYS2 MINGW32 shell, not PowerShell")
+            print("or cmd: the build needs a POSIX shell. See docs/building.md.")
     return 0 if done and not failed else 1
 
 
