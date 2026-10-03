@@ -383,13 +383,10 @@ void profile_attract_poll(void)
  * This holds target, instrument, thread, and time constant while changing the
  * caller and cache state. */
 static unsigned char *s_pollute;
-/* Must exceed the last-level cache, or the sweep measures nothing.
- *
- * The first version of this stopped at 4 MB and topped out at 95 cycles/call,
- * which looked like "cache pressure cannot explain the game's 750". It could not
- * have: this part has a 32 MB L3, so a 4 MB stream only pushes the stub's lines
- * from L1 into L3, and an L3 hit is ~50 cycles. Only a stream LARGER than the L3
- * makes the next touch go to DRAM, which is the case the game is actually in. */
+/* Must exceed the last-level cache, or the sweep measures nothing: a stream
+ * smaller than the L3 only pushes the stub's lines from L1 into L3. Only a
+ * stream LARGER than the L3 (32 MB on the measuring machine) makes the next
+ * touch go to DRAM, which is the case the game is actually in. */
 #define POLLUTE_BYTES (64u << 20)
 
 typedef float (__cdecl *sqrt_fn)(float);

@@ -1,30 +1,13 @@
 /* glide_int.h -- the seam between glide_bind.c and its two subsystems.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * Three files, one subject. glide_bind.c binds the Glide entry points and owns
- * the frame-pacing, stall and call-mix reporting; two subsystems that are
- * genuinely separable from it sit beside it and reach it only through here:
- *
- *   widescreen.c   the Hor+ engine; the seam origin, the widened frustum,
- *                  the six title-scoped repair hooks, the primitive shift and
- *                  the margin census. It needs one number from the binding
- *                  (the visible raster width) and the binding needs four
- *                  answers from it, all below.
- *   watchdog.c     the hang watchdog and its stack walk. Self-contained: it
- *                  owns a thread and reads one timestamp.
- *
- * THE REPORTING STAYS WITH THE BINDING, and a fourth file for it would be a
- * mistake. The frame-timing, stall and Glide call-mix reports exist to report
- * the BINDING'S OWN per-entry-point counters and timers: glide_bind() hands
- * their addresses to the thunks it builds, and the reports read the same
- * arrays. Separating them buys an interface of a dozen accessors over shared
- * arrays, which is a WIDER seam than the file boundary it would replace and no
- * clearer. A subsystem earns its own file by being separable, not by being
- * large.
- *
- * Not a public interface: src/vcthunder.h carries those. This is private to
- * the three files, which is why it is not in it.
- */
+ * glide_bind.c binds the Glide entry points and owns the frame-pacing, stall and
+ * call-mix reporting; widescreen.c (the Hor+ engine) and watchdog.c (the hang
+ * watchdog and its stack walk) reach it only through here. The reporting stays
+ * with the binding because it reads the binding's own counters and timers:
+ * splitting it out would buy a dozen accessors over shared state, a WIDER seam
+ * than the file boundary it replaced. Private to the three; src/vcthunder.h
+ * carries the public interface. */
 #ifndef VCT_GLIDE_INT_H
 #define VCT_GLIDE_INT_H
 
@@ -34,9 +17,8 @@
  * and the widescreen engine's LFB repair test it. */
 #define GR_LFB_READ_ONLY  0x00
 
-/* Read an optional game global without dereferencing an absent profile anchor.
- * `0` is a real answer from the generator and means the title does not have
- * this one, so it can never be followed. Both files read profile globals. */
+/* Read an optional game global without dereferencing an absent anchor: `0` is a
+ * real answer from the generator and can never be followed. */
 static inline int rd_opt(uint32_t va, int absent)
 {
     return va ? *(const int *)(uintptr_t)va : absent;
@@ -48,6 +30,9 @@ static inline int rd_opt(uint32_t va, int absent)
  * surface, which may be wider. Its reports name it and its origin is computed
  * against it. */
 int  glide_view_width(void);
+/* Have the provider black both side strips at the next swap, even where the
+ * frame drew into them. A no-op on a provider without vglBlackMargins. */
+void glide_black_margins(void);
 
 /* ---- what the binding needs from widescreen.c --------------------------- */
 
@@ -69,13 +54,12 @@ void ws_frame_boundary(void);
 float ws_origin(void);
 /* The byte offset a READ_ONLY LFB lock should be displaced by, or 0.
  *
- * Hydro projects a lens flare in the game's native field and then the
- * primitive seam moves it by the origin; its occlusion test is a READ_ONLY
- * lock that samples that projected x directly, so this one scoped caller is
- * shown the displayed pixel. Every other read lock, and grLfbReadRegion, stays
- * raw: capture and conformance coordinates deliberately name the provider
- * surface. `stride` bounds the displacement; the answer is 0 if it would not
- * fit. Reports itself once, the first time it is non-zero. */
+ * Hydro projects a lens flare in the game's native field and the primitive seam
+ * then moves it by the origin; its occlusion test is a READ_ONLY lock sampling
+ * that projected x, so this one scoped caller is shown the displayed pixel.
+ * Every other read lock and grLfbReadRegion stays raw, capture and
+ * conformance coordinates name the provider surface. `stride` bounds the
+ * displacement. Reports itself once. */
 unsigned ws_lfb_read_offset(int lock_type, unsigned stride);
 
 /* ---- watchdog.c --------------------------------------------------------- */

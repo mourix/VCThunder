@@ -8,6 +8,7 @@
  */
 #include "vcthunder.h"
 #include "settings.h"
+#include "ini.h"
 
 #include <string.h>
 
@@ -46,4 +47,27 @@ int vct_choice_contains(const char *choices, const char *value)
         p = end + 1;
     }
     return 0;
+}
+
+/* XInput's six axis names, from settings.def's xinput_throttle_axis row. */
+static const char *xinput_axes(void)
+{
+    unsigned i;
+
+    for (i = 0; i < VCT_SETTING_COUNT; i++)
+        if (!strcmp(vct_setting[i].key, "xinput_throttle_axis"))
+            return vct_setting[i].choices;
+    return NULL;
+}
+
+int vct_axis_choice_ok(const char *choices, const char *value)
+{
+    char label[INI_LABEL_CAP], axis[32];
+
+    if (!ini_parse_axis_ref(value, label, sizeof label, axis, sizeof axis))
+        return 0;
+    /* After a label, XInput's names too: `pad:rt` is a role on an XInput
+     * pad slot. The host says when the axis is not that controller's. */
+    return vct_choice_contains(choices, axis) ||
+           (label[0] && vct_choice_contains(xinput_axes(), axis));
 }

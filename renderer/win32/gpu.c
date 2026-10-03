@@ -83,11 +83,11 @@ static SDL_GPUDevice *s_dev;
 static SDL_Window *s_window;
 static HWND s_hwnd;
 static SDL_GPUShader *s_main_vs, *s_main_ps;
-static SDL_GPUShader *s_copy_vs, *s_overlay_ps, *s_clear_ps;
-static SDL_GPUGraphicsPipeline *s_overlay_pipe, *s_clear_pipe;
+static SDL_GPUShader *s_copy_vs, *s_overlay_ps, *s_clear_ps, *s_depth_resolve_ps;
+static SDL_GPUGraphicsPipeline *s_overlay_pipe, *s_clear_pipe, *s_depth_resolve_pipe;
 static SDL_GPUTexture *s_white;
 static SDL_GPUTexture *s_color[2], *s_depth;
-static SDL_GPUTexture *s_native, *s_lfb_tex, *s_display;
+static SDL_GPUTexture *s_native, *s_native_depth, *s_lfb_tex, *s_display;
 static SDL_GPUSampler *s_samplers[16];
 static SDL_GPUCommandBuffer *s_cmd;
 static SDL_GPUTransferBuffer *s_upload_arena;
@@ -115,12 +115,14 @@ static int s_w, s_h, s_scale, s_iw, s_ih;
 static int s_rx, s_ry, s_rw, s_rh;
 static int s_vx0, s_vy0, s_vx1, s_vy1;
 static int s_dirty[2];
+static int s_depth_dirty;
+static SDL_GPUTransferBuffer *s_download;
 static int s_refresh_hz;
 static LARGE_INTEGER s_clock_freq, s_next_present;
 static LARGE_INTEGER s_fps_start;
 static unsigned s_fps_frames;
 static uint64_t s_tex_uploads, s_tex_upload_bytes;
-static uint64_t s_lfb_uploads, s_lfb_syncs, s_fence_waits;
+static uint64_t s_lfb_uploads, s_lfb_syncs, s_fence_waits, s_frame_waits;
 static uint64_t s_draw_batches, s_batched_triangles;
 static uint64_t s_tex_lookups, s_tex_probes;
 static uint64_t s_submissions;
@@ -129,20 +131,17 @@ static uint64_t s_report_submissions, s_report_uploads, s_report_upload_bytes;
 static uint64_t s_frame_index;
 
 /* ---- a lost device ------------------------------------------------------ */
-/* DXGI_ERROR_DEVICE_HUNG does not clear. Once the device is gone every call
- * returns it, so a failure here is a STATE and not an event, and treating each
- * one as its own event is what wrote 28.4 GB of identical lines in 139
- * minutes -- while the screen held one frame for ninety of them, the frame
- * counter read 27.8 fps because swap calls kept happening, and the watchdog
- * stayed quiet because frames never stopped. Only the pictures did.
+/* DXGI_ERROR_DEVICE_HUNG does not clear: once the device is gone every call
+ * returns it, so a failure here is a STATE and not an event. Treating each as
+ * its own event writes gigabytes of identical lines while the screen holds one
+ * frame, the counter still reads ~28 fps because swaps keep happening, and the
+ * watchdog stays quiet because frames never stop.
  *
- * Three things were missing and all three are here: DETECTION (a run of frames
- * in which nothing could be encoded), a BOUND on the logging (three lines per
- * site for the life of the process, then counters), and a DECISION -- the host
- * is told through vglHealth and takes the orderly shutdown it takes for a
- * closed window. Recreating the device is not attempted: SDL_GPU has no path
- * back, and a cabinet that exits is one a kiosk restart can recover, where a
- * cabinet presenting a ninety-minute-old frame is not. */
+ * So there are three parts: DETECTION (a run of frames in which nothing could
+ * be encoded), a BOUND on the logging, and a DECISION, which is that the host
+ * is told through vglHealth and shuts down as it does for a closed window.
+ * Recreating the device is not attempted: SDL_GPU has no path back, and a
+ * cabinet that exits is one a kiosk restart recovers. */
 #define GPU_LOSS_FRAMES   30u   /* consecutive failing frames: one second */
 #define GPU_FAIL_LOG_MAX   3u   /* lines per site, for the life of the run */
 
@@ -153,7 +152,7 @@ enum {
 static const char *const s_fail_what[GF_COUNT] = {
     "cannot acquire command buffer",
     "command submission failed",
-    "fenced submission or fence wait failed",
+    "fence wait failed",
     "swapchain acquisition failed",
     "texture creation failed",
     "texture upload failed",
@@ -164,19 +163,15 @@ static const char *const s_fail_what[GF_COUNT] = {
 };
 /* Only a failure the device itself owns votes on the verdict, because the
  * verdict shuts the cabinet down. An upload that did not fit our own arena is
- * ours: it can repeat every frame for a reason that is not a dead GPU, and a
- * detector that counted it would eventually end the game over a texture.
+ * ours: it can repeat every frame for a reason that is not a dead GPU.
  *
  * EVERYTHING ELSE HERE IS THE DEVICE'S, AND THE RENDER PASS IS THE ONE THAT
- * MATTERED. A device that still hands out command buffers and swapchain images
- * while refusing render passes draws nothing and presents on schedule: frames
- * count up, the picture holds, and without this site a detector built for
- * exactly that fault cannot see it.
+ * MATTERS: a device still handing out command buffers and swapchain images
+ * while refusing render passes draws nothing and presents on schedule.
  *
- * GF_PIPELINE is hard for a reason worth writing down, because the case for
- * soft is tempting: an exhausted pipeline CACHE is ours, but that path returns
- * before it ever reaches gpu_failed(). The only failure that
- * arrives here is the driver refusing to build one, which is the device's. */
+ * GF_PIPELINE is hard because an exhausted pipeline CACHE returns before it
+ * reaches gpu_failed(); the only failure arriving here is the driver refusing
+ * to build one. */
 static const unsigned char s_fail_hard[GF_COUNT] = {
     1, 1, 1, 1, 1, 0, 1, 1, 1, 1
 };
@@ -212,7 +207,7 @@ static void gpu_failed(int site)
 /* VCGLIDE_FAULTDEVICE=N fails every command buffer, texture and RENDER PASS
  * from frame N, which is the shape the real fault had: this is the only way
  * the decision below gets exercised without hanging a GPU on purpose. The
- * render pass is in that list deliberately -- a device that fails only there
+ * render pass is in that list deliberately, a device that fails only there
  * still acquires command buffers and still presents, so it is the case the
  * detector has to catch and the one an injection that skipped it could not
  * prove. */
@@ -329,12 +324,59 @@ static SDL_GPUBlendFactor blend_factor(int f)
     }
 }
 
+/* The last submitted command buffer, possibly still executing. Nothing may
+ * be recorded or created until it has finished: doing so while the GPU still
+ * executed the presented frame hung the D3D12 device at render_scale 7 and 8
+ * as 3D began (DXGI_ERROR_DEVICE_HUNG, the next frame's first draw never
+ * completing). Waiting was clean in every run, and the same binary without it
+ * hung half to four fifths of replays. One frame in flight was NOT enough:
+ * SDL waits for it at the next acquisition, after the next frame is recorded.
+ * The wait is taken lazily, at the next frame's first device call, so the
+ * game's own work between frames still overlaps the GPU. Measured by
+ * replaying a capture of the hang at 8x, presented.
+ *
+ * The mechanism is not known, so the wait is not narrowed to the calls that
+ * happen to come first today: every submission holds a fence, whichever way
+ * its frame ended, and EVERY SDL CALL THAT TAKES THE DEVICE TAKES IT FROM
+ * device(). No SDL call is handed s_dev from anywhere else. */
+static SDL_GPUFence *s_frame_fence;
+
+static void settle_frame(void)
+{
+    SDL_GPUFence *fence = s_frame_fence;
+
+    if (!fence)
+        return;
+    s_frame_fence = NULL;
+    /* A lost device finishes nothing, and asking it only adds failures
+     * after the verdict. Counted only when the GPU is still busy, but WAITED
+     * ON EVEN WHEN IT IS NOT: the wait is where SDL retires the finished
+     * command buffer, and releasing a fence that was only queried crashed
+     * SDL 3.4.10 in a later draw (D3D12_INTERNAL_BindGraphicsResources),
+     * headless every run, where no swapchain acquisition retires it
+     * instead. */
+    if (!s_lost) {
+        if (!SDL_QueryGPUFence(s_dev, fence))
+            s_frame_waits++;
+        if (!SDL_WaitForGPUFences(s_dev, true, &fence, 1))
+            gpu_failed(GF_FENCE);
+    }
+    SDL_ReleaseGPUFence(s_dev, fence);
+}
+
+static SDL_GPUDevice *device(void)
+{
+    settle_frame();
+    return s_dev;
+}
+
 static SDL_GPUTexture *make_texture(SDL_GPUTextureFormat format,
                                     SDL_GPUTextureUsageFlags usage,
                                     unsigned w, unsigned h, unsigned levels)
 {
     SDL_GPUTextureCreateInfo ci;
     SDL_GPUTexture *texture;
+    SDL_GPUDevice *dev;
     LARGE_INTEGER begin, end;
     memset(&ci, 0, sizeof ci);
     ci.type = SDL_GPU_TEXTURETYPE_2D;
@@ -347,9 +389,10 @@ static SDL_GPUTexture *make_texture(SDL_GPUTextureFormat format,
     ci.sample_count = SDL_GPU_SAMPLECOUNT_1;
     if (s_lost)
         return NULL;
+    dev = device();     /* outside the timing: a frame wait is not creation */
     QueryPerformanceCounter(&begin);
     texture = gpu_fault_injected_at(GF_TEXTURE) ? NULL
-                                                : SDL_CreateGPUTexture(s_dev, &ci);
+                                                : SDL_CreateGPUTexture(dev, &ci);
     QueryPerformanceCounter(&end);
     if (!texture)
         gpu_failed(GF_TEXTURE);
@@ -381,7 +424,12 @@ static int submit(void)
     end_pass();
     if (s_cmd) {
         QueryPerformanceCounter(&begin);
-        ok = SDL_SubmitGPUCommandBuffer(s_cmd) ? 1 : 0;
+        /* Every submission holds its fence for settle_frame(), however the
+         * frame ended: presented, minimised with no swapchain image,
+         * headless, or closing. None is held already: s_cmd came from
+         * command(), which settled before it existed. */
+        s_frame_fence = SDL_SubmitGPUCommandBufferAndAcquireFence(s_cmd);
+        ok = s_frame_fence != NULL;
         QueryPerformanceCounter(&end);
         s_submissions++;
         /* A normal paced frame can wait 8-12 ms here.  Logging that wait on
@@ -415,11 +463,11 @@ static int submit_wait(SDL_GPUCommandBuffer *cmd)
     s_fence_waits++;
     fence = SDL_SubmitGPUCommandBufferAndAcquireFence(cmd);
     if (!fence) {
-        gpu_failed(GF_FENCE);
+        gpu_failed(GF_SUBMIT);
         return 0;
     }
-    ok = SDL_WaitForGPUFences(s_dev, true, &fence, 1);
-    SDL_ReleaseGPUFence(s_dev, fence);
+    ok = SDL_WaitForGPUFences(device(), true, &fence, 1);
+    SDL_ReleaseGPUFence(device(), fence);
     if (!ok)
         gpu_failed(GF_FENCE);
     return ok ? 1 : 0;
@@ -431,7 +479,7 @@ static SDL_GPUCommandBuffer *command(void)
         return NULL;
     if (!s_cmd) {
         s_cmd = gpu_fault_injected_at(GF_COMMAND)
-                    ? NULL : SDL_AcquireGPUCommandBuffer(s_dev);
+                    ? NULL : SDL_AcquireGPUCommandBuffer(device());
         s_surface_pushed = 0;
     }
     if (!s_cmd)
@@ -450,7 +498,7 @@ static int reserve_upload(Uint32 bytes, Uint32 *offset, uint8_t **map)
         memset(&tci, 0, sizeof tci);
         tci.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
         tci.size = GPU_UPLOAD_ARENA_BYTES;
-        s_upload_arena = SDL_CreateGPUTransferBuffer(s_dev, &tci);
+        s_upload_arena = SDL_CreateGPUTransferBuffer(device(), &tci);
         if (!s_upload_arena)
             return 0;
         s_upload_offset = 0;
@@ -465,7 +513,7 @@ static int reserve_upload(Uint32 bytes, Uint32 *offset, uint8_t **map)
         s_upload_cycle = 1;
     }
     *map = (uint8_t *)SDL_MapGPUTransferBuffer(
-        s_dev, s_upload_arena, s_upload_cycle != 0);
+        device(), s_upload_arena, s_upload_cycle != 0);
     if (!*map)
         return 0;
     s_upload_cycle = 0;
@@ -487,7 +535,7 @@ static SDL_GPUShader *make_shader(ID3DBlob *blob, SDL_GPUShaderStage stage,
     ci.stage = stage;
     ci.num_samplers = samplers;
     ci.num_uniform_buffers = uniforms;
-    return SDL_CreateGPUShader(s_dev, &ci);
+    return SDL_CreateGPUShader(device(), &ci);
 }
 
 static ID3DBlob *compile_shader(const char *entry, const char *target)
@@ -513,13 +561,14 @@ static ID3DBlob *compile_shader(const char *entry, const char *target)
 
 static SDL_GPUGraphicsPipeline *fixed_pipeline(SDL_GPUShader *vs,
                                                SDL_GPUShader *ps,
+                                               SDL_GPUTextureFormat format,
                                                int depth_write)
 {
     SDL_GPUColorTargetDescription color;
     SDL_GPUGraphicsPipelineCreateInfo ci;
     memset(&color, 0, sizeof color);
     memset(&ci, 0, sizeof ci);
-    color.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
+    color.format = format;
     color.blend_state.enable_color_write_mask = true;
     color.blend_state.color_write_mask = SDL_GPU_COLORCOMPONENT_R |
         SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B;
@@ -537,7 +586,7 @@ static SDL_GPUGraphicsPipeline *fixed_pipeline(SDL_GPUShader *vs,
     ci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_ALWAYS;
     ci.depth_stencil_state.enable_depth_test = depth_write != 0;
     ci.depth_stencil_state.enable_depth_write = depth_write != 0;
-    return SDL_CreateGPUGraphicsPipeline(s_dev, &ci);
+    return SDL_CreateGPUGraphicsPipeline(device(), &ci);
 }
 
 static int upload_rgba(SDL_GPUTexture *texture, unsigned level,
@@ -555,19 +604,19 @@ static int upload_rgba(SDL_GPUTexture *texture, unsigned level,
     memset(&tci, 0, sizeof tci);
     tci.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD;
     tci.size = bytes;
-    tb = SDL_CreateGPUTransferBuffer(s_dev, &tci);
+    tb = SDL_CreateGPUTransferBuffer(device(), &tci);
     if (!tb) return 0;
-    map = SDL_MapGPUTransferBuffer(s_dev, tb, false);
-    if (!map) { SDL_ReleaseGPUTransferBuffer(s_dev, tb); return 0; }
+    map = SDL_MapGPUTransferBuffer(device(), tb, false);
+    if (!map) { SDL_ReleaseGPUTransferBuffer(device(), tb); return 0; }
     memcpy(map, pixels, bytes);
-    SDL_UnmapGPUTransferBuffer(s_dev, tb);
-    cmd = SDL_AcquireGPUCommandBuffer(s_dev);
-    if (!cmd) { SDL_ReleaseGPUTransferBuffer(s_dev, tb); return 0; }
+    SDL_UnmapGPUTransferBuffer(device(), tb);
+    cmd = SDL_AcquireGPUCommandBuffer(device());
+    if (!cmd) { SDL_ReleaseGPUTransferBuffer(device(), tb); return 0; }
     copy = SDL_BeginGPUCopyPass(cmd);
     if (!copy) {
         gpu_failed(GF_COPYPASS);
         SDL_CancelGPUCommandBuffer(cmd);
-        SDL_ReleaseGPUTransferBuffer(s_dev, tb);
+        SDL_ReleaseGPUTransferBuffer(device(), tb);
         return 0;
     }
     memset(&src, 0, sizeof src);
@@ -580,10 +629,10 @@ static int upload_rgba(SDL_GPUTexture *texture, unsigned level,
     SDL_UploadToGPUTexture(copy, &src, &dst, false);
     SDL_EndGPUCopyPass(copy);
     if (!submit_wait(cmd)) {
-        SDL_ReleaseGPUTransferBuffer(s_dev, tb);
+        SDL_ReleaseGPUTransferBuffer(device(), tb);
         return 0;
     }
-    SDL_ReleaseGPUTransferBuffer(s_dev, tb);
+    SDL_ReleaseGPUTransferBuffer(device(), tb);
     return 1;
 }
 
@@ -608,7 +657,7 @@ static int queue_rgba(SDL_GPUTexture *texture, unsigned level,
     for (y = 0; y < h; y++)
         memcpy(map + at + (size_t)y * pitch,
                (const uint8_t *)pixels + (size_t)y * w * 4u, w * 4u);
-    SDL_UnmapGPUTransferBuffer(s_dev, s_upload_arena);
+    SDL_UnmapGPUTransferBuffer(device(), s_upload_arena);
     copy = SDL_BeginGPUCopyPass(s_cmd);
     if (!copy) {
         gpu_failed(GF_COPYPASS);
@@ -662,11 +711,11 @@ static int queue_texture_mips(SDL_GPUTexture *texture, int tmu,
             continue;
         if (!vgl_tex_export_rgba(tmu, lod, map + at + relative[lod],
                                  pitches[lod])) {
-            SDL_UnmapGPUTransferBuffer(s_dev, s_upload_arena);
+            SDL_UnmapGPUTransferBuffer(device(), s_upload_arena);
             return 0;
         }
     }
-    SDL_UnmapGPUTransferBuffer(s_dev, s_upload_arena);
+    SDL_UnmapGPUTransferBuffer(device(), s_upload_arena);
     copy = SDL_BeginGPUCopyPass(s_cmd);
     if (!copy) {
         gpu_failed(GF_COPYPASS);
@@ -696,7 +745,7 @@ static int queue_texture_mips(SDL_GPUTexture *texture, int tmu,
 int vgl_gpu_preload(void)
 {
     ID3DBlob *mvs = NULL, *mps = NULL, *cvs = NULL;
-    ID3DBlob *ops = NULL, *cps = NULL;
+    ID3DBlob *ops = NULL, *cps = NULL, *dps = NULL;
     static const uint8_t white[4] = { 255, 255, 255, 255 };
 
     if (s_preload_tried)
@@ -712,7 +761,8 @@ int vgl_gpu_preload(void)
     cvs = compile_shader("copy_vs", "vs_5_1");
     ops = compile_shader("overlay_ps", "ps_5_1");
     cps = compile_shader("clear_ps", "ps_5_1");
-    if (!mvs || !mps || !cvs || !ops || !cps)
+    dps = compile_shader("depth_resolve_ps", "ps_5_1");
+    if (!mvs || !mps || !cvs || !ops || !cps || !dps)
         goto done;
     s_dev = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_DXBC, false, "direct3d12");
     if (!s_dev) {
@@ -725,15 +775,21 @@ int vgl_gpu_preload(void)
     s_copy_vs = make_shader(cvs, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1);
     s_overlay_ps = make_shader(ops, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
     s_clear_ps = make_shader(cps, SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 1);
-    if (!s_main_vs || !s_main_ps || !s_copy_vs || !s_overlay_ps || !s_clear_ps) {
+    s_depth_resolve_ps = make_shader(dps, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
+    if (!s_main_vs || !s_main_ps || !s_copy_vs || !s_overlay_ps || !s_clear_ps ||
+        !s_depth_resolve_ps) {
         vgl_log(0, "gpu: SDL3 shader creation failed: %s", SDL_GetError());
         goto done;
     }
-    s_overlay_pipe = fixed_pipeline(s_copy_vs, s_overlay_ps, 0);
-    s_clear_pipe = fixed_pipeline(s_copy_vs, s_clear_ps, 1);
+    s_overlay_pipe = fixed_pipeline(s_copy_vs, s_overlay_ps,
+                                    SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 0);
+    s_clear_pipe = fixed_pipeline(s_copy_vs, s_clear_ps,
+                                  SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 1);
+    s_depth_resolve_pipe = fixed_pipeline(s_copy_vs, s_depth_resolve_ps,
+                                          SDL_GPU_TEXTUREFORMAT_R16_UNORM, 0);
     s_white = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
                            SDL_GPU_TEXTUREUSAGE_SAMPLER, 1, 1, 1);
-    if (!s_overlay_pipe || !s_clear_pipe || !s_white ||
+    if (!s_overlay_pipe || !s_clear_pipe || !s_depth_resolve_pipe || !s_white ||
         !upload_rgba(s_white, 0, 1, 1, white)) {
         vgl_log(0, "gpu: fixed resource creation failed: %s", SDL_GetError());
         goto done;
@@ -741,7 +797,7 @@ int vgl_gpu_preload(void)
     s_ready = 1;
     vgl_log(0, "gpu: SDL %d.%d.%d, driver %s, D3D12/DXBC backend ready",
             SDL_MAJOR_VERSION, SDL_MINOR_VERSION, SDL_MICRO_VERSION,
-            SDL_GetGPUDeviceDriver(s_dev));
+            SDL_GetGPUDeviceDriver(device()));
 
 done:
     if (mvs) ID3D10Blob_Release(mvs);
@@ -749,6 +805,7 @@ done:
     if (cvs) ID3D10Blob_Release(cvs);
     if (ops) ID3D10Blob_Release(ops);
     if (cps) ID3D10Blob_Release(cps);
+    if (dps) ID3D10Blob_Release(dps);
     return s_ready;
 }
 
@@ -756,10 +813,10 @@ static void release_surface_resources(void)
 {
     int i;
     submit();
-    if (s_dev) SDL_WaitForGPUIdle(s_dev);
+    if (s_dev) SDL_WaitForGPUIdle(device());
     for (i = 0; i < GPU_TEX_CACHE; i++) {
         if (s_tex_cache[i].texture)
-            SDL_ReleaseGPUTexture(s_dev, s_tex_cache[i].texture);
+            SDL_ReleaseGPUTexture(device(), s_tex_cache[i].texture);
         memset(&s_tex_cache[i], 0, sizeof s_tex_cache[i]);
     }
     memset(s_tex_hash, 0, sizeof s_tex_hash);
@@ -769,23 +826,28 @@ static void release_surface_resources(void)
     memset(s_palette_seen_ver, 0, sizeof s_palette_seen_ver);
     memset(s_palette_current_key, 0, sizeof s_palette_current_key);
     if (s_upload_arena)
-        SDL_ReleaseGPUTransferBuffer(s_dev, s_upload_arena);
+        SDL_ReleaseGPUTransferBuffer(device(), s_upload_arena);
     s_upload_arena = NULL;
+    if (s_download)
+        SDL_ReleaseGPUTransferBuffer(device(), s_download);
+    s_download = NULL;
     s_upload_offset = 0;
     s_upload_cycle = s_upload_used = 0;
     for (i = 0; i < 2; i++) {
-        if (s_color[i]) SDL_ReleaseGPUTexture(s_dev, s_color[i]);
+        if (s_color[i]) SDL_ReleaseGPUTexture(device(), s_color[i]);
         s_color[i] = NULL;
     }
-    if (s_depth) SDL_ReleaseGPUTexture(s_dev, s_depth);
-    if (s_native) SDL_ReleaseGPUTexture(s_dev, s_native);
-    if (s_lfb_tex) SDL_ReleaseGPUTexture(s_dev, s_lfb_tex);
-    if (s_display) SDL_ReleaseGPUTexture(s_dev, s_display);
-    s_depth = s_native = s_lfb_tex = s_display = NULL;
+    if (s_depth) SDL_ReleaseGPUTexture(device(), s_depth);
+    if (s_native) SDL_ReleaseGPUTexture(device(), s_native);
+    if (s_native_depth) SDL_ReleaseGPUTexture(device(), s_native_depth);
+    if (s_lfb_tex) SDL_ReleaseGPUTexture(device(), s_lfb_tex);
+    if (s_display) SDL_ReleaseGPUTexture(device(), s_display);
+    s_depth = s_native = s_native_depth = s_lfb_tex = s_display = NULL;
 }
 
 static int create_targets(int scale)
 {
+    SDL_GPUTransferBufferCreateInfo tci;
     unsigned usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
                      SDL_GPU_TEXTUREUSAGE_SAMPLER;
     s_iw = s_w * scale;
@@ -794,19 +856,30 @@ static int create_targets(int scale)
                               usage, s_iw, s_ih, 1);
     s_color[1] = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
                               usage, s_iw, s_ih, 1);
+    /* Sampled as well as drawn into: a caller may lock the depth buffer. */
     s_depth = make_texture(SDL_GPU_TEXTUREFORMAT_D16_UNORM,
-                           SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
+                           SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET |
+                           SDL_GPU_TEXTUREUSAGE_SAMPLER,
                            s_iw, s_ih, 1);
     s_native = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
                             usage, s_w, s_h, 1);
+    s_native_depth = make_texture(SDL_GPU_TEXTUREFORMAT_R16_UNORM,
+                                  SDL_GPU_TEXTUREUSAGE_COLOR_TARGET,
+                                  s_w, s_h, 1);
     s_lfb_tex = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
                              usage, s_w, s_h, 1);
-    return s_color[0] && s_color[1] && s_depth && s_native && s_lfb_tex;
+    memset(&tci, 0, sizeof tci);
+    tci.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+    tci.size = (Uint32)((size_t)s_w * s_h * 4);   /* the wider of the two */
+    s_download = SDL_CreateGPUTransferBuffer(device(), &tci);
+    s_depth_dirty = 1;
+    return s_color[0] && s_color[1] && s_depth && s_native &&
+           s_native_depth && s_lfb_tex && s_download;
 }
 
 static int clear_initial_targets(void)
 {
-    SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(s_dev);
+    SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device());
     int i;
     if (!cmd) return 0;
     for (i = 0; i < 2; i++) {
@@ -860,20 +933,20 @@ static int create_window(void *caller_window, int window_scale)
         vgl_window_title(title, sizeof title, 0.0);   /* no frame rate yet */
         SDL_SetWindowTitle(s_window, title);
     }
-    if (!SDL_ClaimWindowForGPUDevice(s_dev, s_window)) {
+    if (!SDL_ClaimWindowForGPUDevice(device(), s_window)) {
         vgl_log(0, "gpu: SDL swapchain claim failed: %s", SDL_GetError());
         return 0;
     }
-    if (SDL_WindowSupportsGPUPresentMode(s_dev, s_window,
+    if (SDL_WindowSupportsGPUPresentMode(device(), s_window,
                                          SDL_GPU_PRESENTMODE_IMMEDIATE))
-        SDL_SetGPUSwapchainParameters(s_dev, s_window,
+        SDL_SetGPUSwapchainParameters(device(), s_window,
             SDL_GPU_SWAPCHAINCOMPOSITION_SDR, SDL_GPU_PRESENTMODE_IMMEDIATE);
-    /* Hydro's player races alternate CPU command construction with hundreds
-     * of small GPU batches. Three frames lets D3D12 overlap that work instead
-     * of serializing the game thread at every immediate acquisition. SDL caps
-     * this setting at three; the game's own 30 Hz pacing still bounds the
-     * queue in steady state. */
-    SDL_SetGPUAllowedFramesInFlight(s_dev, 3);
+    /* Bounds nothing: settle_frame() finishes every submission before the
+     * next is recorded, so one frame is in flight whatever this says. Three
+     * is what the settle was measured with, and the only reason it stays. Do
+     * not read one here as an alternative to the settle: one frame in flight
+     * with no settle hung 2 replays of 2. */
+    SDL_SetGPUAllowedFramesInFlight(device(), 3);
     SDL_ShowWindow(s_window);
     return 1;
 }
@@ -893,8 +966,8 @@ static int recreate_display(void)
         return 0;
     }
     if (s_display) {
-        SDL_WaitForGPUIdle(s_dev);
-        SDL_ReleaseGPUTexture(s_dev, s_display);
+        SDL_WaitForGPUIdle(device());
+        SDL_ReleaseGPUTexture(device(), s_display);
     }
     s_display = next;
     return 1;
@@ -917,7 +990,7 @@ int vgl_gpu_open(void *caller_window, int w, int h, int raster_w, int raster_h,
                 s_fault_pass_only
                     ? "every RENDER PASS fails and nothing else does, so "
                       "command buffers and presentation keep working and only "
-                      "the picture stops -- the case the detector was blind to"
+                      "the picture stops; the case the detector was blind to"
                     : "every command buffer, texture and render pass fails");
     s_refresh_hz = refresh_hz > 0 ? refresh_hz : 60;
     s_rx = 0; s_ry = 0;
@@ -963,7 +1036,7 @@ int vgl_gpu_open(void *caller_window, int w, int h, int raster_w, int raster_h,
     s_pass_pipe = NULL;
     s_pass_bind_valid = s_pass_scissor_valid = s_surface_pushed = 0;
     s_tex_uploads = s_tex_upload_bytes = 0;
-    s_lfb_uploads = s_lfb_syncs = s_fence_waits = 0;
+    s_lfb_uploads = s_lfb_syncs = s_fence_waits = s_frame_waits = 0;
     s_draw_batches = s_batched_triangles = 0;
     s_tex_lookups = s_tex_probes = 0;
     s_submissions = 0;
@@ -975,7 +1048,7 @@ int vgl_gpu_open(void *caller_window, int w, int h, int raster_w, int raster_h,
     s_next_present = s_fps_start;
     s_fps_frames = 0;
     vgl_log(0, "gpu: SDL3 %s, internal target %dx%d (%dx), native LFB %dx%d%s",
-            SDL_GetGPUDeviceDriver(s_dev), s_iw, s_ih, s_scale, s_w, s_h,
+            SDL_GetGPUDeviceDriver(device()), s_iw, s_ih, s_scale, s_w, s_h,
             present ? ", immediate swapchain" : ", headless");
     return 1;
 }
@@ -984,20 +1057,22 @@ void vgl_gpu_close(void)
 {
     if (!s_open) return;
     vgl_log(0, "gpu: uploads %llu texture levels / %.2f MiB, %llu LFB; "
-            "%llu LFB readbacks, %llu blocking fence waits; %llu triangles "
+            "%llu LFB readbacks, %llu blocking fence waits, %llu frames "
+            "waited for the GPU; %llu triangles "
             "in %llu draw batches; %llu texture lookups / %llu hash probes",
             (unsigned long long)s_tex_uploads,
             (double)s_tex_upload_bytes / (1024.0 * 1024.0),
             (unsigned long long)s_lfb_uploads,
             (unsigned long long)s_lfb_syncs,
             (unsigned long long)s_fence_waits,
+            (unsigned long long)s_frame_waits,
             (unsigned long long)s_batched_triangles,
             (unsigned long long)s_draw_batches,
             (unsigned long long)s_tex_lookups,
             (unsigned long long)s_tex_probes);
     release_surface_resources();
     if (s_window) {
-        SDL_ReleaseWindowFromGPUDevice(s_dev, s_window);
+        SDL_ReleaseWindowFromGPUDevice(device(), s_window);
         SDL_DestroyWindow(s_window);
     }
     s_window = NULL; s_hwnd = NULL;
@@ -1044,7 +1119,7 @@ static SDL_GPUSampler *sampler_for(const vgl_tmu_t *u, int no_tile)
                                   : SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
     ci.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
     ci.min_lod = 0.0f; ci.max_lod = (float)VGL_MAX_LOD;
-    s_samplers[key] = SDL_CreateGPUSampler(s_dev, &ci);
+    s_samplers[key] = SDL_CreateGPUSampler(device(), &ci);
     /* A null sampler makes vgl_gpu_draw_triangle drop the primitive, which is
      * a picture that silently loses geometry. Sixteen of these exist for the
      * life of the device, so a failure here is the device's. */
@@ -1253,7 +1328,7 @@ static SDL_GPUTexture *texture_for(int tmu)
     if (new_identity) {
         texture_hash_remove(slot);
         texture_unbind(slot);
-        if (slot->texture) SDL_ReleaseGPUTexture(s_dev, slot->texture);
+        if (slot->texture) SDL_ReleaseGPUTexture(device(), slot->texture);
         memset(slot, 0, sizeof *slot);
         slot->texture = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
                                      SDL_GPU_TEXTUREUSAGE_SAMPLER,
@@ -1285,28 +1360,10 @@ static SDL_GPUTexture *texture_for(int tmu)
 fail:
     texture_hash_remove(slot);
     texture_unbind(slot);
-    if (slot->texture) SDL_ReleaseGPUTexture(s_dev, slot->texture);
+    if (slot->texture) SDL_ReleaseGPUTexture(device(), slot->texture);
     memset(slot, 0, sizeof *slot);
     gpu_failed(GF_UPLOAD);
     return s_white;
-}
-
-static int state_needs_texture(int *need_tmu1)
-{
-    int t0_uses_other;
-    *need_tmu1 = 0;
-    if (vgl.cc.other != VGL_OTHER_TEXTURE &&
-        vgl.ac.other != VGL_OTHER_TEXTURE &&
-        (vgl.cc.factor & 7) != VGL_FAC_TEXTURE_ALPHA &&
-        (vgl.cc.factor & 7) != VGL_FAC_TEXTURE_RGB &&
-        (vgl.ac.factor & 7) != VGL_FAC_TEXTURE_ALPHA &&
-        !vgl.itrgb_lighting)
-        return 0;
-    t0_uses_other = vgl.tmu[0].c_func >= VGL_CF_SCALE_OTHER &&
-                    vgl.tmu[0].c_func <=
-                    VGL_CF_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL_ALPHA;
-    *need_tmu1 = t0_uses_other && vgl.tmu[1].valid;
-    return 1;
 }
 
 static uint64_t pipeline_key(void)
@@ -1327,6 +1384,7 @@ static SDL_GPUGraphicsPipeline *pipeline_for(void)
     SDL_GPUColorTargetDescription color;
     SDL_GPUGraphicsPipelineCreateInfo ci;
     SDL_GPUGraphicsPipeline *p;
+    SDL_GPUDevice *dev;
     int i, slot = -1;
     LARGE_INTEGER begin, end;
 
@@ -1377,12 +1435,13 @@ static SDL_GPUGraphicsPipeline *pipeline_for(void)
     ci.target_info.num_color_targets = 1;
     ci.target_info.has_depth_stencil_target = true;
     ci.target_info.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D16_UNORM;
+    dev = device();     /* outside the timing: a frame wait is not creation */
     QueryPerformanceCounter(&begin);
-    p = SDL_CreateGPUGraphicsPipeline(s_dev, &ci);
+    p = SDL_CreateGPUGraphicsPipeline(dev, &ci);
     QueryPerformanceCounter(&end);
     if (!p) {
-        /* Before this the timing line was printed first, so a pipeline that
-         * was refused was logged as `created`. */
+        /* Report the failure before any timing line, so a refused pipeline
+         * is never logged as `created`. */
         gpu_failed(GF_PIPELINE);
         return NULL;
     }
@@ -1555,6 +1614,55 @@ static int tri_no_tile(const float *const v[3], int tmu, const ps_data_t *ps)
     return 1;
 }
 
+/* Glide puts a centre exactly on a horizontal edge inside for the edge with
+ * the lower device y; D3D's top-left rule does the opposite once a lower-left
+ * origin is flipped. Only a horizontal edge can tie over a whole row, so a
+ * triangle with one lying exactly on a sample centre is moved down one step of
+ * the rasteriser's 1/256 snap, and every other triangle is left alone. */
+static float tie_nudge(const float *v[3])
+{
+    int i;
+
+    for (i = 0; i < 3; i++) {
+        const float y = v[i][1], other = v[(i + 1) % 3][1];
+        float sy, frac;
+
+        if (y != other)
+            continue;
+        sy = (vgl.h - y) * s_scale;
+        frac = sy - (float)(int)sy;
+        if (frac == 0.5f || frac == -0.5f)
+            return 1.0f / 256.0f;
+    }
+    return 0.0f;
+}
+
+/* The nudge is for coverage only. Every interpolant is a screen-linear plane
+ * (w = 1), so adding its y-gradient times the nudge to all three vertices puts
+ * each sample back on the value it had. */
+static void tie_compensate(float vd[12][4], float nudge)
+{
+    static const unsigned char slot[9][2] = {
+        { 0, 2 }, { 0, 3 }, { 1, 0 }, { 1, 1 }, { 1, 2 }, { 1, 3 },
+        { 2, 0 }, { 2, 1 }, { 2, 2 }
+    };
+    double x1 = (double)vd[4][0] - vd[0][0], y1 = (double)vd[4][1] - vd[0][1];
+    double x2 = (double)vd[8][0] - vd[0][0], y2 = (double)vd[8][1] - vd[0][1];
+    double det = x1 * y2 - x2 * y1;
+    int k, i;
+
+    if (det == 0.0)
+        return;
+    for (k = 0; k < 9; k++) {
+        int r = slot[k][0], c = slot[k][1];
+        double a0 = vd[r][c], a1 = vd[4 + r][c], a2 = vd[8 + r][c];
+        double dy = (x1 * (a2 - a0) - x2 * (a1 - a0)) / det * nudge;
+
+        for (i = 0; i < 3; i++)
+            vd[i * 4 + r][c] = (float)(vd[i * 4 + r][c] + dy);
+    }
+}
+
 void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
 {
     const float *v[3] = { a, b, c };
@@ -1565,7 +1673,7 @@ void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
     SDL_GPUTextureSamplerBinding tri_bind[2];
     const SDL_GPUTextureSamplerBinding *bind;
     SDL_GPUGraphicsPipeline *pipe;
-    float area;
+    float area, nudge;
     int i, need_tex, need_tmu1;
 
     if (!s_open || !a || !b || !c) return;
@@ -1578,7 +1686,7 @@ void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
     }
     if (!s_draw_state.valid ||
         s_draw_state.version != vgl.draw_state_version) {
-        need_tex = state_needs_texture(&need_tmu1);
+        need_tex = vgl_needs_texture(&need_tmu1);
         s_draw_state.bind[0].texture = need_tex ? texture_for(0) : s_white;
         s_draw_state.bind[1].texture = need_tmu1 ? texture_for(1) : s_white;
         s_draw_state.pipe = pipeline_for();
@@ -1603,10 +1711,12 @@ void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
     if (!pipe || !bind[0].sampler || !bind[1].sampler) return;
 
     memset(vd, 0, sizeof vd);
+    nudge = vgl.origin_lower_left ? tie_nudge(v) : 0.0f;
     for (i = 0; i < 3; i++) {
         vd[i * 4 + 0][0] = v[i][0] * s_scale;
-        vd[i * 4 + 0][1] = (vgl.origin_lower_left ?
-            (vgl.h - v[i][1]) : v[i][1]) * s_scale;
+        vd[i * 4 + 0][1] = vgl.origin_lower_left
+            ? (vgl.h - v[i][1]) * s_scale + nudge
+            : v[i][1] * s_scale;
         vd[i * 4 + 0][2] = v[i][3]; vd[i * 4 + 0][3] = v[i][4];
         vd[i * 4 + 1][0] = v[i][5]; vd[i * 4 + 1][1] = v[i][7];
         vd[i * 4 + 1][2] = v[i][8]; vd[i * 4 + 1][3] = v[i][9];
@@ -1616,6 +1726,8 @@ void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
         vd[i * 4 + 3][1] = ubits(ps->u[1][2]);
         vd[i * 4 + 3][2] = ubits(ps->u[7][1]);
     }
+    if (nudge != 0.0f)
+        tie_compensate(vd, nudge);
     ps_key = *ps;
     ps_key.u[6][0] = 0; /* constant colour travels with each vertex */
     ps_key.u[1][2] = 0; /* alpha reference travels with each vertex */
@@ -1643,6 +1755,7 @@ void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
     if (s_batch.triangles == GPU_BATCH_TRIANGLES)
         flush_batch();
     s_dirty[vgl.draw_buffer] = 1;
+    s_depth_dirty = 1;
 }
 
 /* One clear rectangle in surface coordinates, on the buffer being drawn. */
@@ -1668,6 +1781,7 @@ static void clear_rect(int x0, int y0, int x1, int y1,
     SDL_PushGPUFragmentUniformData(s_cmd, 0, &ps, sizeof ps);
     SDL_DrawGPUPrimitives(pass, 4, 1, 0, 0);
     s_dirty[vgl.draw_buffer] = 1;
+    s_depth_dirty = 1;
 }
 
 void vgl_gpu_clear(uint32_t color, uint32_t depth)
@@ -1769,7 +1883,7 @@ static void sync_adopted_window_size(void)
     want_h = MulDiv(nh, lh, ph);
     /* Capped: this runs from present_frame(), so it is once per FRAME, and a
      * failure does not reconcile the two sizes, so the next frame tries again
-     * and fails again. The success line below is self-limiting -- once the
+     * and fails again. The success line below is self-limiting, once the
      * sizes agree the early return above takes it. */
     if (want_w <= 0 || want_h <= 0 ||
         !SDL_SetWindowSize(s_window, want_w, want_h)) {
@@ -1794,17 +1908,19 @@ static void present_frame(void)
     int dx = 0, dy = 0, dw, dh;
     LARGE_INTEGER begin, end;
     if (!s_present || !s_window) return;
+    /* Keep the scene and its presentation in one command buffer. SDL's GPU
+     * API is designed around one command buffer per frame; submitting the
+     * offscreen scene first made D3D12 recycle its per-command-buffer upload
+     * storage before the following present, serializing busy Hydro frames.
+     * Taken before the window is touched, so a frame that drew nothing has
+     * still settled the last one before SDL resizes anything. */
+    cmd = command();
     /* The host changes the adopted HWND directly for Alt+Enter. Process its
      * WM_SIZE before asking SDL for a swapchain image, otherwise SDL can keep
      * presenting at the just-left fullscreen extent after Win32 has restored
      * the configured client size. */
     sync_adopted_window_size();
     if (s_quit_posted) { submit(); return; }
-    /* Keep the scene and its presentation in one command buffer. SDL's GPU
-     * API is designed around one command buffer per frame; submitting the
-     * offscreen scene first made D3D12 recycle its per-command-buffer upload
-     * storage before the following present, serializing busy Hydro frames. */
-    cmd = command();
     QueryPerformanceCounter(&begin);
     if (!cmd || !SDL_WaitAndAcquireGPUSwapchainTexture(cmd, s_window,
                                                        &swap, &cw, &ch)) {
@@ -1913,14 +2029,33 @@ void vgl_gpu_swap(int interval)
     vgl_gpu_pump();
 }
 
-int vgl_gpu_sync_color(int buffer, uint32_t *dst, int w, int h)
+/* Copy a native-size target into s_download, submit, wait and map it. Takes
+ * cmd whatever happens; the caller unmaps on success. */
+static const uint8_t *download_native(SDL_GPUCommandBuffer *cmd,
+                                      SDL_GPUTexture *texture)
 {
-    SDL_GPUTransferBufferCreateInfo tci;
-    SDL_GPUTransferBuffer *tb;
     SDL_GPUTextureTransferInfo out;
     SDL_GPUTextureRegion src;
+    SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
+    if (!copy) {
+        gpu_failed(GF_COPYPASS);
+        SDL_CancelGPUCommandBuffer(cmd);
+        return NULL;
+    }
+    memset(&src, 0, sizeof src); src.texture = texture;
+    src.w = s_w; src.h = s_h; src.d = 1;
+    memset(&out, 0, sizeof out); out.transfer_buffer = s_download;
+    out.pixels_per_row = s_w; out.rows_per_layer = s_h;
+    SDL_DownloadFromGPUTexture(copy, &src, &out);
+    SDL_EndGPUCopyPass(copy);
+    if (!submit_wait(cmd)) return NULL;
+    return (const uint8_t *)SDL_MapGPUTransferBuffer(device(), s_download,
+                                                     false);
+}
+
+int vgl_gpu_sync_color(int buffer, uint32_t *dst, int w, int h)
+{
     SDL_GPUCommandBuffer *cmd;
-    SDL_GPUCopyPass *copy;
     const uint8_t *map;
     int x, y;
     if (!s_open || s_lost || !dst || w != s_w || h != s_h ||
@@ -1928,39 +2063,70 @@ int vgl_gpu_sync_color(int buffer, uint32_t *dst, int w, int h)
         return 0;
     s_lfb_syncs++;
     submit();
-    cmd = SDL_AcquireGPUCommandBuffer(s_dev);
+    cmd = SDL_AcquireGPUCommandBuffer(device());
     if (!cmd) return 0;
     blit(cmd, s_color[buffer], 0, 0, s_iw, s_ih, s_native,
          0, 0, s_w, s_h, SDL_GPU_LOADOP_DONT_CARE, SDL_GPU_FILTER_LINEAR);
-    memset(&tci, 0, sizeof tci);
-    tci.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
-    tci.size = (Uint32)((size_t)s_w * s_h * 4);
-    tb = SDL_CreateGPUTransferBuffer(s_dev, &tci);
-    if (!tb) { SDL_CancelGPUCommandBuffer(cmd); return 0; }
-    copy = SDL_BeginGPUCopyPass(cmd);
-    if (!copy) {
-        gpu_failed(GF_COPYPASS);
-        SDL_CancelGPUCommandBuffer(cmd);
-        SDL_ReleaseGPUTransferBuffer(s_dev, tb);
-        return 0;
-    }
-    memset(&src, 0, sizeof src); src.texture = s_native;
-    src.w = s_w; src.h = s_h; src.d = 1;
-    memset(&out, 0, sizeof out); out.transfer_buffer = tb;
-    out.pixels_per_row = s_w; out.rows_per_layer = s_h;
-    SDL_DownloadFromGPUTexture(copy, &src, &out);
-    SDL_EndGPUCopyPass(copy);
-    if (!submit_wait(cmd)) { SDL_ReleaseGPUTransferBuffer(s_dev, tb); return 0; }
-    map = (const uint8_t *)SDL_MapGPUTransferBuffer(s_dev, tb, false);
-    if (!map) { SDL_ReleaseGPUTransferBuffer(s_dev, tb); return 0; }
+    map = download_native(cmd, s_native);
+    if (!map) return 0;
     for (y = 0; y < s_h; y++) for (x = 0; x < s_w; x++) {
         const uint8_t *p = map + ((size_t)y * s_w + x) * 4;
         dst[(size_t)y * s_w + x] =
             ((uint32_t)p[0] << 16) | ((uint32_t)p[1] << 8) | p[2];
     }
-    SDL_UnmapGPUTransferBuffer(s_dev, tb);
-    SDL_ReleaseGPUTransferBuffer(s_dev, tb);
+    SDL_UnmapGPUTransferBuffer(device(), s_download);
     s_dirty[buffer] = 0;
+    return 1;
+}
+
+/* The depth buffer read back for a lock, at native resolution and exact.
+ * Hydro's lens flare decides visibility from one depth word: 0xffff, nothing
+ * drawn there, shows the flare and anything else hides it. dst keeps the last
+ * readback, so one with nothing drawn since is skipped. */
+int vgl_gpu_sync_depth(uint16_t *dst, int w, int h)
+{
+    SDL_GPUTextureSamplerBinding bind;
+    SDL_GPUColorTargetInfo ct;
+    SDL_GPUCommandBuffer *cmd;
+    SDL_GPURenderPass *pass;
+    float vd[10][4];
+    ps_data_t ps;
+    vgl_tmu_t point;
+    const uint8_t *map;
+    if (!s_open || s_lost || !dst || w != s_w || h != s_h)
+        return 0;
+    if (!s_depth_dirty)
+        return 1;
+    s_lfb_syncs++;
+    submit();
+    cmd = SDL_AcquireGPUCommandBuffer(device());
+    if (!cmd) return 0;
+    memset(&ct, 0, sizeof ct); ct.texture = s_native_depth;
+    ct.load_op = SDL_GPU_LOADOP_DONT_CARE; ct.store_op = SDL_GPU_STOREOP_STORE;
+    pass = SDL_BeginGPURenderPass(cmd, &ct, 1, NULL);
+    if (!pass) {
+        gpu_failed(GF_RENDERPASS);
+        SDL_CancelGPUCommandBuffer(cmd);
+        return 0;
+    }
+    memset(vd, 0, sizeof vd); memset(&ps, 0, sizeof ps);
+    vd[0][2] = 1.0f; vd[0][3] = 1.0f;
+    ps.u[0][0] = (unsigned)s_scale;
+    memset(&point, 0, sizeof point);
+    point.min_filter = VGL_TEXFILTER_POINT;
+    point.mag_filter = VGL_TEXFILTER_POINT;
+    bind.texture = s_depth; bind.sampler = sampler_for(&point, 1);
+    SDL_BindGPUGraphicsPipeline(pass, s_depth_resolve_pipe);
+    SDL_BindGPUFragmentSamplers(pass, 0, &bind, 1);
+    SDL_PushGPUVertexUniformData(cmd, 0, vd, sizeof vd);
+    SDL_PushGPUFragmentUniformData(cmd, 0, &ps, sizeof ps);
+    SDL_DrawGPUPrimitives(pass, 4, 1, 0, 0);
+    SDL_EndGPURenderPass(pass);
+    map = download_native(cmd, s_native_depth);
+    if (!map) return 0;
+    memcpy(dst, map, (size_t)s_w * s_h * 2);
+    SDL_UnmapGPUTransferBuffer(device(), s_download);
+    s_depth_dirty = 0;
     return 1;
 }
 

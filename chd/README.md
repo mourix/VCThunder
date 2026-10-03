@@ -14,7 +14,7 @@ Then, from the repository root:
 
 **The CHDs are yours to supply.** This repository contains no game material. The filenames
 above are only the usual ones: `--auto` works out which game each CHD is by looking inside
-it, so any name is fine, and several CHDs of one game are fine too -- it uses the build
+it, so any name is fine, and several CHDs of one game are fine too: it uses the build
 this host has address tables for and reports the ones it passes over.
 
 A CHD of another revision is refused in about a second and nothing is written: this host's
@@ -39,7 +39,7 @@ an ingest: 30 seconds for Hydro's 3.2 GB and 1m42s for Offroad's 6.4 GB, on sixt
 
 A CHD older than version 5, or one that has a parent CHD, is declined by name and the ingest
 falls back to MAME's own extractor. Only then does it want room: chdman writes the full
-uncompressed disk beside the CHD before anything is read out of it -- Hydro's 166 MB extracts
+uncompressed disk beside the CHD before anything is read out of it, and Hydro's 166 MB extracts
 to 3.2 GB and Offroad's 1.3 GB to 6.4 GB.
 
 `chdman` ships inside the MAME binary distribution: <https://www.mamedev.org/release.html>,

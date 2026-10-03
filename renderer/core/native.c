@@ -21,14 +21,11 @@ static inline const float *as_verts(uint32_t v)
     return (const float *)(uintptr_t)v;
 }
 
-static void once(int *flag, const char *what)
-{
-    if (!*flag) {
-        *flag = 1;
-        vgl_log(0, "native: %s; no capture of either game contains this "
-                   "call; the documented default is used", what);
-    }
-}
+/* An entry point the games accept and never use: one sentence, one spelling,
+ * and its own flag per site. */
+#define UNSEEN_ONCE(what)                                                     \
+    VGL_LOG_ONCE("native: %s; no capture of either game contains this "       \
+                 "call; the documented default is used", (what))
 
 /* gu* helpers set a canned combine. Only the values the games use are
  * translated; anything else keeps the current combine and says so, because a
@@ -64,15 +61,10 @@ static void gu_color_combine(int fnc)
         vgl.cc.other = VGL_OTHER_TEXTURE;
         vgl.cc.invert = 0;
         break;
-    default: {
-        static int flag;
-        if (!flag) {
-            flag = 1;
-            vgl_log(0, "native: guColorCombineFunction(%d) is not translated "
-                       "-- the combine is left as it was", fnc);
-        }
+    default:
+        VGL_LOG_ONCE("native: guColorCombineFunction(%d) is not translated "
+                     "-- the combine is left as it was", fnc);
         break;
-    }
     }
 }
 
@@ -100,15 +92,10 @@ static void gu_tex_combine(int tmu, int fnc)
         u->c_func = u->a_func = VGL_CF_SCALE_OTHER;
         u->c_factor = u->a_factor = VGL_FAC_LOCAL;
         break;
-    default: {
-        static int flag;
-        if (!flag) {
-            flag = 1;
-            vgl_log(0, "native: guTexCombineFunction(%d, %d) is not translated "
-                       "-- the combine is left as it was", tmu, fnc);
-        }
+    default:
+        VGL_LOG_ONCE("native: guTexCombineFunction(%d, %d) is not translated "
+                     "-- the combine is left as it was", tmu, fnc);
         break;
-    }
     }
     u->c_invert = u->a_invert = 0;
 }
@@ -116,7 +103,7 @@ static void gu_tex_combine(int tmu, int fnc)
 /* Does this call change what the GPU backend caches as a draw state?
  *
  * The answer is a column of entries.def, not a switch here. It was a switch
- * here -- forty cases, beside the forty-odd cases below that do the work -- and
+ * here, forty cases, beside the forty-odd cases below that do the work, and
  * two lists over one set of entry points is the shape src/settings.def exists to
  * refuse: an entry added to the dispatch and forgotten in the other one leaves
  * the GPU drawing with a state it has already been told to replace, and nothing
@@ -155,17 +142,12 @@ int vgl_native_call(unsigned ix, const uint32_t *a)
     case VGL_IX_grSstOrigin:
         vgl.origin_lower_left = ((int)a[0] == GR_ORIGIN_LOWER_LEFT);
         return 1;
-    case VGL_IX_grSstVidMode: {
+    case VGL_IX_grSstVidMode:
         /* Preserve the cabinet timing payload for diagnostic output. */
-        static int flag;
-        if (!flag) {
-            flag = 1;
-            vgl_log(0, "native: grSstVidMode(%u, %p); the caller's CRT "
-                       "timing table is not applied by this provider",
-                    a[0], (void *)(uintptr_t)a[1]);
-        }
+        VGL_LOG_ONCE("native: grSstVidMode(%u, %p); the caller's CRT "
+                     "timing table is not applied by this provider",
+                     a[0], (void *)(uintptr_t)a[1]);
         return 1;
-    }
     case VGL_IX_grSstQueryHardware: {
         /* Report the cabinet's one-board, two-TMU hardware layout. */
         uint32_t *hw = (uint32_t *)(uintptr_t)a[0];
@@ -304,26 +286,17 @@ int vgl_native_call(unsigned ix, const uint32_t *a)
     case VGL_IX_grDisableAllEffects:
         vgl_disable_all_effects();
         return 1;
-    case VGL_IX_grFogMode: {
-        static int flag;
+    case VGL_IX_grFogMode:
         vgl.fog_mode = (int)a[0];
-        if (vgl.fog_mode && !flag) {
-            flag = 1;
-            vgl_log(0, "native: grFogMode(%u); fog ON. The 1,500-frame "
-                       "attract capture this renderer was scoped against "
-                       "contains only grFogMode(0), so the census said the "
-                       "games never fog; they do, in a race", a[0]);
-        }
-        if ((vgl.fog_mode & 7) != 0 && (vgl.fog_mode & 7) != 2) {
-            static int other;
-            if (!other) {
-                other = 1;
-                vgl_log(0, "native: grFogMode(%u) is not the table mode, which "
-                           "is the only one implemented", a[0]);
-            }
-        }
+        if (vgl.fog_mode)
+            VGL_LOG_ONCE("native: grFogMode(%u); fog ON. The 1,500-frame "
+                         "attract capture this renderer was scoped against "
+                         "contains only grFogMode(0), so the census said the "
+                         "games never fog; they do, in a race", a[0]);
+        if ((vgl.fog_mode & 7) != 0 && (vgl.fog_mode & 7) != 2)
+            VGL_LOG_ONCE("native: grFogMode(%u) is not the table mode, which "
+                         "is the only one implemented", a[0]);
         return 1;
-    }
     case VGL_IX_grFogColorValue:
         vgl.fog_color = a[0];
         return 1;
@@ -353,11 +326,9 @@ int vgl_native_call(unsigned ix, const uint32_t *a)
     case VGL_IX_grLfbConstantDepth:
         vgl.lfb_const_depth = a[0];
         return 1;
-    case VGL_IX_grLfbWriteColorFormat: {
-        static int flag;
-        once(&flag, "grLfbWriteColorFormat");
+    case VGL_IX_grLfbWriteColorFormat:
+        UNSEEN_ONCE("grLfbWriteColorFormat");
         return 1;
-    }
 
     /* ---- texture units ---- */
     case VGL_IX_grTexSource:
@@ -420,22 +391,16 @@ int vgl_native_call(unsigned ix, const uint32_t *a)
     case VGL_IX_grTexCombineFunction:
         gu_tex_combine((int)a[0], (int)a[1]);
         return 1;
-    case VGL_IX_grTexDetailControl: {
-        static int flag;
+    case VGL_IX_grTexDetailControl:
         /* Accept the unused detail-control entry point without state changes. */
-        once(&flag, "grTexDetailControl");
+        UNSEEN_ONCE("grTexDetailControl");
         return 1;
-    }
-    case VGL_IX_grTexMultibase: {
-        static int flag;
-        once(&flag, "grTexMultibase");
+    case VGL_IX_grTexMultibase:
+        UNSEEN_ONCE("grTexMultibase");
         return 1;
-    }
-    case VGL_IX_grTexNCCTable: {
-        static int flag;
-        once(&flag, "grTexNCCTable");
+    case VGL_IX_grTexNCCTable:
+        UNSEEN_ONCE("grTexNCCTable");
         return 1;
-    }
 
     /* ---- the gu helpers ---- */
     case VGL_IX_guColorCombineFunction:
@@ -451,12 +416,10 @@ int vgl_native_call(unsigned ix, const uint32_t *a)
     case VGL_IX_grDrawTriangle:
         vgl_draw_triangle(as_verts(a[0]), as_verts(a[1]), as_verts(a[2]));
         return 1;
-    case VGL_IX_grAADrawTriangle: {
-        static int flag;
-        once(&flag, "grAADrawTriangle");
+    case VGL_IX_grAADrawTriangle:
+        UNSEEN_ONCE("grAADrawTriangle");
         vgl_draw_triangle(as_verts(a[0]), as_verts(a[1]), as_verts(a[2]));
         return 1;
-    }
     case VGL_IX_grDrawPolygonVertexList:
         vgl_draw_vertex_list(0, (int)a[0], as_verts(a[1]));
         return 1;

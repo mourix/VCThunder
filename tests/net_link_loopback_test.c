@@ -3,17 +3,11 @@
  *
  * net_link.c carries 192.168.200.X on 127.0.0.X and leaves the ports alone,
  * which assumes Windows lets one process bind 127.0.0.11 and 127.0.0.12. That
- * is what this checks, over real sockets, because nothing about it can be
- * reasoned out of the two game binaries.
- *
- * It also covers the three things a --dry-run cannot reach, since the game only
- * creates a socket once its operator settings enable the link: the address
- * substitution, the broadcast fan-out including the skip of our own identity,
- * and the receive budget's WSAEWOULDBLOCK.
- *
- * No game data, no dump, no profile: the unit under test is included whole so
- * the test can reach its statics, and the host around it is stubbed.
- * /
+ * is checked here over real sockets, because nothing about it can be reasoned
+ * out of the two game binaries. It also covers the three things a --dry-run
+ * cannot reach, since the game creates a socket only once its operator settings
+ * enable the link: the address substitution, the broadcast fan-out including
+ * the skip of our own identity, and the receive budget's WSAEWOULDBLOCK.
  */
 #include "../src/net_link.c"
 

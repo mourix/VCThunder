@@ -2,27 +2,22 @@
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * Both games sum their loaded CODE in three ranges and exchange the result as
- * the link's compatibility gate: a peer whose value differs is marked
- * incompatible and its game traffic is discarded. This host writes `E9 rel32`
- * into those same ranges, so the number a running game computes is not the
- * number an unmodified image computes. Three quantities separate the two
- * effects and all three are logged: the sum over CODE before the first patch,
- * the same ranges with every patch installed, and the cells the game leaves
- * its own answer in. Their difference must equal the sum of the dword deltas
- * across the patches we wrote, which is reported alongside.
- */
+ * the link's compatibility gate. This host writes `E9 rel32` into those same
+ * ranges, so a running game's number is not an unmodified image's. Three
+ * quantities separate the two effects and all three are logged: the sum over
+ * CODE before the first patch, the same ranges with every patch installed, and
+ * the cells the game leaves its own answer in. Their difference must equal the
+ * sum of the dword deltas across the patches we wrote. */
 #include "vcthunder.h"
 
 #include <string.h>
 
-/* The summed span is CODE plus the alignment padding that follows it, up to
- * data_va, because one range genuinely runs past the end of the CODE section:
- * Offroad's third ends at 0x0023DC89, whose containing dword needs two bytes
- * the section does not have. Those bytes are real in the process (game_map
- * zeroes the remainder of the span and __pl_unpackrom writes nothing below
- * data_va, which was checked in both titles), so the game sums them as zero.
- * Bounding this at code_size instead would refuse the very range the game
- * walks, which is exactly what the first run of this file did. */
+/* The summed span is CODE plus its trailing alignment padding, up to data_va,
+ * because one range runs past the end of the CODE section: Offroad's third ends
+ * at 0x0023DC89, whose containing dword needs two bytes the section does not
+ * have. Those bytes are real in the process, game_map zeroes the remainder
+ * and __pl_unpackrom writes nothing below data_va, so the game sums them as
+ * zero. Bounding at code_size would refuse the very range the game walks. */
 #define CKSUM_LO   (G->code_va)
 #define CKSUM_LEN  (G->data_va - G->code_va)
 
@@ -52,13 +47,10 @@ static uint32_t rd32(uint32_t va)
  *      while ((end = [esi]) != 0) { start = [esi-4]; sum += range; esi += 8; }
  *      range: dwords from (start+3)&~3 to end&~7, INCLUSIVE
  *
- * `code` is a buffer holding CODE as it appears at `code_lo`. Ranges are read
- * from live DATA in both cases: __pl_unpackrom materialises the table and
- * nothing patches it, so there is only ever one copy of it.
- *
+ * `code` holds CODE as it appears at `code_lo`. Ranges are read from live DATA
+ * in both cases; __pl_unpackrom materialises the table and nothing patches it.
  * Returns 0 and logs if the table names bytes outside CODE, which would mean
- * the derived table address is not a table. Range and dword counts are
- * reported through *ranges / *dwords for the caller to print once. */
+ * the derived table address is not a table. */
 static int sum_ranges(uint32_t table_va, const uint8_t *code, uint32_t code_lo,
                       uint32_t code_len, uint32_t *out,
                       unsigned *ranges, uint32_t *dwords)
@@ -100,14 +92,13 @@ static int sum_ranges(uint32_t table_va, const uint8_t *code, uint32_t code_lo,
     return 1;
 }
 
-/* Copy CODE before anything writes to it. Call from main() straight after
- * game_map() and before win32_bind(): that is the whole window.
+/* Copy CODE before anything writes to it: from main(), straight after
+ * game_map() and before win32_bind(). That is the whole window.
  *
- * Taking it this early is sound because __pl_unpackrom writes nothing into
- * CODE in either title. That is not an assumption: the record stream's output
- * over the CODE range was compared byte for byte against the file and is
- * identical in both, which is why the snapshot can precede the unpack even
- * though the range table cannot be read until after it. */
+ * Sound this early because __pl_unpackrom writes nothing into CODE in either
+ * title, checked byte for byte against the file, which is why the snapshot
+ * can precede the unpack even though the range table cannot be read until
+ * after it. */
 void cksum_snapshot(void)
 {
     if (!G->code_va || !G->code_size || G->data_va <= G->code_va)
@@ -200,37 +191,22 @@ done:
 /* ---------------------------------------------------------------------------
  * The shim: answer the gate with the value an unmodified image computes.
  *
- * The measurement above is also the fix. `pristine` is what a cabinet running
- * this title computes for itself, arrived at here by running the game's own
- * loop over the game's own bytes before this host had written one of them, so
- * it is derived per run from the image actually loaded and is not a constant
- * anybody has to keep up to date. Answering with it makes this machine's
- * HereIAm compatible with a cabinet and with another VCThunder machine at any
- * other load address, which our own live sum can never be.
+ * The measurement above is also the fix. `pristine` is derived per run by
+ * running the game's own loop over the game's own bytes before this host wrote
+ * one of them, so it is not a constant anybody keeps up to date. Answering with
+ * it makes this machine compatible with a cabinet and with another VCThunder at
+ * any other load address, which our live sum never can be.
  *
- * One site per title, and each is the whole of that title's gate. Every reader
- * was audited rather than assumed, because 5 of the 6 are not in the link at
- * all:
- *
- *   Hydro   _gameinit_GetCodeChecksum, whose two callers are _net_link_Init
- *           (which puts `sum ^ 0x10020` in 0x57a470, read by the three send
- *           paths) and _sysmsg_Display_GameInitStatus_Update, the startup
- *           status screen that prints the checksum as hex. The cells behind it
- *           keep the live sum, which is what cksum_frame() then validates the
- *           range table against: the instrument stays honest and the wire is
- *           corrected.
- *   Offroad the unnamed second copy of the loop, called once by
- *           _network_ModuleInit, which stores what it returns in
- *           __nMyExeChecksum; that cell's three readers (_network_GetVersion,
- *           _network_Receive's compatibility compare, _network_message_HereIAm)
- *           are all downstream of it. _exe_checksum_Generate is left alone
- *           because nothing reads its cell at all.
+ * One site per title, and each is the whole of that title's gate: Hydro's
+ * _gameinit_GetCodeChecksum, whose cells keep the LIVE sum so cksum_frame() can
+ * still validate the range table against it, and Offroad's unnamed second copy
+ * of the loop, called by _network_ModuleInit. _exe_checksum_Generate is left
+ * alone because nothing reads its cell.
  *
  * Both sites are inside the summed ranges, so the six bytes written here are
- * accounted for in cksum_report_live()'s delta like every other patch. That is
- * not a problem to solve: the point is precisely that what the game computes
- * about itself no longer has to be what it says.
- */
+ * accounted for in cksum_report_live()'s delta. That is the point, not a
+ * problem: what the game computes about itself no longer has to be what it
+ * says. */
 static int s_shim_getter, s_shim_link;
 
 static int shim_site(uint32_t va, const char *what)
@@ -279,21 +255,16 @@ void cksum_install_shim(void)
 /* ---------------------------------------------------------------------------
  * The R2 checksum: the other value in the same HereIAm message.
  *
- * Both titles XOR `entry[+0x3c] + entry[+0x00]` over the R2 archive's own
- * directory as the archive is opened (Hydro in _r2file_OpenForRead, Offroad in
- * _r2file_LoadRefTable_XDir). It is therefore a pure function of the ASSET
- * FILE, not of loaded CODE, and this host neither patches nor hooks anything on
- * that path: r2_cache.c hooks the two name LOOKUPS and nothing else. So unlike
- * the code checksum it is expected to survive untouched, and there is nothing
- * to shim.
+ * Both titles XOR `entry[+0x3c] + entry[+0x00]` over the R2 archive's directory
+ * as it is opened. It is a pure function of the ASSET FILE, not of loaded CODE,
+ * and this host neither patches nor hooks anything on that path, so unlike the
+ * code checksum it is expected to survive untouched.
  *
- * "Expected" is why this watches rather than samples. The cell is an
- * accumulator that starts at 0 and is reset on the way in, so a single reading
- * proves nothing about where it ends up. This reports the first value and every
- * change after it, then says what it settled on. Stability across the run, and
- * across runs, is the evidence: the code checksum moved with our load address
- * and this must not.
- */
+ * "Expected" is why this WATCHES rather than samples: the cell is an
+ * accumulator reset on the way in, so a single reading proves nothing. This
+ * reports the first value and every change, then what it settled on. Stability
+ * across the run is the evidence: the code checksum moves with our load address
+ * and this must not. */
 static uint32_t s_r2_value, s_r2_link_value;
 static unsigned s_r2_changes, s_r2_link_changes;
 
@@ -347,14 +318,13 @@ static void r2_settled(void)
 }
 
 /* Read the cells the game leaves its own answer in, from the frame boundary,
- * and say the first time each one is populated whether it agrees with the sum
- * measured over the same bytes. Self-disarming: a title has at most two of
- * these, and 0 stays 0 for the one it does not have.
+ * and say the first time each is populated whether it agrees with the sum
+ * measured over the same bytes. Self-disarming: a title has at most two, and 0
+ * stays 0 for one it does not have.
  *
- * A cell reads 0 until the module that fills it has run, which is why this
- * polls rather than reporting once. Offroad's link value in particular is
- * written by _network_ModuleInit, which runs whether or not the link is
- * enabled: the checksum call precedes the _Network_bEnabled test. */
+ * A cell reads 0 until the module filling it has run, which is why this polls.
+ * Offroad's link value is written by _network_ModuleInit, which runs whether or
+ * not the link is enabled. */
 void cksum_frame(void)
 {
     /* `shimmed` selects what the cell is expected to hold. A cell the shim

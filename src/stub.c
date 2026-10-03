@@ -92,8 +92,8 @@ void stub_entry(void)
     /* A relocatable image is one mandatory ASLR is entitled to move, and the
      * check above then turns a working host into a refusal on a machine whose
      * policy we do not control. Stripping the relocations removes the choice:
-     * measured 2026-08-21, an image with none loads at 0x100000 and runs
-     * normally with mandatory ASLR forced on. Enforced at link time too
+     * an image with none loads at 0x100000 and runs normally with mandatory
+     * ASLR forced on. Enforced at link time too
      * (Makefile); refuse here as well, because this is the invariant the base
      * check exists to protect. */
     if (!(nt->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED))

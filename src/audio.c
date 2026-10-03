@@ -2,9 +2,10 @@
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * The game retains its YMF bookkeeping while the host replaces hardware command
- * submission with a 48 kHz WASAPI mixer. Looping is derived from buffer
- * allocation metadata. A render thread mixes voices, and a separate DCS thread
- * executes the game's interrupt callback.
+ * submission with a 48 kHz WASAPI mixer. A voice loops when its buffer was
+ * allocated as a loop or the play's loopDefault is 0; see av_Play. A render
+ * thread mixes voices, and a separate DCS thread executes the game's interrupt
+ * callback.
  */
 #include "vcthunder.h"
 
@@ -67,34 +68,22 @@ typedef enum { AV_MASK_FREE = 0, AV_MASK_GAME, AV_MASK_TICK } av_mask_role_t;
 #define AV_MASK_POLL_MS    5u         /* re-check cadence while waiting        */
 /* Break the cycle in 20 ms, not 1000.
  *
- * MEASURED 2026-08-24, eight steals with the holder and the mask site captured
- * together: the game takes a DCS lock (_dcs_StatusCallbackLock+0x16,
- * _dcs_SndScallEngine+0x35 and +0x1b0 -- all of them just mask and count), then
- * SPINS on _cpuTimeStamp, which lands in our synth_ticks (timebase.c:41/48) on
- * every sample. It is waiting for DCS progress that only the tick thread can
- * make, and the tick thread is waiting for this very mask. A circular wait, and
- * nothing but this steal ends it: every hold measured 1085-1105 ms, which is
- * this threshold plus the waiter's poll overhead, never the game's own work.
+ * The game takes a DCS lock and then SPINS on _cpuTimeStamp, which lands in
+ * timebase.c's synth_ticks on every sample, so it waits for DCS progress only
+ * the tick thread can make while the tick thread waits for this mask. A
+ * circular wait; nothing but the steal ends it.
  *
- * On the cabinet the DCS is a SEPARATE PROCESSOR. Masking the main CPU's
- * interrupts never stopped the audio board; modelling the board as a thread
- * that needs the game's interrupt mask is what coupled them. Fixing that
- * properly means decoupling the board from the ISR, which is a bigger change
- * than this one and wants its own evidence.
+ * On the cabinet the DCS is a SEPARATE PROCESSOR and masking the main CPU never
+ * stopped it; modelling the board as a thread that needs the game's interrupt
+ * mask is what couples them. Decoupling properly is a bigger change.
  *
- * What this does fix is the COST. A steal costs the audio clock the whole
- * threshold -- 1.53 s measured per steal over 8 h, heard as the attract music
- * stopping and race-end samples playing slow. Healthy holds measure 0.03-0.34
- * ms, so 20 ms is ~60x the worst honest hold and cannot fire on one, while
- * cutting the audible stall by fifty. The steal is not made more dangerous by
- * being sooner: it only ever fires in the deadlock, where the alternative is
- * waiting longer. */
+ * What this fixes is the COST: a steal costs the audio clock the whole
+ * threshold. Healthy holds measure 0.03 to 0.34 ms, so 20 ms is ~60x the worst
+ * honest hold and cannot fire on one. */
 #define AV_MASK_STEAL_MS  20u         /* give up and take it; see mask_acquire */
 /* How long the tick waits out one of the game's inline `cli` regions before
- * running anyway. A fifth of the 5 ms tick: long enough that a region the
- * scheduler preempted the game inside of still gets waited out, short enough
- * that the playlist never notices. The regions themselves are a handful of
- * instructions: this is slack for the OS, not for the game. */
+ * running anyway: about a fifth of the 5.4 ms tick, slack for the OS
+ * preempting the game inside one. */
 #define AV_IRQ_WAIT_US    1000u
 
 static CRITICAL_SECTION s_mask_cs;    /* guards the three fields below, briefly */
@@ -111,57 +100,43 @@ static volatile LONG s_dcs_stolen;    /* masks taken after AV_MASK_STEAL_MS    *
 static volatile LONG s_pitch_reverted;
 /* HOW CLOSE THE PCM RAN TO THE CLIFF.
  *
- * s_n_starved counts GetBuffer FAILING, which is not what a dropout is. When
- * the render thread merely wakes late, WASAPI does not fail anything: it plays
- * whatever is still in the endpoint buffer and the host is none the wiser. So
- * `0 starved` over four hours -- which is what every run so far has reported --
- * is not evidence of a clean stream, and a user hearing cutouts had nothing in
- * the log to point at.
- *
- * Padding is the honest measure and it needs no assumed period: it is how many
- * frames the endpoint still has left to play at the moment we wake to refill.
- * Its MINIMUM over an interval is the margin the stream actually ran on, and a
- * wake that finds zero is an interval in which the device had run dry. */
+ * s_n_starved counts GetBuffer FAILING, which is not what a dropout is: when
+ * the render thread merely wakes late WASAPI plays whatever is still in the
+ * endpoint buffer and fails nothing. So `0 starved` is not evidence of a clean
+ * stream. Padding is the honest measure; how many frames the endpoint has
+ * left when we wake to refill, and its MINIMUM over an interval is the margin
+ * the stream actually ran on. */
 static volatile LONG s_pad_min = -1;       /* frames; -1 = nothing sampled yet */
 static volatile LONG s_n_drained;          /* wakes that found the endpoint empty */
 
 /* HOW LONG THE AUDIO CLOCK STOPPED FOR.
  *
- * The tick RATE, which the census has always printed, is the wrong number, and
- * every run so far has been read against it. _dcs_TimerCB (0x1195E8) ignores the
- * interval we hand it, re-reads the game's own timer, and drives the playlist
- * from an ABSOLUTE wall-clock tick count that _dcs_DrivePL compares against
- * per-entry deadlines (119aab). So a slow tick does not play the music slow: it
- * makes the playlist COARSE. What is audible is a GAP -- a window in which this
- * thread did not run at all, in which no sample starts or stops, ended by every
- * missed deadline firing at once.
- *
- * A gap is invisible in a rate. One 200 ms hole in a 30 s interval is 40 ticks
- * of 6000: the census prints 199.7/s and the user hears the music stop. This is
- * the number that was missing. */
+ * The tick RATE is the wrong number. _dcs_TimerCB ignores the interval we hand
+ * it and drives the playlist from an ABSOLUTE tick count compared against
+ * per-entry deadlines, so a slow tick does not play the music slow; it makes
+ * the playlist COARSE, and what is audible is a GAP ended by every missed
+ * deadline firing at once. One 200 ms hole in a 30 s interval costs 37 of
+ * about 5,556 ticks, under 1% of the rate, and the user hears the music stop. */
 #define AV_TICK_LATE_MULT 4u          /* later than 4x the period is a gap */
 static LARGE_INTEGER s_tick_woke;     /* when the tick last came off its wait */
 static volatile LONG s_tick_gap_max_us;
 static volatile LONG s_tick_late;
 /* WHO was holding it. s_mask_owner is a ROLE, and a role cannot be suspended
- * and sampled: the 84 steals of 2026-08-24 each cost 1.53 s of audio clock --
- * measured, one interval losing >0.5 s per steal, exactly 84 of each -- and not
- * one of them could say which thread was stuck. This records the thread that
- * took the mask so the steal path can name it and sample where it is. */
+ * and sampled: without it a steal costs seconds of audio clock and nothing can
+ * say which thread was stuck. */
 static DWORD s_mask_tid;
-/* When the CURRENT holder took it. The steal fires after the waiter has waited
- * 1000 ms, which says nothing about how long any one holder has held: a game
- * thread that acquires and releases every few microseconds can starve the tick
- * thread for a second without ever holding it for more than a moment. Those are
- * opposite bugs -- a stuck holder wants unsticking, a starved waiter wants
- * fairness -- and the steal message asserts the first without measuring it. */
+/* When the CURRENT holder took it. The steal fires after the waiter has waited,
+ * which says nothing about how long any one holder has held, a thread that
+ * acquires and releases every few microseconds can starve the tick thread for a
+ * second without ever holding it long. Those are opposite bugs: a stuck holder
+ * wants unsticking, a starved waiter wants fairness. */
 static LARGE_INTEGER s_mask_since, s_mask_qpf;
 static volatile LONG s_mask_takes;    /* acquisitions, to size the churn */
 static volatile LONG s_mask_held_max_us;  /* longest single hold this interval */
-/* WHERE the masked region began. The five holder samples of 2026-08-24 were all
- * taken 1000 ms in, mid-flight, and named where the thread had got to -- never
- * where it masked. patch_jmp puts our handler at the game's own _EtsPicEnable
- * entry, so our return address IS the game's call site. */
+/* WHERE the masked region began. A holder sampled mid-flight names where the
+ * thread had got to, never where it masked. patch_jmp puts our handler at the
+ * game's own _EtsPicEnable entry, so our return address IS the game's call
+ * site. */
 static uint32_t s_mask_from;
 static volatile LONG s_holder_reports;
 #define AV_HOLDER_REPORTS 8L          /* then stay quiet */
@@ -249,7 +224,12 @@ typedef void (__cdecl *av_dcs_cb_t)(uint32_t seconds_as_float_bits);
 
 static av_dcs_cb_t s_dcs_cb;
 static HANDLE      s_dcs_thread;
-static unsigned    s_dcs_period_ms = 5;
+/* The cabinet's audio interrupt period, 5.4 ms. The game's fades (0x115808)
+ * add a fixed step per tick sized for 0.0054 s and end on real time, so any
+ * other rate breaks them (at 5 ms a fade to silence wrapped and came back
+ * loud). Microseconds, because 5.4 is not whole; dcs_thread keeps it exact on
+ * average with a deadline. */
+static unsigned    s_dcs_period_us = 5400;
 
 /* ---- counters (reported at shutdown, cheap enough to always keep) -------- */
 
@@ -260,10 +240,9 @@ static unsigned s_n_play, s_n_stop, s_n_starved, s_n_ticks;
 /* ------------------------------------------------------------------------- */
 
 /* The game's own pan law, recomputed rather than read out of
- * _audio_dspcmd_sineMap: that table is built by game code we call, but reading
- * it here would mean the mixer thread touching game memory that _ymf_Init may be
- * rewriting. sin(i * (1/256) * (pi/2)) is the same curve, to the last bit that
- * matters at 16-bit output. */
+ * _audio_dspcmd_sineMap: reading that table would mean the mixer thread
+ * touching game memory _ymf_Init may be rewriting. Same curve to the last bit
+ * that matters at 16-bit output. */
 static float s_pan_table[256];
 
 static void pan_table_init(void)
@@ -437,8 +416,8 @@ static void census(void)
 
             if (gap)
                 LOGI("audio: DCS tick gap this interval: longest %.1f ms of a "
-                     "%u ms period; %ld tick(s) later than %ux",
-                     (double)gap / 1000.0, s_dcs_period_ms, (long)late,
+                     "%.1f ms period; %ld tick(s) later than %ux",
+                     (double)gap / 1000.0, s_dcs_period_us / 1000.0, (long)late,
                      AV_TICK_LATE_MULT);
             /* Generous on purpose. Below this the playlist is merely coarse;
              * above it there is a hole the game started and stopped nothing in,
@@ -446,8 +425,8 @@ static void census(void)
             if (gap > 40000)
                 LOGE("audio: the DCS tick did not run for %.0f ms. Hydro's "
                      "playlist starts and stops no sample in such a window and "
-                     "then fires every missed deadline at once: this is what "
-                     "the music cutting out IS", (double)gap / 1000.0);
+                     "then fires every missed deadline at once, which is heard "
+                     "as the music cutting out", (double)gap / 1000.0);
         }
         if (dry)
             LOGE("audio: the endpoint RAN DRY on %ld refill(s) this interval: "
@@ -500,10 +479,9 @@ static DWORD WINAPI render_thread(LPVOID unused)
     DWORD mmcss_task = 0;
     HANDLE mmcss;
     /* IAudioClient::Start leaves the endpoint empty, so the FIRST wake always
-     * finds zero padding. Reporting that as a dropout would print RAN DRY on
-     * every launch and teach the reader to skip the line -- which is exactly
-     * what makes s_n_starved useless. Nothing is sampled until one buffer has
-     * actually been written. */
+     * finds zero padding, and reporting that as a dropout would print RAN DRY
+     * on every launch, which is what makes s_n_starved useless. Nothing is
+     * sampled until one buffer has been written. */
     int primed = 0;
 
     (void)unused;
@@ -586,12 +564,14 @@ static void __cdecl av_Play(uint32_t voice, const int16_t *pcm, uint32_t rate,
     if (!voice_ok(voice))
         return;
 
-    /* Looping comes from _ymf_AllocateSoundBuffer's flag, not from the hardware
-     * loopDefault field; see the header comment. An unknown pointer plays once,
-     * which is the failure that cannot stick. */
+    /* loopDefault 0 loops, as the DS-1 does with a play bank left at 0: race
+     * music is 0 and plays until the game stops it, one-shots are 1. The
+     * engine and drone loops are 0 as well, and also flagged at
+     * allocation. */
+    loop = loop_default == 0;
     for (i = 0; i < AV_BUFFERS; i++)
         if (s_buffer[i].pcm == pcm) {
-            loop = s_buffer[i].loop;
+            loop |= s_buffer[i].loop;
             break;
         }
 
@@ -603,31 +583,13 @@ static void __cdecl av_Play(uint32_t voice, const int16_t *pcm, uint32_t rate,
     v->pos    = 0;
     v->loop   = loop;
     v->active = (pcm && v->frames) ? 1 : 0;
-    /* PITCH IS PER SOUND, NOT PER VOICE, and this is the game's own rule rather
-     * than a choice.
-     *
-     * _audio_dspcmd_Play (0x116128) ORs dirty bit 0x1 into the voice's command
-     * word and writes {loopDefault, pcm, bytes, rate}. It never touches the
-     * pitch cell at +0x1C, which only _audio_dspcmd_ChangePitch (0x1161A8)
-     * writes, under its own bit 0x4. The drain that programmed the hardware
-     * (0x1162F8) then services bit 0x1 like this:
-     *
-     *     11637d:  testb  $0x4,(%ebx)      ; is a pitch change ALSO pending?
-     *     116380:  jne    0x1163de         ; yes -- let the pitch branch do it
-     *     116382:  fildl  (%edi)           ; no  -- program from the RAW RATE
-     *
-     * so a Play with no pitch pending programmed the voice at unity, whatever
-     * the previous sound on that voice had been pitched to. We kept the old
-     * pitch instead, because the mixer reads v->pitch on every block and
-     * nothing reset it: a one-shot landing on an engine voice the game had
-     * wound down to 0 played at (0 + 0x80) * rate >> 8 -- an OCTAVE LOW and
-     * twice as long. The 4 h run of 2026-08-27 censused pitch=0 on 130 of 467
-     * sampled voices, all six of them voices the game pitch-sweeps.
-     *
-     * The dirty-bit test is kept because the drain's order made it order-free:
-     * ChangePitch either side of a Play, inside one 5 ms tick, still won. The
-     * flag is set without the voice lock, as the other attribute setters are,
-     * so the worst a lost update can cost is one tick at unity. */
+    /* Pitch is per sound, not per voice, as in the game: _audio_dspcmd_Play
+     * sets dirty bit 0x1 without touching the pitch cell, and the drain
+     * programs the raw rate unless ChangePitch's 0x4 is also pending. Keeping
+     * the old pitch would play a one-shot on a wound-down engine voice an
+     * octave low. A ChangePitch either side of a Play within one tick still
+     * wins; the flag is set without the voice lock, so a lost update costs one
+     * tick at unity. */
     if (v->pitch_dirty) {
         /* pending: the drain would have applied it, so leave it alone */
     } else if (v->pitch != 0x80) {
@@ -669,6 +631,10 @@ static void __cdecl av_ChangeVolume(uint32_t voice, int32_t vol)
         return;
     if (vol < 0)   vol = 0;
     if (vol > 255) vol = 255;
+    /* Changes only: a fade would otherwise log every step at the same value. */
+    if (s_voice[voice].vol != vol)
+        LOGT("audio: vol   voice=%2u %d -> %d", (unsigned)voice,
+             (int)s_voice[voice].vol, (int)vol);
     s_voice[voice].vol = vol;
 }
 
@@ -749,8 +715,8 @@ static int __cdecl av_ymf_Init(av_dcs_cb_t cb)
             LOGE("audio: CreateThread(dcs) failed %lu", GetLastError());
     }
 
-    LOGI("audio: _ymf_Init -> ok (callback %p, %u ms tick)",
-         (void *)cb, s_dcs_period_ms);
+    LOGI("audio: _ymf_Init -> ok (callback %p, %.1f ms tick)",
+         (void *)cb, s_dcs_period_us / 1000.0);
     return 0;                                   /* _dcs_Init tests for zero */
 }
 
@@ -767,10 +733,10 @@ static int __cdecl av_ymf_Shutdown(void)
     return 0;
 }
 
-/* Call-through: the original stores {pcm, bytes, rate} into the game's own
- * _YmfSoundBuffers, which _ymf_PlayCookie then reads. All we want is argument 4,
- * which the original discards: it is 1 for exactly the four engine and drone
- * loops and 0 for every sample bank, and it is the only reliable loop signal. */
+/* Call-through: the original stores {pcm, bytes, rate} into the game's
+ * _YmfSoundBuffers. We want argument 4, which it discards: 1 for exactly the
+ * four engine and drone loops, 0 for every sample bank. Music in a bank loops
+ * by loopDefault instead; see av_Play. */
 static int __cdecl av_alloc_buffer(const int16_t *pcm, uint32_t bytes,
                                    uint32_t rate, uint32_t loop,
                                    uint32_t unused, uint32_t index)
@@ -840,7 +806,7 @@ static int mask_nest_of(av_mask_role_t role)
  * Sampled into locals and the thread RESUMED before anything is logged:
  * log_printf takes the CRT's lock for stderr, and taking that while the sampled
  * thread might hold it is a deadlock. watchdog.c logs while its target is still
- * suspended; this does not, deliberately. */
+ * suspended; this deliberately does not. */
 static void report_mask_holder(DWORD tid, av_mask_role_t held, unsigned waited)
 {
     HANDLE h;
@@ -958,11 +924,10 @@ static void mask_acquire(av_mask_role_t role, uint32_t from)
             s_mask_owner = role;
             s_mask_nest = 1;
             s_mask_tid = GetCurrentThreadId();
-            /* The stealer is the holder from NOW. Without this the census's
+            /* The stealer is the holder from NOW: otherwise the census's
              * "longest single hold" runs from the STOLEN holder's start through
-             * the stealer's own release, so every steal interval reported ~1.09 s
-             * that was partly the 1000 ms wait. The honest per-holder number at a
-             * steal is the one logged just below, measured before the handover. */
+             * the stealer's release, so every steal reports the wait as part of
+             * a hold. The honest per-holder number is logged just below. */
             s_mask_since = qpc_now;
             LeaveCriticalSection(&s_mask_cs);
 
@@ -1024,9 +989,9 @@ static int __cdecl av_EtsPicEnable(uint32_t irq, uint32_t enable)
         return 0;
     /* audio_install() patches this in unconditionally, but audio_preload()
      * (which creates the mask) only runs when [audio] audio is true. With audio
-     * off there is no tick thread, so there is no ISR to exclude and the mask has
-     * nothing to protect: doing nothing is both correct and the only safe option,
-     * since the alternative is entering an uninitialised CRITICAL_SECTION. */
+     * off there is no tick thread and so no ISR to exclude: doing nothing is
+     * correct, and the alternative is entering an uninitialised
+     * CRITICAL_SECTION. */
     if (!s_cs_ready)
         return 0;
     if (enable)
@@ -1095,9 +1060,10 @@ void audio_report_dcs_state(void)
  * constant is strictly more correct and costs nothing. */
 static DWORD WINAPI dcs_thread(LPVOID unused)
 {
-    LARGE_INTEGER freq, last;
+    LARGE_INTEGER freq, last, next;
     HANDLE timer;
     LARGE_INTEGER due;
+    LONGLONG period;
 
     (void)unused;
     s_tick_woke.QuadPart = 0;
@@ -1108,14 +1074,29 @@ static DWORD WINAPI dcs_thread(LPVOID unused)
     QueryPerformanceFrequency(&freq);
     QueryPerformanceCounter(&last);
 
-    timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+    /* A one-shot timer re-armed against a deadline, because the periodic
+     * timer takes whole milliseconds. High resolution where Windows has it,
+     * because the plain timer and Sleep wait at the system timer's grain,
+     * 15.6 ms unless something in the process raised it, and at that grain
+     * most ticks are dropped and every fade ends early. Each wait rounds to
+     * the timer's grain; the deadline advances by exactly one period, so the
+     * average is exact. Logged, because the tick's census cannot tell which. */
+    timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                   TIMER_ALL_ACCESS);
     if (timer) {
-        due.QuadPart = -(LONGLONG)s_dcs_period_ms * 10000;
-        if (!SetWaitableTimer(timer, &due, (LONG)s_dcs_period_ms, NULL, NULL, FALSE)) {
-            CloseHandle(timer);
-            timer = NULL;
-        }
+        LOGI("audio: DCS tick timer: high resolution");
+    } else {
+        DWORD err = GetLastError();
+
+        timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+        LOGW("audio: DCS tick timer: no high-resolution timer (error %lu); "
+             "%s, at the system timer's grain", (unsigned long)err,
+             timer ? "plain waitable timer" : "Sleep");
     }
+    period = (LONGLONG)s_dcs_period_us * freq.QuadPart / 1000000;
+    if (period <= 0)
+        period = 1;
+    next.QuadPart = last.QuadPart + period;
 
     while (!s_stop) {
         av_dcs_cb_t cb;
@@ -1126,18 +1107,36 @@ static DWORD WINAPI dcs_thread(LPVOID unused)
         volatile uint32_t *depth =
             (volatile uint32_t *)(uintptr_t)G->dcs_lock_depth;
 
-        if (timer)
-            WaitForSingleObject(timer, 100);
-        else
-            Sleep(s_dcs_period_ms);
+        {
+            LARGE_INTEGER t0;
+            LONGLONG rem;
+
+            QueryPerformanceCounter(&t0);
+            rem = next.QuadPart - t0.QuadPart;
+            if (rem > 0) {
+                due.QuadPart = -(rem * 10000000 / freq.QuadPart);
+                if (due.QuadPart == 0)
+                    due.QuadPart = -1;
+                if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE))
+                    WaitForSingleObject(timer, 100);
+                else
+                    Sleep((DWORD)((rem * 1000 + freq.QuadPart - 1) / freq.QuadPart));
+            }
+            /* A whole missed period is dropped, not replayed, as a masked
+             * interrupt on the cabinet was delivered once. The phase is kept,
+             * so jitter never drifts the rate. */
+            QueryPerformanceCounter(&t0);
+            next.QuadPart += period;
+            if (t0.QuadPart >= next.QuadPart)
+                next.QuadPart += ((t0.QuadPart - next.QuadPart) / period + 1) * period;
+        }
         if (s_stop)
             break;
 
-        /* Measured across the WAIT ONLY -- before the mask is taken and before
-         * any game code runs -- so this is the scheduler's answer and not the
-         * callback's: how long between this thread being ready to work and
-         * being allowed to. `last` cannot serve, because it is reset after the
-         * callback and so folds the tick's own duration in. */
+        /* Measured across the WAIT ONLY; before the mask is taken and before
+         * any game code runs, so this is the scheduler's answer and not the
+         * callback's. `last` cannot serve: it is reset after the callback and
+         * folds the tick's own duration in. */
         {
             LARGE_INTEGER woke;
 
@@ -1149,8 +1148,7 @@ static DWORD WINAPI dcs_thread(LPVOID unused)
 
                 if (gap_us > s_tick_gap_max_us)
                     InterlockedExchange(&s_tick_gap_max_us, gap_us);
-                if ((unsigned)gap_us >
-                    AV_TICK_LATE_MULT * s_dcs_period_ms * 1000u)
+                if ((unsigned)gap_us > AV_TICK_LATE_MULT * s_dcs_period_us)
                     InterlockedIncrement(&s_tick_late);
             }
             s_tick_woke = woke;
@@ -1164,7 +1162,7 @@ static DWORD WINAPI dcs_thread(LPVOID unused)
         dt = (double)(now.QuadPart - last.QuadPart) / (double)freq.QuadPart;
         last = now;
         if (dt < 0.0 || dt > 1.0)
-            dt = (double)s_dcs_period_ms / 1000.0;
+            dt = (double)s_dcs_period_us / 1000000.0;
         dtf = (float)dt;
         memcpy(&bits, &dtf, sizeof bits);
 
@@ -1260,12 +1258,10 @@ static int format_understood(const WAVEFORMATEX *f)
 }
 
 /* MUST run before game_map(). WASAPI is COM and brings up MMDevAPI, AudioSes
- * and the endpoint's driver stack lazily: all of which need LoadLibrary, which
- * stops working the moment the game's CODE lands on this process's PE headers.
- * So the device is opened, the format negotiated and the render thread started
- * while the image is still intact; it plays silence until the game asks for a
- * voice. Same rule as win32_preload(), glide_preload() and diego_preload(). */
-int audio_preload(unsigned dcs_ms, unsigned volume_percent, const char *routing,
+ * and the endpoint's driver stack lazily, all of which need LoadLibrary, which
+ * stops working once the game's CODE lands on this process's PE headers. Same
+ * rule as win32_preload(), glide_preload() and diego_preload(). */
+int audio_preload(unsigned dcs_us, unsigned volume_percent, const char *routing,
                   unsigned balance)
 {
     HRESULT hr;
@@ -1284,8 +1280,8 @@ int audio_preload(unsigned dcs_ms, unsigned volume_percent, const char *routing,
         s_route = ROUTE_MIX;
     balance_set(balance);
 
-    if (dcs_ms)
-        s_dcs_period_ms = dcs_ms;
+    if (dcs_us)
+        s_dcs_period_us = dcs_us;
     s_user_gain = (float)volume_percent / 100.0f;
     if (s_user_gain < 0.0f) s_user_gain = 0.0f;
     if (s_user_gain > 4.0f) s_user_gain = 4.0f;
@@ -1324,12 +1320,11 @@ int audio_preload(unsigned dcs_ms, unsigned volume_percent, const char *routing,
         return 0;
     }
 
-    /* Mix at the cabinet's real 48 kHz rate, independent of the endpoint's
+    /* Mix at the cabinet's real 48 kHz, independent of the endpoint's
      * control-panel rate. Some USB DACs advertise 384 kHz as their shared mix
-     * format; following it multiplied every voice's mixer work by eight and
-     * made boot reliability depend on that device. Shared-mode WASAPI's
-     * AUTOCONVERTPCM path converts this ordinary float-stereo client stream to
-     * the endpoint mix format. */
+     * format; following it multiplied every voice's mixer work by eight.
+     * Shared-mode WASAPI's AUTOCONVERTPCM converts this stream to the endpoint
+     * format. */
     fixed_fmt = (WAVEFORMATEX *)CoTaskMemAlloc(sizeof *fixed_fmt);
     if (!fixed_fmt) {
         CoTaskMemFree(mix_fmt);
@@ -1437,11 +1432,12 @@ int audio_preload(unsigned dcs_ms, unsigned volume_percent, const char *routing,
              1000.0 * (double)s_buf_frames / (double)s_out_rate,
              route_description());
     else
-        LOGI("audio: %u Hz %s x%d, %u-frame buffer (%.1f ms), DCS tick %u ms, "
+        LOGI("audio: %u Hz %s x%d, %u-frame buffer (%.1f ms), DCS tick %.1f ms, "
              "routing=%s",
              (unsigned)s_out_rate, s_fmt_float ? "float32" : "int16", s_channels,
              (unsigned)s_buf_frames,
-             1000.0 * (double)s_buf_frames / (double)s_out_rate, s_dcs_period_ms,
+             1000.0 * (double)s_buf_frames / (double)s_out_rate,
+             s_dcs_period_us / 1000.0,
              route_description());
     return 1;
 }
@@ -1510,7 +1506,7 @@ int audio_install(void)
         /* The hardware's table starts at zero, which would mean hard left and
          * half speed. Pan really is per VOICE and survives a Play, so this is
          * the only thing that sets it before the game first does. Pitch is per
-         * SOUND -- av_Play reverts it -- so this is belt and braces there. */
+         * SOUND, av_Play reverts it, so this is belt and braces there. */
         s_voice[i].pan   = 0x7F;
         s_voice[i].pitch = 0x80;
     }

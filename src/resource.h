@@ -2,24 +2,27 @@
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * It exists so the icon's ID has one definition rather than a number written
- * twice and drifting; windres and the compiler both read this.
- *
- * The release version lives here for the same reason, and it is the ONLY
- * definition of it: the resource block, the log's first line and the settings
- * launcher's caption all read these three macros. A version bump is this file
- * and the documents that quote it, nothing else.
- *
- * It is a VERSION, not a build stamp. It changes when a release does and never
- * because a build happened, so it costs nothing in reproducibility -- which is
- * the whole reason log.c refuses __DATE__ and __TIME__.
+ * twice and drifting; windres and the compiler both read this. The release
+ * version lives here for the same reason and this is its ONLY definition: the
+ * resource block, the log's first line and the launcher's caption all read
+ * these three macros. It is a VERSION, not a build stamp, so it costs nothing
+ * in reproducibility, which is why log.c refuses __DATE__ and __TIME__.
  */
 #ifndef VCT_RESOURCE_H
 #define VCT_RESOURCE_H
 
 #define IDI_VCTHUNDER 101
 
+/* THE SHIPPED vcthunder.ini, embedded. A pack does not carry a settings file:
+ * the binary writes one when there is none (config_seed_ini), so unzipping a
+ * new build over an old folder cannot replace the user's own; the zip has
+ * nothing to replace it WITH, and deleting the file is how a user asks for
+ * the shipped one back. res/vcthunder.rc names the source file; the Makefile's
+ * $(RES) rule depends on it, so editing the ini rebuilds the resource. */
+#define IDR_DEFAULT_INI 102
+
 #define VCT_VERSION_MAJOR 0
-#define VCT_VERSION_MINOR 1
-#define VCT_VERSION       "0.1"
+#define VCT_VERSION_MINOR 2
+#define VCT_VERSION       "0.2"
 
 #endif /* VCT_RESOURCE_H */

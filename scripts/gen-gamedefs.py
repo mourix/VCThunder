@@ -3,24 +3,12 @@
 """gen-gamedefs.py -- emit one game_profile_t per title, from the binary.
 
 READ-ONLY with respect to the game; writes generated/<title>_profile.c. The
-output is DATA, so VCThunder can carry several titles in one image and choose
-at startup. Per title it emits:
+output is DATA, so VCThunder carries several titles in one image and chooses at
+startup: image layout, named anchors resolved through a candidate list, the
+Glide entry points with their argument bytes, the __imp__ slots, the Win32
+entries with no slot, the hardware boundaries, and the offsets and call sites
+found by scanning code patterns.
 
-  * image layout (CODE extent, DATA/.bss/.stack, the record-stream boundary)
-  * named anchors, resolved through a CANDIDATE LIST so one table serves titles
-    whose subsystems have different names (_diegoio_comm_* vs _mb_io_comm_*)
-  * glide[]  Glide entry points with VA and argument BYTES for cdecl->stdcall thunks
-  * imp[]    __imp__ slots: slot VA + the kernel32/ws2_32 name to store there
-  * w32[]    Win32 entries with no __imp__ slot: entry VA + name, patched with a jmp
-  * hw[]     hardware boundaries the shim implements itself, incl. ETS int gates
-  * derived offsets and call sites found by scanning code patterns
-
-A pattern that does not match emits 0 and says so. That is the whole point: an
-anchor absent from a title is a fact about the title, and the shim's installers
-check for it. Guessing a plausible address instead would produce a shim that
-patches the wrong function and reports success.
-
-Usage:
     python3 scripts/gen-gamedefs.py                  # every ETS title
     python3 scripts/gen-gamedefs.py --title offroad
     python3 scripts/gen-gamedefs.py --check          # verify only, write nothing
@@ -146,6 +134,10 @@ HW = [
 # titles that solve the same problem under different names: Hydro's I/O board
 # is _diegoio_comm_*, Offroad's is _mb_io_comm_*, and the shim only cares which
 # function enables the control callback.
+# A PATTERN THAT DOES NOT MATCH EMITS 0 AND SAYS SO. That is the whole point: an
+# anchor absent from a title is a fact about the title, and the shim's
+# installers check for it. Guessing a plausible address instead would produce a
+# shim that patches the wrong function and reports success.
 ANCHORS = [
     ("entry",             ["__p_start"],              "PE entry; call this after patching"),
     ("unpackrom",         ["__pl_unpackrom"],         "expands DATA + .bss; keep"),
@@ -215,10 +207,10 @@ ANCHORS = [
                            "the 2D screen rect: left, right, top, bottom"),
     ("viewport_zscreen",   ["_Viewport_zscreen"],
                            "half_hres_f / tan(fov/2); the projection scale"),
-    # Consumers found by the complete 2026-08-16 `_Viewport_*` audit. They
-    # make a clip/read/state decision before the primitive-origin seam, so the
-    # host gives each one a scoped coordinate or native-FOV view. The absent
-    # title emits 0 for every member it does not own.
+    # Every consumer of `_Viewport_*` that makes a clip/read/state decision
+    # before the primitive-origin seam. The host gives each one a scoped
+    # coordinate or native-FOV view. The absent title emits 0 for every member
+    # it does not own.
     ("ws_lensflare",       ["_anim_air_DoLensFlare"],
                            "Hydro lens-flare LFB occlusion read"),
     ("ws_drawqueue",       ["_drawqueue_Draw"],
@@ -231,6 +223,8 @@ ANCHORS = [
                            "Offroad native-FOV identity comparison"),
     ("ws_flag_icon",       ["__hud_DrawFlagIcon"],
                            "Offroad nested viewport save and restore"),
+    ("ws_select_draw",     ["_wpr_select_Draw"],
+                           "Hydro track/boat select: native frame over 3D"),
     # The class the widescreen origin cannot serve by keeping the game native:
     # a draw that is meant to cover the WHOLE screen. It is defined by what a
     # function DOES with a viewport width, not by which member it reads: the
@@ -498,20 +492,6 @@ def observed_argbytes(t, names):
 # "this title does not have this pattern", which for a cross-title generator is
 # an ordinary answer and not a failure.
 
-def d_r2_dir(t):
-    """R2 directory pointer and count: unnamed file-static DATA, taken from
-    _r2file_NameToDoid's first two absolute loads rather than baked in."""
-    va = t.va("_r2file_NameToDoid")
-    if va is None:
-        return None, None
-    d, off = t.read(), va - t.image_base
-    if d[off] != 0xA1 or d[off + 0x16] != 0xA1:
-        return None, None
-    count = struct.unpack_from("<I", d, off + 1)[0]
-    dirp = struct.unpack_from("<I", d, off + 0x17)[0]
-    return dirp, count
-
-
 def d_arrow_materials(t):
     """_anim_land_InitArrowSign caches one (mesh, material) pair per ramp material
     ID in an unnamed .bss cell:
@@ -651,6 +631,200 @@ def d_speaker_mode(t):
     return struct.unpack_from("<I", d, off + 0x27)[0]
 
 
+def d_ffb_cells(t):
+    """The game's OWN force-feedback state, one cell at a time, so the host can
+    read the events instead of the sum.
+
+    THE DAC IS THE SUM AND THE SUM IS NOT ENOUGH. Both titles compose their
+    steering force out of NAMED units and add them together before writing the
+    one signed byte at io_dac_out. A wheel wants the sum; that is the whole
+    point of it. A gamepad cannot use it: the units are not interchangeable and
+    the sum has already thrown away which was which, so a pad driven from the
+    byte reproduces a spring it cannot render and a dither it should not.
+    Four rounds of trying to un-mix it said so.
+
+    Hydro's tune table names eight units (FFB_UNIT_INTENSITY_MASTER, _MOTOR,
+    _WATER, _STEER, _FWDCAV, _REVCAV, _BOOSTER, _COLLIDE), each a float slot the
+    operator can scale; _phys_SimulateSingle evaluates all eight, sums them into
+    one accumulator, multiplies by MASTER and clamps to +-1. THREE OF THEM ARE
+    _xmath_RandomFloat; FWDCAV, REVCAV and BOOSTER are noise, sign-flipped on
+    frame parity, and they dominate the byte's high-frequency content.
+
+    Derived from _phys_AttachSteeringFeedback, which is the one function that
+    touches every cell exactly once: it clears the lot with a run of
+    `C7 05 <disp32> 00000000` (mov dword [abs], 0) in a fixed order. Seven of
+    them, no more and no fewer, all in .bss, which is checked rather than
+    assumed; a compiler that reordered the stores would change the meaning of
+    every anchor here, so the count and the order ARE the derivation and a
+    surprise must refuse rather than mislabel.
+
+    Offroad does not share the shape and does not have to: it carries a whole
+    named module, and two of its globals are the event stream on their own.
+    _ffbnew_SetFFBForceType validates 0 <= type < 3 and stores the current force
+    type; _ffbnew_CurHitVal is written by the three collision entry points
+    (_ffbnew_HumanCollide, _ffbnew_HumanCollideWithWOB, _ffbnew_WallCollide) and
+    decayed by _ffbnew_FFBFunc. Both are read, never written, by this host.
+    """
+    out = {k: None for k in ("ffb_accum", "ffb_collide", "ffb_impulse_a",
+                             "ffb_impulse_b", "ffb_force_type", "ffb_hit_val",
+                             "ffb_attached", "ffb_tire_jolts", "ffb_shocks_hist",
+                             "ffb_shock_vals", "ffb_mode", "ffb_tire_jolts_n",
+                             "ffb_shocks_hist_n", "ffb_shock_vals_n",
+                             "ffb_hit_fn", "ffb_boost_field",
+                             "boost_root", "boost_hop_n", "boost_hop1",
+                             "boost_hop2", "boost_field", "boost_kind",
+                             "boost_index", "boost_index_n")}
+    d = t.read()
+
+    va = t.va("_phys_AttachSteeringFeedback")
+    if va is not None:
+        base = va - t.image_base
+        zeroed, i = [], base
+        while i < base + 0x70:
+            if (d[i] == 0xC7 and d[i + 1] == 0x05 and
+                    struct.unpack_from("<I", d, i + 6)[0] == 0):
+                zeroed.append(struct.unpack_from("<I", d, i + 2)[0])
+                i += 10
+                continue
+            i += 1
+        # accumulator, collide flag, A amplitude, A state, B amplitude,
+        # B state, B rate, in the order the function clears them.
+        if len(zeroed) == 7 and all(a > t.image_base for a in zeroed):
+            out["ffb_accum"] = zeroed[0]
+            out["ffb_collide"] = zeroed[1]
+            out["ffb_impulse_a"] = zeroed[3]
+            out["ffb_impulse_b"] = zeroed[5]
+        # The object the feedback is attached to: the cell the same function
+        # compares its argument against, `A1 disp32` at the very top.
+        if d[base] == 0xA1:
+            out["ffb_attached"] = struct.unpack_from("<I", d, base + 1)[0]
+
+    va = t.va("_ffbnew_SetFFBForceType")
+    if va is not None:
+        base = va - t.image_base
+        # the single `A3 imm32` (mov [abs], eax) inside the range check
+        for i in range(base, base + 0x20):
+            if d[i] == 0xA3:
+                out["ffb_force_type"] = struct.unpack_from("<I", d, i + 1)[0]
+                break
+    # The rest of Offroad's module is named, and the names ARE the derivation:
+    # a symbol table recovered from the binary is not a guess. Sizes come from
+    # the next symbol along, which is why they are read here rather than
+    # written down.
+    #
+    # THE COLLISION CELL IS NOT THE MODULE. _ffbnew_CurHitVal is one term of
+    # several and it is the WORST of them to sample: _ffbnew_FFBFunc runs on the
+    # 60 Hz thread and zeroes it every pass, so a frame-boundary poll at 30 Hz
+    # essentially never sees one, measured, a whole Offroad race reported zero
+    # hits while the DAC swung -128..127. The texture terms are the ones that
+    # persist: per-tire jolts written by _KinWorkHack, a suspension history, and
+    # the last shock value per corner. Those can be polled.
+    out["ffb_hit_val"] = t.va("_ffbnew_CurHitVal")
+    out["ffb_tire_jolts"] = t.va("_ffbnew_tireJolts")
+    out["ffb_shocks_hist"] = t.va("_ffbnew_shocksHist")
+    out["ffb_shock_vals"] = t.va("_lastShockVals")
+    out["ffb_mode"] = t.va("_ffbnew_curMode")
+    out["ffb_hit_fn"] = t.va("_ffbnew_FFBFunc")
+
+    # Hydro's boost state. The BOOSTER unit is RandomFloat gated on it and is
+    # computed inline, so it reaches no cell, but the STATE does, and it is a
+    # field of the boat rather than a global: _phys_ChangeBoosterState(obj,
+    # state) opens `mov [ecx + disp32], eax`. The object itself is ffb_attached,
+    # which _phys_AttachSteeringFeedback already gives us. Derived from that one
+    # store and checked for shape rather than assumed.
+    va = t.va("_phys_ChangeBoosterState")
+    if va is not None:
+        base = va - t.image_base
+        if d[base + 8] == 0x89 and d[base + 9] == 0x81:      # mov [ecx+d32],eax
+            out["ffb_boost_field"] = struct.unpack_from("<I", d, base + 10)[0]
+    # WHETHER BOOST IS FIRING, as the game itself knows it: a pointer chain
+    # from a named global to one field, each hop taken from the game's own
+    # loads. Pressing the button is not boosting: both titles need fuel the
+    # player collects, and an empty tank presses to nothing.
+    #
+    #   Hydro    boost SECONDS, a float that falls while the booster fires.
+    #            _hud_Work hands _powerup_CollectPowerup `[player + 0x48]`
+    #            (`8B 49 d8; 51; 6A 00; E8 -> CollectPowerup`) for each entry of
+    #            _Player_apData, and CollectPowerup opens `mov eax,[esp+8];
+    #            mov edx,[eax+d8]` and adds a pickup's seconds with its first
+    #            `fld [edx+d8]`. _Player_apData holds every boat, AI included,
+    #            so the entry is indexed by the cell _race_Init loads (`A1 imm32`)
+    #            to pick the boat it hands _phys_AttachSteeringFeedback:
+    #            _Player_nHuman, the operator menu's UNIT ID, which is not 0 on
+    #            a linked cabinet's Unit 2. No index, no chain: slot 0 would be
+    #            some other boat.
+    #   Offroad  the nitro FLAG, non-zero while it fires. _ffbnew_FFBFunc loads
+    #            the vehicle as `mov esi,[_Racer_pPlayer]` ... `mov edi,[esi+d8]`
+    #            and gates its nitro force on its first `mov eax,[edi+d32];
+    #            add esp,0xC; cmp eax,ebp`.
+    va_c = t.va("_powerup_CollectPowerup")
+    va_h = t.va("_hud_Work")
+    root = t.va("_Player_apData")
+    if va_c is not None and va_h is not None and root is not None:
+        bc, bh = va_c - t.image_base, va_h - t.image_base
+        hop1 = hop2 = field = None
+        for i in range(bh, bh + 0x800):
+            if (d[i] == 0xE8 and
+                    i + 5 + struct.unpack_from("<i", d, i + 1)[0] == bc and
+                    d[i - 6] == 0x8B and d[i - 5] == 0x49 and
+                    d[i - 3:i] == b"\x51\x6a\x00"):
+                hop1 = d[i - 4]
+                break
+        if d[bc:bc + 4] == b"\x8b\x44\x24\x08" and d[bc + 4:bc + 6] == b"\x8b\x50":
+            hop2 = d[bc + 6]
+            for i in range(bc, bc + 0x80):
+                if d[i] == 0xD9 and d[i + 1] == 0x42:
+                    field = d[i + 2]
+                    break
+        index = None
+        va_r = t.va("_race_Init")
+        va_a = t.va("_phys_AttachSteeringFeedback")
+        if va_r is not None and va_a is not None:
+            br, ba = va_r - t.image_base, va_a - t.image_base
+            for i in range(br, br + 0x1000):
+                if (d[i] == 0xE8 and
+                        i + 5 + struct.unpack_from("<i", d, i + 1)[0] == ba):
+                    for j in range(i - 5, i - 0x30, -1):
+                        if d[j] == 0xA1:
+                            index = struct.unpack_from("<I", d, j + 1)[0]
+                            break
+                    break
+        if index is not None and index != t.va("_Player_nHuman"):
+            index = None
+        index_n = t.sym_floats("_Player_apData")
+        if None not in (hop1, hop2, field, index, index_n):
+            out.update(boost_root=root, boost_hop_n=2, boost_hop1=hop1,
+                       boost_hop2=hop2, boost_field=field, boost_kind=1,
+                       boost_index=index, boost_index_n=index_n)
+    va_f = t.va("_ffbnew_FFBFunc")
+    root = t.va("_Racer_pPlayer")
+    if va_f is not None and root is not None:
+        bf = va_f - t.image_base
+        hop1 = field = None
+        for i in range(bf, bf + 0x100):
+            if (d[i] == 0x8B and d[i + 1] == 0x35 and
+                    struct.unpack_from("<I", d, i + 2)[0] == root):
+                for j in range(i + 6, i + 0x20):
+                    if d[j] == 0x8B and d[j + 1] == 0x7E:
+                        hop1 = d[j + 2]
+                        break
+                break
+        for i in range(bf, bf + 0x800):
+            if (d[i] == 0x8B and d[i + 1] == 0x87 and
+                    d[i + 6:i + 11] == b"\x83\xc4\x0c\x3b\xc5"):
+                field = struct.unpack_from("<I", d, i + 2)[0]
+                break
+        if None not in (hop1, field):
+            out.update(boost_root=root, boost_hop_n=1, boost_hop1=hop1,
+                       boost_hop2=0, boost_field=field, boost_kind=2,
+                       boost_index=0, boost_index_n=0)
+    for key, sym in (("ffb_tire_jolts_n", "_ffbnew_tireJolts"),
+                     ("ffb_shocks_hist_n", "_ffbnew_shocksHist"),
+                     ("ffb_shock_vals_n", "_lastShockVals")):
+        out[key] = t.sym_floats(sym) if hasattr(t, "sym_floats") else None
+    return out
+
+
 def d_dac_out(t):
     """The outbound board cell the game writes its steering-motor command into.
 
@@ -728,8 +902,8 @@ def d_mb_handshake(t):
 
     A synthesised packet therefore cannot invent them: send the wrong bit and an
     eeprom read stays pending forever, or (for bit 5) the mismatch branch
-    arms the security exchange, which is precisely what the Hydro work found it
-    is best to leave unarmed. Echoing the game's own cell back is correct by
+    arms the security exchange, which is best left unarmed, as on Hydro.
+    Echoing the game's own cell back is correct by
     construction and needs no model of the board.
 
     Derived, not written down: scan _mb_receive for `and r32, imm8` with each
@@ -1058,10 +1232,17 @@ def d_hooks(t, log):
         ("hook_ws_racer_tag",    "_racer_ShowRacerTag"),
         ("hook_ws_race_update",  "_race_UpdateDynamics"),
         ("hook_ws_flag_icon",    "__hud_DrawFlagIcon"),
+        ("hook_ws_select_draw",  "_wpr_select_Draw"),
         ("hook_ymf_alloc",       "_ymf_AllocateSoundBuffer"),
         ("hook_ymf_free",        "_ymf_DeallocateSoundBuffer"),
         ("hook_r2_find_name",    "_r2file_FindObjectNameInDir"),
         ("hook_r2_name_to_doid", "_r2file_NameToDoid"),
+        # Offroad's force-feedback tick. It is hooked to READ, not to change:
+        # it consumes _ffbnew_CurHitVal and then zeroes it, on the game's own
+        # 60 Hz thread, so every collision is gone before a 30 Hz poll from the
+        # frame boundary can see it, measured, two full races reported zero
+        # hits while the DAC swung -128..127.
+        ("hook_ffb_hit",         "_ffbnew_FFBFunc"),
         # The five call-timer targets. Their prologue lengths are derived per
         # title and never written down: Offroad's _mesh3d_DetermineLod opens
         # `mov eax,[esp+4]` (4) then `mov ecx,[eax+0xd8]` (6), so Hydro's 5 lands
@@ -1299,7 +1480,6 @@ def emit(t, tables, log):
             fields.append((field, 0, f"ABSENT in {tid}: {'/'.join(cands)}"))
 
     # --- derived ---
-    r2_dir, r2_cnt = d_r2_dir(t)
     mat_tex = d_material_texture(t)
     tex_start, tex_even, tex_info = d_texobj(t)
     dcs_depth = d_dcs_lock_depth(t)
@@ -1316,6 +1496,7 @@ def emit(t, tables, log):
 
     mbh = d_mb_handshake(t)
     dac_out = d_dac_out(t)
+    ffb = d_ffb_cells(t)
     cks = d_code_cksum(t)
     hooks = d_hooks(t, log)
     derived = [
@@ -1348,6 +1529,8 @@ def emit(t, tables, log):
          "_race_UpdateDynamics prologue: len | reloc<<8"),
         ("hook_ws_flag_icon", hooks["hook_ws_flag_icon"],
          "__hud_DrawFlagIcon prologue: len | reloc<<8"),
+        ("hook_ws_select_draw", hooks["hook_ws_select_draw"],
+         "_wpr_select_Draw prologue: len | reloc<<8"),
         ("hook_ymf_alloc", hooks["hook_ymf_alloc"],
          "_ymf_AllocateSoundBuffer prologue: len | reloc<<8"),
         ("hook_ymf_free", hooks["hook_ymf_free"],
@@ -1374,8 +1557,52 @@ def emit(t, tables, log):
          "board eeprom-read ack toggle, from _mb_receive"),
         ("io_dac_out", dac_out,
          "steering-motor DAC channel 0, from the title's own write_dac"),
-        ("r2_directory", r2_dir, "derived from _r2file_NameToDoid"),
-        ("r2_directory_count", r2_cnt, "derived from _r2file_NameToDoid"),
+        ("ffb_accum", ffb["ffb_accum"],
+         "Hydro: the summed force before MASTER and the clamp"),
+        ("ffb_collide", ffb["ffb_collide"],
+         "Hydro: COLLIDE's +-1 flag, set by _phys_Collided, spent each frame"),
+        ("ffb_impulse_a", ffb["ffb_impulse_a"],
+         "Hydro: decaying impulse A state"),
+        ("ffb_impulse_b", ffb["ffb_impulse_b"],
+         "Hydro: decaying impulse B state, fired by _phys_Collided"),
+        ("ffb_attached", ffb["ffb_attached"],
+         "Hydro: the object the steering feedback is attached to"),
+        ("ffb_force_type", ffb["ffb_force_type"],
+         "Offroad: _ffbnew_curForceType, 0..2, from _ffbnew_SetFFBForceType"),
+        ("ffb_hit_val", ffb["ffb_hit_val"],
+         "Offroad: _ffbnew_CurHitVal, set by the three collision entry points"),
+        ("ffb_tire_jolts", ffb["ffb_tire_jolts"],
+         "Offroad: _ffbnew_tireJolts, written by _KinWorkHack"),
+        ("ffb_tire_jolts_n", ffb["ffb_tire_jolts_n"],
+         "floats in _ffbnew_tireJolts, from the next symbol along"),
+        ("ffb_shocks_hist", ffb["ffb_shocks_hist"],
+         "Offroad: _ffbnew_shocksHist, the suspension history"),
+        ("ffb_shocks_hist_n", ffb["ffb_shocks_hist_n"],
+         "floats in _ffbnew_shocksHist"),
+        ("ffb_shock_vals", ffb["ffb_shock_vals"],
+         "Offroad: _lastShockVals, the last shock value per corner"),
+        ("ffb_shock_vals_n", ffb["ffb_shock_vals_n"],
+         "floats in _lastShockVals"),
+        ("ffb_mode", ffb["ffb_mode"],
+         "Offroad: _ffbnew_curMode, which _ffbnew_DoFFB gates the whole module on"),
+        ("ffb_boost_field", ffb["ffb_boost_field"],
+         "Hydro: boost state, offset into ffb_attached, from _phys_ChangeBoosterState"),
+        ("boost_root", ffb["boost_root"],
+         "the global the boost chain starts from: Hydro _Player_apData, Offroad _Racer_pPlayer"),
+        ("boost_index", ffb["boost_index"],
+         "Hydro: _Player_nHuman, the local boat's entry in boost_root; 0: deref boost_root itself"),
+        ("boost_index_n", ffb["boost_index_n"], "entries in boost_root when indexed"),
+        ("boost_hop_n", ffb["boost_hop_n"], "pointer hops after dereferencing boost_root"),
+        ("boost_hop1", ffb["boost_hop1"], "first hop's offset, from the game's own load"),
+        ("boost_hop2", ffb["boost_hop2"], "second hop's offset, from the game's own load"),
+        ("boost_field", ffb["boost_field"],
+         "Hydro: boost seconds (float); Offroad: the nitro flag (int)"),
+        ("boost_kind", ffb["boost_kind"],
+         "1: fuel, firing while it falls; 2: flag, firing while non-zero"),
+        ("ffb_hit_fn", ffb["ffb_hit_fn"],
+         "Offroad: _ffbnew_FFBFunc, hooked to read CurHitVal before it zeroes it"),
+        ("hook_ffb_hit", hooks["hook_ffb_hit"],
+         "_ffbnew_FFBFunc prologue: len | reloc<<8"),
         ("material_texture", mat_tex, "material->texture, from _material_SetState"),
         ("texobj_start", tex_start, "startAddress, from _tmem_Select"),
         ("texobj_evenodd", tex_even, "evenOdd, from _tmem_Select"),
@@ -1546,6 +1773,10 @@ def emit_registry(tids):
     return "".join(out)
 
 
+# A PATTERN THAT DOES NOT MATCH EMITS 0 AND SAYS SO. That is the whole point:
+# an anchor absent from a title is a fact about the title, and the shim's
+# installers check for it. Guessing a plausible address instead would produce a
+# shim that patches the wrong function and reports success.
 def main():
     argv = sys.argv[1:]
     check = "--check" in argv

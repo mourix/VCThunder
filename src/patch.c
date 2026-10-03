@@ -2,35 +2,20 @@
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * Everything that rewrites the game's resident code or builds code of our own
- * to hand it: an import slot, a jmp, a single call site, a cdecl -> stdcall
- * thunk, a prologue-relocating hook, and the counting and timing instruments
- * built out of the same parts. Glide thunks copy arguments because the game
- * caller and the provider callee each clean their own frame.
- *
- * Three rules bind every one of them.
- *
- * EVERY PRIMITIVE REFUSES ADDRESS 0. An absent anchor IS 0 -- 38 of Offroad's
- * are -- and an installer is supposed to game_require() before patching. These
- * are the backstop for the ones that do not, and they name the caller instead
- * of faulting inside a memcpy on the null page.
- *
- * EVERY BYTE GOES THROUGH THE EMITTER BELOW, which bounds-checks before it
- * writes rather than after, and which carries where the bytes will RUN
- * separately from where they are being assembled. Both matter: a sequence built
- * in a scratch buffer and copied into the pool has a different rel32 than the
- * same bytes assembled in place.
- *
- * THE POOL IS EXECUTABLE, FINITE AND NEVER FREED PIECEWISE. Exhaustion is a
- * refusal that names the pool, not a wrap.
+ * to hand it. Glide thunks copy arguments because the game caller and the
+ * provider callee each clean their own frame. Every byte goes through the
+ * emitter below, which bounds-checks before it writes.
  */
 #include "vcthunder.h"
 
 #include <string.h>
 
+/* THE POOL IS EXECUTABLE, FINITE AND NEVER FREED PIECEWISE. Exhaustion is a
+ * refusal that names the pool, not a wrap. */
 #define POOL_SIZE 0x20000u
 /* Scratch deliberately exceeds the limit it is checked against; see the note
- * on patch_time_calls(), where a check that could only fire AFTER the overrun
- * cost a crash four bytes from the end of a stub that disassembled perfectly. */
+ * on patch_time_calls(). A check that can only fire AFTER the overrun is not a
+ * check. */
 #define THUNK_MAX     384
 #define THUNK_SCRATCH 640
 
@@ -75,26 +60,17 @@ static void flush(void *at, size_t n)
 }
 
 /* ---- the emitter --------------------------------------------------------- */
-/* Every stub in this file is hand-assembled. Spelling one out as
- * `buf[i++] = 0xNN` with a `memcpy(buf + i, &v, 4); i += 4;` after every
- * immediate is sixty chances to miss an `i += 4`, and the failure mode of one
- * missed increment is a stub that disassembles perfectly up to the point where
- * it does not -- in the file whose mistakes arrive as a process that vanishes
- * with no fault and no log.
+/* Every stub here is hand-assembled, and spelling one out as `buf[i++] = 0xNN`
+ * with a memcpy after every immediate is sixty chances to miss an `i += 4`,
+ * whose failure mode is a stub that disassembles perfectly up to the point
+ * where it does not, in the file whose mistakes arrive as a process that
+ * vanishes with no fault and no log.
  *
- * `emit_t` carries the three things those lines kept re-deriving, and the third
- * is the one that is easy to get wrong: WHERE THE BYTES WILL RUN is not where
- * they are being written. Several stubs are built in a scratch buffer and copied
- * into the pool afterwards, so a rel32 resolved against the scratch is resolved
- * against the wrong address. That distinction is carried by the type rather
- * than by a comment on one call site, and `emit_rel32` is the only thing that
- * computes a displacement.
- *
- * Every write is bounds-checked, so an overrun is REFUSED rather than detected
- * afterwards. That is what the scratch/limit pairs below were reaching for: the
- * old check could only fire after the buffer had already been overrun, which is
- * the very bug it existed to prevent. The margin stays, and is now belt to the
- * emitter's braces. */
+ * `emit_t` carries the three things those lines re-derive, the third being the
+ * easy one to get wrong: WHERE THE BYTES WILL RUN is not where they are
+ * written. `emit_rel32` is the only thing that computes a displacement, and
+ * every write is bounds-checked, so an overrun is REFUSED rather than detected
+ * afterwards. */
 typedef struct {
     unsigned char       *buf;       /* scratch being written into            */
     const unsigned char *at;        /* where buf[0] will be EXECUTED         */
@@ -201,18 +177,18 @@ static int emit_ok(const emit_t *e, size_t limit, const char *what,
     return 1;
 }
 
+/* EVERY PRIMITIVE BELOW REFUSES ADDRESS 0. An absent anchor IS 0, and 38 of
+ * Offroad's are; installers are supposed to game_require() first, and these are
+ * the backstop, naming the caller instead of faulting inside a memcpy. */
 void patch_slot(uint32_t slot_va, const void *target)
 {
     *(const void **)(uintptr_t)slot_va = target;
 }
 
-/* Every primitive here refuses address 0.
- *
- * An absent anchor IS 0 (38 of Offroad's are), and every installer is
- * supposed to game_require() before patching. This is the backstop for the ones
- * that do not, and it names the caller's address instead of faulting on the
- * null page inside a memcpy, which is what a missed check has looked like
- * every time so far. */
+/* Every primitive here refuses address 0. An absent anchor IS 0 (38 of
+ * Offroad's are) and every installer is supposed to game_require() first; this
+ * is the backstop, naming the caller's address instead of faulting on the null
+ * page inside a memcpy. */
 static int refuse_null(uint32_t va, const char *what)
 {
     if (va)
@@ -367,16 +343,14 @@ void *hook_call_through(uint32_t va, const void *replacement, uint32_t prologue)
  * because Glide calls do not nest and are made only from the render thread. */
 static uint64_t s_thunk_t0;
 
-/* THE TAIL BOTH CYCLE-ACCOUNTING STUBS SHARE.
- *
- * On entry edx:eax holds the call's duration and the flags are already saved by
- * the caller. A duration that overflows 32 bits is a preemption rather than a
- * call, so it is kept out of the minimum and out of the histogram.
+/* THE TAIL BOTH CYCLE-ACCOUNTING STUBS SHARE. On entry edx:eax holds the
+ * call's duration and the caller has saved the flags. A duration overflowing 32
+ * bits is a preemption rather than a call, so it is kept out of the minimum and
+ * the histogram.
  *
  * `a_hist` is 0 where there is no histogram, and that is not a preference:
- * `bsr` clobbers ecx, which patch_time_calls is still holding the nesting depth
- * in. The thunk has no such live register -- its callee has returned and only
- * edi/esi/ebp are popped after this -- so it passes one. */
+ * `bsr` clobbers ecx, which patch_time_calls still holds the nesting depth in.
+ * The thunk has no such live register, so it passes one. */
 static void emit_min_fast(emit_t *e, uint32_t a_min, uint32_t a_fast,
                           uint32_t fast_lim, uint32_t a_hist)
 {

@@ -20,6 +20,9 @@ static char    s_path[MAX_PATH];
  * that table across the DLL boundary. */
 typedef int (__stdcall *health_fn)(void);
 static health_fn s_health;
+/* Black the side strips at the next swap; NULL from an older provider. */
+typedef void (__stdcall *black_margins_fn)(void);
+static black_margins_fn s_black_margins;
 
 /* Glide passes the mode selected by the game to grSstWinOpen as an enum, not
  * pixel dimensions, and the game passes a null cabinet HWND with it. Translate
@@ -146,9 +149,8 @@ static void glide_publish_raster(int w, int h, int native_lfb_width)
 
 /* EVERY GEOMETRY DECISION THIS HOST MAKES, IN ONE FUNCTION.
  *
- * There are three numbers and they are easy to confuse, which is most of why
- * this is now written down in one place instead of spread down the middle of
- * grSstWinOpen:
+ * There are three numbers and they are easy to confuse, which is why they are
+ * written down here rather than spread down the middle of grSstWinOpen:
  *
  *   `resolution`  the enum the GAME asked for, possibly redirected by
  *                 video_mode through the title's own mode table.
@@ -160,8 +162,8 @@ static void glide_publish_raster(int w, int h, int native_lfb_width)
  *                 pixels and computes the aspect from the wrong rectangle.
  *
  * Everything downstream (the window, the provider, the widescreen engine)
- * consumes this one answer, so there is one place for M5's cabinet timings to
- * be derived and one place they can be wrong. */
+ * consumes this one answer, so there is one place for a cabinet's video timings
+ * to be derived and one place they can be wrong. */
 typedef struct {
     int resolution;                 /* after any video_mode redirection    */
     int surface;                    /* the enum actually opened            */
@@ -523,6 +525,8 @@ static void vcglide_init(void)
     init_fn init = (init_fn)(void *)GetProcAddress(s_glide, "vglInit@0");
 
     s_health = (health_fn)(void *)GetProcAddress(s_glide, "vglHealth@0");
+    s_black_margins = (black_margins_fn)(void *)GetProcAddress(
+        s_glide, "vglBlackMargins@0");
     if (!s_health)
         LOGW("glide: this vcglide.dll does not export vglHealth@0; a lost GPU "
              "device will not be noticed this run");
@@ -713,29 +717,19 @@ static uint64_t s_glide_cycles_prev[VCT_MAX_GLIDE];
 
 static void report_glide_cycles(uint64_t frames)
 {
-    struct { unsigned idx; uint64_t d; } top[10];
-    unsigned n = 0, i, j, k;
+    enum { TOP = 10 };
+    diag_top_t top[TOP];
+    unsigned n = 0, i;
     uint64_t total = 0;
 
     if (!frames || !g_cfg.glide_timing)
         return;
     for (i = 0; i < (unsigned)G->glide_count; i++) {
         uint64_t d = s_glide_cycles(i) - s_glide_cycles_prev[i];
+
         s_glide_cycles_prev[i] = s_glide_cycles(i);
         total += d;
-        if (!d)
-            continue;
-        for (j = 0; j < n; j++)
-            if (d > top[j].d)
-                break;
-        if (j >= 10u)
-            continue;
-        if (n < 10u)
-            n++;
-        for (k = n - 1; k > j; k--)
-            top[k] = top[k - 1];
-        top[j].idx = i;
-        top[j].d = d;
+        n = diag_top_insert(top, n, TOP, i, d);
     }
     if (!total)
         return;
@@ -755,9 +749,9 @@ static void report_glide_cycles(uint64_t frames)
          * available. */
         LOGI("    %5.1f%%  %8.3f Mcyc/frame  %9.0f cyc/call  min %7u  "
              "%5.1f%% under %u  %s",
-             100.0 * (double)top[i].d / (double)total,
-             (double)top[i].d / (double)frames / 1.0e6,
-             calls ? (double)top[i].d / (double)calls : 0.0,
+             100.0 * (double)top[i].value / (double)total,
+             (double)top[i].value / (double)frames / 1.0e6,
+             calls ? (double)top[i].value / (double)calls : 0.0,
              gt->min == 0xFFFFFFFFu ? 0u : gt->min,
              s_glide_calls[top[i].idx] ?
                  100.0 * (double)gt->fast / (double)s_glide_calls[top[i].idx]
@@ -796,33 +790,23 @@ static void report_glide_cycles(uint64_t frames)
  * remain visible. */
 static void report_glide_mix(uint64_t frames)
 {
-    struct { unsigned idx; uint32_t delta; } top[64];
-    unsigned n = 0, i, j;
+    enum { TOP = 64 };
+    diag_top_t top[TOP];
+    unsigned n = 0, i;
     uint32_t total = 0;
 
     if (!frames)
         return;
     for (i = 0; i < (unsigned)G->glide_count; i++) {
         uint32_t d = s_glide_calls[i] - s_glide_calls_prev[i];
+
         s_glide_calls_prev[i] = s_glide_calls[i];
         total += d;
-        if (!d)
-            continue;
-        for (j = 0; j < n; j++)
-            if (d > top[j].delta)
-                break;
-        if (j >= 64u)
-            continue;
-        if (n < 64u)
-            n++;
-        for (unsigned k = n - 1; k > j; k--)
-            top[k] = top[k - 1];
-        top[j].idx = i;
-        top[j].delta = d;
+        n = diag_top_insert(top, n, TOP, i, d);
     }
     LOGI("glide mix: %.0f calls/frame total", (double)total / (double)frames);
     for (i = 0; i < n; i++)
-        LOGI("    %8.1f/frame  %s", (double)top[i].delta / (double)frames,
+        LOGI("    %8.1f/frame  %s", (double)top[i].value / (double)frames,
              G->glide[top[i].idx].name);
 }
 
@@ -1035,7 +1019,6 @@ static void report_frame_timing(uint64_t swap_ticks, int interval)
     profile_report_geometry(s_presented_frames);
     profile_report_call_times(s_presented_frames);
     profile_report();
-    r2_cache_report();
     net_link_report(s_presented_frames);
     s_perf_start = now;
     s_presented_frames = 0;
@@ -1434,7 +1417,7 @@ static void gl_buffer_swap(int interval)
         s_real_swap(interval);
         QueryPerformanceCounter(&after);
         /* The provider's own verdict on the frame it just presented. A hung
-         * GPU device does not stop the frames -- it stops the pictures, which
+         * GPU device does not stop the frames; it stops the pictures, which
          * is why the watchdog cannot see it and why this is asked here rather
          * than watched for. Measured: 90 minutes of a frozen picture at a
          * reported 27.8 fps. */
@@ -1697,4 +1680,10 @@ int glide_bind(void)
 int glide_view_width(void)
 {
     return s_view_width;
+}
+
+void glide_black_margins(void)
+{
+    if (s_black_margins)
+        s_black_margins();
 }

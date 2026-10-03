@@ -3,8 +3,7 @@
  *
  * Two wire formats (Hydro's Diego, Offroad's MagicBus) and the force-feedback
  * direction that shares their send buffer. The synthesised board is one
- * TRANSPORT among the several M6 will need; see the io_transport_t comment in
- * src/io.h.
+ * TRANSPORT among several; see the io_transport_t comment in src/io.h.
  */
 #include "vcthunder.h"
 #include "io.h"
@@ -51,10 +50,12 @@ static unsigned char rd8(unsigned a)
 }
 
 /* --- INI parsing ------------------------------------------------------- */
-static int pad_down(const host_state_t *host, unsigned ordinal)
+/* ANY OF THE DEVICES THE BINDING NAMES, which is io.h's io_pad_down(). It was
+ * io_button_down() on one mask and one ordinal until Phase 4; the accessor
+ * moved rather than this call site, so the arithmetic stays in one place. */
+static int pad_down(const host_state_t *host, const io_pad_bind_t *bind)
 {
-    return ordinal >= 1 && ordinal <= 32 &&
-           (host->buttons & (1u << (ordinal - 1))) != 0;
+    return io_pad_down(host->buttons, bind);
 }
 
 static unsigned char encode_steering(float v)
@@ -84,10 +85,11 @@ static unsigned sequential_shift(const host_state_t *host)
     static int up_held, down_held;
     int up, down;
 
-    if (!s_cfg.pad_shift_up && !s_cfg.pad_shift_down)
+    if (!io_pad_bound(&s_cfg.pad_shift_up) &&
+        !io_pad_bound(&s_cfg.pad_shift_down))
         return 0;
-    up = pad_down(host, s_cfg.pad_shift_up);
-    down = pad_down(host, s_cfg.pad_shift_down);
+    up = pad_down(host, &s_cfg.pad_shift_up);
+    down = pad_down(host, &s_cfg.pad_shift_down);
     if (up && !up_held && s_gear < 3)
         s_gear++;
     if (down && !down_held && s_gear > 0)
@@ -117,7 +119,7 @@ static void coin_edge(int pressed, int *held, unsigned char *counter, int slot)
 static void sample_input(void)
 {
     host_state_t host;
-    int left, right, up, down;
+    int left, right, up, down, pov;
     static int last_steer = -1, last_throttle = -1;
     static unsigned last_buttons = ~0u;
 
@@ -129,60 +131,206 @@ static void sample_input(void)
 
     /* MAME analogue fields have digital increment/decrement inputs. Keyboard
      * arrows and controller POV/D-pad take full-lock priority over the axis. */
-    left = io_host_key_down(s_cfg.steer_left) || (s_cfg.pov_digital && host.left);
-    right = io_host_key_down(s_cfg.steer_right) || (s_cfg.pov_digital && host.right);
-    up = io_host_key_down(s_cfg.throttle) || (s_cfg.pov_digital && host.up);
-    down = io_host_key_down(s_cfg.brake) || (s_cfg.pov_digital && host.down);
+    pov = io_config_pov_digital();
+    left = io_key_down(&s_cfg.steer_left) || (pov && host.left);
+    right = io_key_down(&s_cfg.steer_right) || (pov && host.right);
+    up = io_key_down(&s_cfg.throttle) || (pov && host.up);
+    down = io_key_down(&s_cfg.brake) || (pov && host.down);
     if (left != right)
         s_steer = left ? 0x00 : 0xFF;
     if (up != down)
         s_throttle = up ? 0xFE : 0x01;
 
-    /* Logical buttons only, from src/bindings.def. Which physical line each one
-     * lands on is the BOARD's business, not the host's; see
-     * build_payload_diego/_mb.
-     *
-     * A row whose `button` is BTN_NONE contributes nothing here and the whole
-     * test folds away: the coin slots are counters (coin_edge, below) and the
-     * shifter paddles drive a latch (sequential_shift). */
+    /* Logical buttons only, from src/bindings.def; which physical line each
+     * lands on is the BOARD's business. A row whose `button` is BTN_NONE folds
+     * away here: coin slots are counters (coin_edge) and shifter paddles drive
+     * a latch (sequential_shift). */
     s_buttons = 0;
-#define BINDING(key, hydro, offroad, pad_default, button, hl, ol)             \
+#define BINDING(key, hydro, offroad, pad_hydro, pad_offroad, button, hl, ol)  \
     if ((button) != BTN_NONE &&                                               \
-        (io_host_key_down(s_cfg.key) || pad_down(&host, s_cfg.pad_##key)))    \
+        (io_key_down(&s_cfg.key) || pad_down(&host, &s_cfg.pad_##key))) \
         s_buttons |= (button);
 #define BINDING_AXIS(key, hydro, offroad, hl, ol)     /* the axes, above */
-#define BINDING_PAD(key, pad_default, hl, ol)         /* the latch, below */
+#define BINDING_PAD(key, pad_hydro, pad_offroad, hl, ol)  /* the latch, below */
 #include "bindings.def"
 #undef BINDING
 #undef BINDING_AXIS
 #undef BINDING_PAD
     s_buttons |= sequential_shift(&host);
 
-    coin_edge(io_host_key_down(s_cfg.coin1) || pad_down(&host, s_cfg.pad_coin1),
+    coin_edge(io_key_down(&s_cfg.coin1) || pad_down(&host, &s_cfg.pad_coin1),
               &s_coin1_held, &s_coin1, 1);
-    coin_edge(io_host_key_down(s_cfg.coin2) || pad_down(&host, s_cfg.pad_coin2),
+    coin_edge(io_key_down(&s_cfg.coin2) || pad_down(&host, &s_cfg.pad_coin2),
               &s_coin2_held, &s_coin2, 2);
 
     if (last_steer != s_steer || last_throttle != s_throttle ||
         last_buttons != s_buttons) {
-        LOGT("io: host state steer=%3u throttle=%3u buttons=0x%03X",
-             s_steer, s_throttle, s_buttons);
+        /* THE ONE LINE THAT SAYS WHAT THE CABINET ACTUALLY RECEIVED. Behind
+         * `log_level = trace` it shares a level with stubs.c's PER-GLIDE-CALL
+         * tracer, which is 1.6 million lines and 64 MB on one race, of which
+         * the wanted ones are 0.07%.
+         *
+         * So it answers to `input_trace` at INFO, on change only. An instrument
+         * you have to RACE with cannot live behind a global verbosity level. */
+        log_printf(io_config_input_trace() ? LOG_INFO : LOG_TRACE,
+                   "io: host state steer=%3u throttle=%3u buttons=0x%03X",
+                   s_steer, s_throttle, s_buttons);
         last_steer = s_steer;
         last_throttle = s_throttle;
         last_buttons = s_buttons;
     }
 }
 
+/* --- the wheel's queue ---------------------------------------------------
+ *
+ * A pass that owes two control ticks runs both at once, but the board sent
+ * each tick's force on its own timer, so the wheel gets the first now and the
+ * rest at their stamps. The timer wakes the poll thread (diego.c poll_wait()),
+ * which calls sim_deliver(). The lock serialises di_set_force() between that
+ * thread and the game's. */
+#define WHEEL_QUEUE 4u
+
+typedef struct {
+    float  force;
+    double when_ms;
+} wheel_cmd_t;
+
+static CRITICAL_SECTION s_wheel_lock;
+static int s_wheel_lock_ready;
+static HANDLE s_wheel_timer;
+static wheel_cmd_t s_wheel_q[WHEEL_QUEUE];
+static unsigned s_wheel_head, s_wheel_n;
+
+/* The spacing of what was actually sent, for the ffb_trace window: the only
+ * evidence the queue delivers at the board's cadence, wheel or no wheel. */
+static unsigned s_wsent;
+static double s_wlast, s_wgap_min, s_wgap_max, s_wgap_sum;
+
+/* Lock held, or no lock yet. */
+static void wheel_send(float force)
+{
+    double now = io_clock_ms();
+
+    if (s_wsent || s_wlast) {
+        double gap = now - s_wlast;
+
+        if (!s_wsent || gap < s_wgap_min) s_wgap_min = gap;
+        if (!s_wsent || gap > s_wgap_max) s_wgap_max = gap;
+        s_wgap_sum += gap;
+        s_wsent++;
+    }
+    s_wlast = now;
+    di_set_force(force);
+}
+
+/* Lock held. */
+static void wheel_pop_send(void)
+{
+    wheel_send(s_wheel_q[s_wheel_head].force);
+    s_wheel_head = (s_wheel_head + 1u) % WHEEL_QUEUE;
+    s_wheel_n--;
+}
+
+/* Lock held. */
+static void wheel_arm(void)
+{
+    LARGE_INTEGER due;
+    double left;
+
+    if (!s_wheel_n || !s_wheel_timer)
+        return;
+    left = s_wheel_q[s_wheel_head].when_ms - io_clock_ms();
+    /* Relative, in 100 ns units; never 0, which would mean "absolute 0". */
+    due.QuadPart = left > 0.0 ? -(LONGLONG)(left * 10000.0) : -1;
+    if (!due.QuadPart)
+        due.QuadPart = -1;
+    SetWaitableTimer(s_wheel_timer, &due, 0, NULL, NULL, FALSE);
+}
+
+static void wheel_submit(float force, double when_ms)
+{
+    if (!s_wheel_lock_ready) {
+        wheel_send(force);
+        return;
+    }
+    EnterCriticalSection(&s_wheel_lock);
+    if (!s_wheel_timer || when_ms <= io_clock_ms() + 0.5) {
+        /* Due now: anything still queued is older, so it goes first. */
+        while (s_wheel_n)
+            wheel_pop_send();
+        wheel_send(force);
+    } else {
+        if (s_wheel_n == WHEEL_QUEUE)
+            wheel_pop_send();
+        s_wheel_q[(s_wheel_head + s_wheel_n) % WHEEL_QUEUE].force = force;
+        s_wheel_q[(s_wheel_head + s_wheel_n) % WHEEL_QUEUE].when_ms = when_ms;
+        s_wheel_n++;
+        wheel_arm();
+    }
+    LeaveCriticalSection(&s_wheel_lock);
+}
+
+/* [diagnostics] ffb_record: one CSV row per control tick, the force, the
+ * channels the pad model consumed, the motors it commanded and the BOOST
+ * button, so the model can be replayed offline against a real race. */
+static FILE *s_rec;
+static unsigned s_rec_rows;
+static int s_rec_failed;
+
+static void record_tick(double when_ms, float force)
+{
+    const char *path = io_config_ffb_record();
+    ffb_event_state_t ev;
+    unsigned lo, hi;
+    int events;
+
+    if (!path || s_rec_failed)
+        return;
+    if (!s_rec) {
+        s_rec = fopen(path, "w");
+        if (!s_rec) {
+            s_rec_failed = 1;
+            LOGW("io: ffb_record: cannot open '%s'", path);
+            return;
+        }
+        fprintf(s_rec, "t_ms,force,events,have,impact,texture,body,engine,"
+                       "lo,hi,boost_btn,boost_known,boosting\n");
+        LOGI("io: ffb_record: writing every control tick to '%s'", path);
+    }
+    events = rumble_record_state(&ev, &lo, &hi);
+    fprintf(s_rec, "%.2f,%.4f,%d,%d,%.4f,%.4f,%.4f,%.4f,%u,%u,%d,%d,%d\n",
+            when_ms, (double)force, events, ev.have, (double)ev.impact,
+            (double)ev.texture, (double)ev.body, (double)ev.engine, lo, hi,
+            (s_buttons & BTN_BOOST) ? 1 : 0, ev.boost_known, ev.boosting);
+    if (++s_rec_rows % 64u == 0)
+        fflush(s_rec);
+}
+
 /* Read the signed force command from board DAC channel 0. Both titles encode
- * force as clamp(force * -128); configuration controls only motor direction. */
-static void update_force_feedback(void)
+ * force as clamp(force * -128); configuration controls only motor direction.
+ * Runs once per control tick, right after the callback that wrote it. */
+static void update_force_feedback(double when_ms)
 {
     int raw;
 
     if (!G->io_dac_out)
         return;
     raw = (int)(signed char)rd8(G->io_dac_out);
-    di_set_force(-(float)raw / 128.0f);
+    wheel_submit(-(float)raw / 128.0f, when_ms);
+    /* THE UNITS FIRST, THEN THE PAD. These were the other way round, so
+     * rumble.c consumed each frame's channels one frame before they were
+     * filled: every impact arrived late and the first frame of every event was
+     * simply lost. The pad reads what this tick measured, not what the last
+     * one did. Both run now, while the cells hold this tick, and take their
+     * intervals from the stamp. */
+    ffb_events_poll(-(float)raw / 128.0f, when_ms);
+    /* The same command, described to a pad's two motors instead of driven into
+     * a wheel's one. Inert unless [ffb] rumble is set, and never reaches a
+     * wheel; rumble.c's header says why an invented effect is allowed here at
+     * all and nowhere else. */
+    rumble_set_force(-(float)raw / 128.0f, when_ms,
+                     (s_buttons & BTN_BOOST) != 0);
+    record_tick(when_ms, -(float)raw / 128.0f);
 
     if (!s_ffb_trace)
         return;
@@ -210,12 +358,37 @@ static void update_force_feedback(void)
             /* A window of all zeroes is the answer to "is the wheel broken or
              * is the game not asking?", which is the first question every FFB
              * report needs and the only one a screenshot cannot settle. */
+            /* Under the lock: the poll thread sends forces too, and both
+             * di_peak_force() and the spacing are read-and-reset. */
+            if (s_wheel_lock_ready)
+                EnterCriticalSection(&s_wheel_lock);
             LOGI("io: ffb window %u samples, %u nonzero (%u%%), dac %d..%d, "
                  "steer %u..%u, peak sent to DirectInput %ld of 10000",
                  s_ffb_samples, s_ffb_nonzero,
                  s_ffb_samples ? s_ffb_nonzero * 100 / s_ffb_samples : 0,
                  s_ffb_min, s_ffb_max, s_steer_min, s_steer_max,
                  di_peak_force());
+            LOGI("io: ffb window wheel: %u commands, %.1f..%.1f ms apart, "
+                 "mean %.1f ms", s_wsent, s_wsent ? s_wgap_min : 0.0,
+                 s_wsent ? s_wgap_max : 0.0,
+                 s_wsent ? s_wgap_sum / s_wsent : 0.0);
+            s_wsent = 0;
+            s_wgap_sum = 0.0;
+            if (s_wheel_lock_ready)
+                LeaveCriticalSection(&s_wheel_lock);
+            /* The pad's half of the same question, and a separate line rather
+             * than a column on the one above: only one of the two devices can
+             * be attached, so a census that reported both would print a 0 that
+             * means "not this run" next to one that means "the game asked for
+             * nothing". */
+            if (rumble_active()) {
+                /* 240 left ten characters of margin once the census gained
+                 * its sink clause. A truncated diagnostic is a diagnostic
+                 * that lies about the end of its own sentence. */
+                char pad[320];
+                rumble_census(pad, sizeof pad);
+                LOGI("io: ffb window pad: %s", pad);
+            }
             curve[0] = '\0';
             for (i = 0; i < FFB_BINS; i++)
                 n += snprintf(curve + n, sizeof curve - (size_t)n, "%s%lu",
@@ -346,16 +519,33 @@ void io_board_sample_input(void)
 static int sim_open(unsigned dips)
 {
     s_dips = (unsigned char)dips;
+    if (!s_wheel_lock_ready) {
+        InitializeCriticalSection(&s_wheel_lock);
+        s_wheel_lock_ready = 1;
+    }
+    /* High resolution where Windows has it: the plain timer waits at the
+     * system timer's 15.6 ms grain, which is a whole tick late at 16 ms. */
+    s_wheel_timer = CreateWaitableTimerExW(NULL, NULL,
+                                           CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                           TIMER_ALL_ACCESS);
+    if (s_wheel_timer) {
+        LOGI("io: wheel force timer: high resolution");
+    } else {
+        DWORD err = GetLastError();
+
+        s_wheel_timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+        LOGW("io: wheel force timer: no high-resolution timer (error %lu); %s",
+             (unsigned long)err, s_wheel_timer ?
+                 "plain waitable timer, at the system timer's grain" :
+                 "none, so every tick's force is sent as it is computed");
+    }
     return 1;
 }
 
-/* Builds only: it does NOT sample.
- *
- * The poll thread samples host input at its own cadence (~60 Hz) whether or
- * not it is the thread that delivers frames, and the frame boundary delivers
- * at the game's frame rate (~30 Hz). Folding the sample into the build here
- * would have halved the input rate on every title whose frame boundary owns
- * dispatch, which is both of them. */
+/* Builds only: it does NOT sample. The poll thread samples at its own ~60 Hz
+ * whether or not it delivers frames, and frames are delivered at the control
+ * callback's rate (Hydro ~30 Hz), so folding the sample in here would halve the
+ * input rate wherever the frame boundary owns dispatch, which is both titles. */
 static unsigned sim_receive(unsigned char *frame, unsigned max)
 {
     unsigned len = io_board_is_magicbus() ? 16u : 8u;
@@ -366,17 +556,55 @@ static unsigned sim_receive(unsigned char *frame, unsigned max)
     return len;
 }
 
-static void sim_transmit(void)
+static void sim_transmit(double when_ms)
 {
-    update_force_feedback();
+    update_force_feedback(when_ms);
+}
+
+static HANDLE sim_wake(void)
+{
+    return s_wheel_timer;
+}
+
+/* On the poll thread, when the timer fires. */
+static void sim_deliver(void)
+{
+    double now;
+
+    if (!s_wheel_lock_ready)
+        return;
+    EnterCriticalSection(&s_wheel_lock);
+    now = io_clock_ms();
+    while (s_wheel_n && s_wheel_q[s_wheel_head].when_ms <= now + 0.5)
+        wheel_pop_send();
+    wheel_arm();
+    LeaveCriticalSection(&s_wheel_lock);
 }
 
 static void sim_close(void)
 {
+    if (s_rec) {
+        fclose(s_rec);
+        s_rec = NULL;
+    }
+    /* shim_exit() can close this under a live game thread; a transmit after
+     * it must not reopen the file with "w" and truncate the recording. */
+    s_rec_failed = 1;
+    if (!s_wheel_lock_ready)
+        return;
+    EnterCriticalSection(&s_wheel_lock);
+    s_wheel_n = 0;
+    if (s_wheel_timer) {
+        CancelWaitableTimer(s_wheel_timer);
+        CloseHandle(s_wheel_timer);
+        s_wheel_timer = NULL;
+    }
+    LeaveCriticalSection(&s_wheel_lock);
 }
 
 static const io_transport_t k_transport_sim = {
-    "sim", sim_open, sim_receive, sim_transmit, sim_close
+    "sim", sim_open, sim_receive, sim_transmit, sim_wake, sim_deliver,
+    sim_close
 };
 
 static const io_transport_t *const k_transports[] = {

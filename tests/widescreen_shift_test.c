@@ -3,14 +3,11 @@
  *
  * ws_shift() runs per vertex, on the game's own thread, in the shipped default
  * configuration, and it is the one place this host changes a coordinate the
- * game computed. Its per-vertex census is gated and the primitive wrappers
- * carry an identity fast path, and neither is reachable from `--dry-run`: the
- * vertex path only runs once frames are being produced.
- *
- * So it is tested here instead, against the frozen reference implementation
- * pasted in verbatim below as ws_shift_before(). The claim being tested is
- * exact: for every state either function can be called in, the bytes they
- * leave in the destination vertex are identical.
+ * game computed. The vertex path only runs once frames are being produced, so
+ * `--dry-run` cannot reach it and it is tested here against the frozen
+ * reference pasted in verbatim below as ws_shift_before(). The claim is exact:
+ * for every state either function can be called in, the bytes they leave in the
+ * destination vertex are identical.
  */
 /* The unit under test is one translation unit, included whole so the test can
  * reach its statics. `ws_shift` and the primitive wrappers live in

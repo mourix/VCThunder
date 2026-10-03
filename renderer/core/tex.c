@@ -295,16 +295,12 @@ void vgl_tex_download_partial(int tmu, uint32_t start, int this_lod,
     uint32_t off = 0, row_bytes;
     int w, h, l;
     vgl_tmu_t *u;
-    static int announced;
 
     if (tmu < 0 || tmu >= VGL_TMUS || !data)
         return;
-    if (!announced) {
-        announced = 1;
-        vgl_log(0, "tex: grTexDownloadMipMapLevelPartial called; neither "
-                   "game does so in any capture taken; this path has never "
-                   "been exercised");
-    }
+    VGL_LOG_ONCE("tex: grTexDownloadMipMapLevelPartial called; neither "
+                 "game does so in any capture taken; this path has never "
+                 "been exercised");
     u = &vgl.tmu[tmu];
     if (!even_odd)
         even_odd = GR_MIPMAPLEVELMASK_BOTH;
@@ -418,13 +414,9 @@ void vgl_tex_table(int tmu, int type, const void *data)
          * grTexDownloadTable is a palette and its two grTexNCCTable calls
          * select a table nothing ever filled), so YIQ decoding is not
          * implemented and says so where it would be used. */
-        static int announced;
-        if (!announced) {
-            announced = 1;
-            vgl_log(0, "tex: NCC table %d downloaded on TMU%d; no capture "
-                       "of either game contains one and YIQ decoding is not "
-                       "implemented", type, tmu);
-        }
+        VGL_LOG_ONCE("tex: NCC table %d downloaded on TMU%d; no capture "
+                     "of either game contains one and YIQ decoding is not "
+                     "implemented", type, tmu);
     }
 }
 
@@ -486,16 +478,10 @@ static uint32_t decode_texel(const vgl_tmu_t *u, const uint8_t *p)
         return argb(p[1], (int)((c >> 16) & 0xff), (int)((c >> 8) & 0xff),
                     (int)(c & 0xff));
     }
-    default: {
-        static int announced;
-        if (!announced) {
-            announced = 1;
-            vgl_log(0, "tex: format %d is not decoded (YIQ needs an NCC table "
-                       "no capture contains): sampling opaque white",
-                    u->format);
-        }
+    default:
+        VGL_LOG_ONCE("tex: format %d is not decoded (YIQ needs an NCC table "
+                     "no capture contains): sampling opaque white", u->format);
         return 0xffffffffu;
-    }
     }
 }
 

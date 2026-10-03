@@ -244,44 +244,27 @@ void game_unmap(void)
 
 /* ---- the ETS kernel public info block -----------------------------------
  *
- * __pl_unpackrom does not just copy records. Before every write it calls a
- * local overlap test with the record's destination, the record's length, and a
- * 0x100-byte BY-VALUE COPY of the ETS kernel public info block, and it refuses
- * the record (returning 2 for the whole unpack) if the destination range
- * intersects either of two reserved (base, length) regions carried in that
- * block. Both titles' unpackers are the same code to the byte; the pairs live
- * at block offsets 0x44/0x48 and 0x4C/0x50 (helper frame +0x54/+0x58/+0x5C/
- * +0x60), and the test is
+ * __pl_unpackrom tests every record's destination against two reserved
+ * (base, length) pairs at offsets 0x44/0x48 and 0x4C/0x50 of a BY-VALUE COPY of
+ * the ETS kernel public info block, and refuses the whole unpack (status 2) on
+ * an intersection:
  *
  *     refuse if  (A.base <  dst+len && A.base+A.len >  dst)
  *             || (B.base <  dst+len && B.base+B.len >  dst)
  *
- * The block reaches the unpacker through _EtsGetSystemInfo, which asks
- * __p_EtsGetKernelPublicInfoPointer for it: an `int 0xFE` gate, ax=0x254A,
- * bx=5, answered by a host kernel this process does not have. stubs_install_m1
- * gives every ETSGATE entry a stub returning 0, and _EtsGetSystemInfo copies
- * NOTHING when the pointer is 0: it leaves the unpacker's 0x110-byte stack
- * buffer exactly as it found it. The game then tests all 6,578 records against
- * whatever the host left on its own stack at that depth.
+ * The block reaches it through _EtsGetSystemInfo, whose `int 0xFE` gate our
+ * stubs answer with 0, and _EtsGetSystemInfo copies NOTHING when the pointer is
+ * 0, leaving the unpacker's 0x110-byte stack buffer as it found it. The game
+ * then tests all 6,578 records against host stack residue.
  *
- * That is the whole of the trap. Whether the unpack succeeds depended on
- * host stack residue, which is why it moved when code moved between
- * translation units, why it was insensitive to SSE, image base and the thunk
- * pool, and why a getenv/fopen/fwrite diagnostic placed before the unpack
- * "fixed" it: the diagnostic overwrote the residue.
+ * A zeroed block is the truthful answer, not a placation: base 0 with length 0
+ * intersects nothing, and this host reserves nothing inside the span. Anything
+ * it ever does reserve there must be DECLARED in these two pairs rather than
+ * hidden by zeroing them.
  *
- * A zeroed block is the truthful answer here, not a placation: base 0 with
- * length 0 describes a region that intersects nothing, and this host reserves
- * nothing inside the span (the span is ours end to end, and the unpacker is
- * the first thing to write into it). We answer the gate's question; we do not
- * defeat its check. Anything this host ever does reserve inside the span must
- * be declared in these two pairs rather than hidden by zeroing them.
- *
- * Nothing here is derived from any ETS header: the two offsets and the
- * comparison come from the games' own disassembly of __pl_unpackrom, which is
- * the only statement of the contract that binds us. The remaining 0xF0 bytes
- * are unread by this code path and stay zero.
- */
+ * Nothing here comes from an ETS header: the offsets and the comparison are
+ * from the games' own disassembly of __pl_unpackrom. The remaining 0xF0 bytes
+ * are unread on this path and stay zero. */
 #define ETS_PUBLIC_INFO_SIZE 0x100
 
 static uint32_t s_ets_public_info[ETS_PUBLIC_INFO_SIZE / 4];

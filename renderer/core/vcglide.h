@@ -53,7 +53,7 @@ typedef struct {
     /* WHICH site the injection fails: "all" (default) or "renderpass".
      *
      * The blanket form fails command-buffer acquisition first, which returns
-     * before a render pass is ever begun -- so it cannot exercise the one
+     * before a render pass is ever begun, so it cannot exercise the one
      * failure the loss detector is otherwise blind to. A device that
      * refuses ONLY render passes still acquires command buffers and still
      * presents, which is what makes it the dangerous case: frames count up and
@@ -91,6 +91,27 @@ void vgl_log_capped(unsigned *seen, unsigned max, const char *fmt, ...);
     do {                                                                      \
         static unsigned vgl_log_seen_;                                        \
         vgl_log_capped(&vgl_log_seen_, (max), __VA_ARGS__);                   \
+    } while (0)
+
+/* SAY IT ONCE, AND SAY IT WITH THE MESSAGE THE SITE WANTS. Every use of this
+ * marks a path no capture of either game reaches: an entry point the games
+ * never call, a texture format neither downloads, a state block filled by
+ * another provider. It has to be said at all, because a silent unimplemented
+ * path is how a wrong picture gets attributed to something else; and it has to
+ * be said once, because a path that IS reached is reached per frame or per
+ * texel, and then the log becomes the defect.
+ *
+ * Not VGL_LOG_CAPPED(1, ...): that one is for a flood worth bounding and says
+ * so in the line. This is an announcement, and there is nothing to suppress.
+ * As there, the macro owns the flag, so a call site cannot forget to make it
+ * static and two sites cannot share one. */
+#define VGL_LOG_ONCE(...)                                                     \
+    do {                                                                      \
+        static int vgl_log_said_;                                             \
+        if (!vgl_log_said_) {                                                 \
+            vgl_log_said_ = 1;                                                \
+            vgl_log(0, __VA_ARGS__);                                          \
+        }                                                                     \
     } while (0)
 
 /* The window's name: `VCThunder - Hydro (30.0 fps)`. Both backends and the host

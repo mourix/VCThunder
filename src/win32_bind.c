@@ -355,36 +355,28 @@ static const char *w32_name(unsigned i)
 
 void win32_report_calls(uint64_t frames)
 {
-    struct { unsigned idx; uint32_t d; } top[15];
-    unsigned n = 0, i, j, k;
+    enum { TOP = 15 };
+    diag_top_t top[TOP];
+    unsigned n = 0, i;
     uint64_t total = 0;
 
     if (!frames || !g_cfg.win32_counting)
         return;
     for (i = 0; i < (unsigned)(G->imp_count + G->w32_count); i++) {
         uint32_t d = s_w32_calls[i] - s_w32_prev[i];
+
         s_w32_prev[i] = s_w32_calls[i];
         total += d;
-        if (!d)
-            continue;
-        for (j = 0; j < n; j++)
-            if (d > top[j].d)
-                break;
-        if (j >= 15u)
-            continue;
-        if (n < 15u)
-            n++;
-        for (k = n - 1; k > j; k--)
-            top[k] = top[k - 1];
-        top[j].idx = i;
-        top[j].d = d;
+        n = diag_top_insert(top, n, TOP, i, d);
     }
     if (!total)
         return;
-    LOGI("win32 boundary: %.0f calls/frame total across 123 entry points",
-         (double)total / (double)frames);
+    /* The width of the boundary is per-title DATA and comes from the profile.
+     * The two titles do not have the same one. */
+    LOGI("win32 boundary: %.0f calls/frame total across %d entry points",
+         (double)total / (double)frames, G->imp_count + G->w32_count);
     for (i = 0; i < n; i++)
-        LOGI("    %10.1f/frame  %s", (double)top[i].d / (double)frames,
+        LOGI("    %10.1f/frame  %s", (double)top[i].value / (double)frames,
              w32_name(top[i].idx));
 }
 
@@ -485,8 +477,8 @@ static void __cdecl ov_network_Enable(int enable)
 
 int net_link_disable(void)
 {
-    if (!game_require("network", "_network_Enable / _Network_bEnabled",
-                      G->network_enable && G->network_enabled))
+    if (!game_optional("network", "_network_Enable / _Network_bEnabled",
+                       G->network_enable && G->network_enabled))
         return 0;
     patch_jmp(G->network_enable, (void *)ov_network_Enable);
     return 1;

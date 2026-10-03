@@ -1,25 +1,21 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
-"""p1-symbols.py -- recover the CodeView symbol table embedded in HYDRO.EXE.
+"""p1-symbols.py -- recover the CodeView symbol table embedded in the game image.
 
-READ-ONLY. HYDRO.EXE is statically linked and has no PE symbol table (`rabin2 -s` yields 2),
-but LinkLoc left CodeView S_PUB32-style records in the image. Each record is:
+READ-ONLY. The games are statically linked and carry no PE symbol table, but
+LinkLoc left CodeView S_PUB32-style records in the image:
 
-    u16 len | u16 rectype(0x1009) | u32 typeind | u32 segoffset | u16 segment | u8 namelen | name
+    u16 len | u16 rectype(0x1009) | u32 typeind | u32 segoffset
+            | u16 segment | u8 namelen | name
 
-Segment 1 == CODE, segment 2 == DATA. Segment bases are calibrated at runtime against a
-known anchor rather than assumed, so this stays correct if the assumption is ever wrong.
+Segment 1 is CODE and segment 2 DATA; the segment bases are calibrated at
+runtime against a known anchor rather than assumed. The output path carries the
+title, because a constant one would let a run against the second binary
+overwrite the first title's map with no warning.
 
-Emits <analysis dir>/p1/json/symbols.json (build/analysis/<title>/ in a clone):
-{"name": {"va": int, "seg": int, "off": int}, ...}
-
-The output path carries the title, because a constant one would let a run
-against the second binary overwrite the first title's map with no warning.
-
-Usage:
     python3 scripts/p1-symbols.py [--title hydro|offroad]
-    python3 scripts/p1-symbols.py --title offroad --lookup 0x136a18   # nearest symbol
-    python3 scripts/p1-symbols.py --grep diego                        # name search
+    python3 scripts/p1-symbols.py --title offroad --lookup 0x136a18
+    python3 scripts/p1-symbols.py --grep diego
 """
 import json
 import struct
@@ -112,7 +108,7 @@ def build(t):
 def main():
     t = pick()
     # Asking what this does must not RUN it: several of these sweep a whole
-    # dump, and p1-symbols.py writes into analysis/ as a side effect.
+    # dump, and p1-symbols.py writes the symbol cache as a side effect.
     if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
         print(__doc__.strip())
         return 0

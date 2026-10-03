@@ -2,52 +2,17 @@
 # SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
 """ingest-chd.py -- turn a MAME CHD into the data directory this host reads.
 
-THIS IS THE FRONT DOOR. A user who has the games as MAME CHDs has a compressed
-hard-disk image; this host wants a directory of files. Everything between those
-two is here, in one command:
+THE FRONT DOOR. A user with the games as MAME CHDs has a compressed hard-disk
+image; this host wants a directory of files, and everything between the two is
+here in one command:
 
     python3 tools/ingest-chd.py --title hydro --chd hydrthnd.chd --out data
-    python3 tools/ingest-chd.py --title offroad --chd offrthnd.chd --out data
 
-WHAT THE LAYOUT HAS TO BE, AND WHY IT IS FLATTER THAN IT LOOKS
-    The cabinet's disk carries several partitions (C:, D:, sometimes E:), and
-    the game asks for `C:\\HT.R2` and `D:\\SAMAZAA0.CSH` by absolute path. But
-    `fs_map_path()` in src/fs_map.c strips ANY drive specifier and joins the rest
-    onto the data directory, so every drive lands in the SAME place:
-
-        C:\\HYDRO.EXE      ->  data/hydro/HYDRO.EXE
-        D:\\SAMAZAA0.CSH   ->  data/hydro/SAMAZAA0.CSH
-
-    So this merges all partitions into one flat directory per title. Directories
-    INSIDE a partition are preserved: only the drive letter goes.
-
-THE CHD IS READ HERE, AND chdman IS ONLY THE FALLBACK
-    Leaning on chdman costs the user twice over: a 100 MB MAME download to run
-    one command once, and the disk to hold a whole uncompressed drive, because
-    chdman writes the entire image -- 3.2 GB for Hydro, 6.4 GB for Offroad --
-    before this reads ~1 GB of files out of it and deletes the rest.
-
-    `tools/chd.py` reads the CHD directly, decoding only the hunks the files
-    occupy, with nothing but the Python standard library. The container is
-    self-checking: every hunk carries a CRC-16 of its own decoded bytes and the
-    header carries the SHA-1 of the whole image, so `python3 tools/chd.py
-    --verify <chd>` proves the reader against the file itself, without MAME.
-    Both of the user's CHDs pass, every hunk and both whole images, and the
-    files this writes out of them are byte-identical to chdman's.
-
-    chdman is still used, and is still the right thing to use, for anything this
-    reader declines: a CHD older than v5, or one with a parent. Those raise
-    ChdUnsupported, and the fallback below says so and runs chdman.
-
-    The FAT reader below IS ours too, because the alternatives all cost the user
-    an install (`7z`, `mtools`) or root (`mount -o loop`), and Python is already
-    required to build.
-
-NO GAME MATERIAL IS IN THIS REPOSITORY AND NONE EVER WILL BE. This reads the
-user's own lawful dump and writes it to the user's own disk. It then hashes the
-result against the build registered in scripts/titles.py and says plainly
-whether it is the supported one: addresses are per-title DATA, so a different
-build is not a patch away, it needs its own registered entry.
+tools/chd.py reads the container directly and the FAT reader below is ours too,
+so neither a chdman download nor a whole-disk scratch image is needed; chdman
+stays the fallback for a CHD this reader declines. NO GAME MATERIAL IS IN THIS
+REPOSITORY AND NONE EVER WILL BE: this reads the user's own lawful dump and
+writes it to the user's own disk.
 """
 
 import argparse
@@ -120,7 +85,7 @@ def find_chdman(explicit=None):
     """Locate chdman WITHOUT asking anyone to edit PATH.
 
     Order: --chdman, then the repository's own chd/, then PATH. chd/ is the
-    "right place" the error below names -- the same folder the CHDs go in: it is
+    "right place" the error below names, the same folder the CHDs go in: it is
     gitignored and skipped by the contraband scanner precisely so that dropping
     a binary there is safe. An error that says "not on PATH" and stops is not
     help; this one says where to put the file and where to get it.
@@ -185,7 +150,7 @@ def chdman_extract(chd, img, chdman=None):
 def _as_file(src):
     """(file object, whether we opened it). A path opens; anything that already
     reads is passed straight through, so one open CHD serves identify_title()
-    and from_image() without decoding and CRC-checking its map twice -- two
+    and from_image() without decoding and CRC-checking its map twice, two
     seconds each time for Offroad's 1.6 million hunks."""
     if hasattr(src, "read"):
         return src, False
@@ -196,7 +161,7 @@ def _decoded(src):
     """How much of the disk was actually decoded, when it was read as a CHD.
 
     Worth printing: it is the difference between this and chdman, and it is the
-    number to look at if an ingest is slower than it should be -- a hunk that
+    number to look at if an ingest is slower than it should be, a hunk that
     falls out of the cache before the file that shares it is copied is decoded
     twice."""
     if not isinstance(src, ChdImage):
@@ -212,8 +177,8 @@ def open_chd(path, chdman=None, force_chdman=False, jobs=None):
     when chdman had to run, and it is then the caller's to delete.
 
     The native reader is tried first and is what should normally serve. chdman
-    is the fallback for what it declines -- a pre-v5 CHD, or one with a parent
-    -- and forcing it with --chdman remains available for anyone who would
+    is the fallback for what it declines, a pre-v5 CHD, or one with a parent
+   , and forcing it with --chdman remains available for anyone who would
     rather trust MAME's own code than ours.
     """
     if not force_chdman:
@@ -267,6 +232,15 @@ def read_extended(f, ext_base):
     return out
 
 
+# EVERY PARTITION LANDS IN ONE FLAT DIRECTORY PER TITLE. The cabinet's disk
+# carries several (C:, D:, sometimes E:) and the game asks for `C:\\HT.R2` and
+# `D:\\SAMAZAA0.CSH` by absolute path, but fs_map_path() in src/fs_map.c strips
+# ANY drive specifier and joins the rest onto the data directory:
+#
+#     C:\\HYDRO.EXE      ->  data/hydro/HYDRO.EXE
+#     D:\\SAMAZAA0.CSH   ->  data/hydro/SAMAZAA0.CSH
+#
+# Directories INSIDE a partition are preserved; only the drive letter goes.
 def read_partitions(f):
     """Every partition entry: the four primary slots, and the logical volumes
     inside any extended one.
@@ -493,7 +467,7 @@ class Fat:
 def from_image(img, out):
     """Every readable FAT partition, merged flat into `out`.
 
-    `img` is a path, or any object that seeks and reads -- which is how a CHD
+    `img` is a path, or any object that seeks and reads, which is how a CHD
     is ingested with no image on disk at all: ChdImage is exactly that object.
 
     Returns (files written, problems). A partition this reader could not handle
@@ -571,6 +545,11 @@ def sha256(path):
 
 
 def verify(out, tid, offer_any=True, said_where="extracted"):
+    """Hash what was written against the build registered in scripts/titles.py.
+
+    Addresses are per-title DATA, so a different build is not a patch away: it
+    needs its own registered entry. This says plainly which one the user has.
+    """
     """Hash the executable against the registered build.
 
     This is house rule 2 applied at the front door. Addresses and sizes are
@@ -648,8 +627,8 @@ def _trailer(said_where, offer_any):
     if said_where == "existing":
         return ""                                 # the caller says what to do
     if offer_any:
-        return ("\n\nTo unpack it anyway -- which is what registering a new "
-                "build\nstarts with -- pass --any-build.")
+        return ("\n\nTo unpack it anyway, which is what registering a new "
+                "build\nstarts with, pass --any-build.")
     return ("\n\nThe files are unpacked, because you asked for them with "
             "--any-build.\nThey are not playable by this host until that build "
             "is registered.")
@@ -681,7 +660,7 @@ _PARENT = os.path.dirname(REPO_ROOT)
 # The last two are the same convention one level out: a clone that lives beside
 # the CHDs rather than above them is the normal shape when the repository is
 # checked out inside a larger working directory, and this project's own is
-# exactly that. Named directories only -- nothing here walks the parent.
+# exactly that. Named directories only, nothing here walks the parent.
 CHD_SEARCH_ROOTS = [CHD_DIR, REPO_ROOT, os.path.join(REPO_ROOT, "chds"),
                     _PARENT, os.path.join(_PARENT, "chd"),
                     os.path.join(_PARENT, "chds")]
@@ -727,7 +706,7 @@ def identify(img):
 
     A downloaded CHD is called whatever the uploader called it. The executable
     leaf is the one thing that cannot be renamed without breaking the game, so
-    that is what we look for -- and while we are there we hash it, because the
+    that is what we look for, and while we are there we hash it, because the
     build is the other thing a filename cannot be trusted for. Reading one
     executable out of a CHD costs a second; ingesting the wrong build costs the
     user the whole run and a confusing failure at the end of it.
@@ -862,7 +841,7 @@ def run_auto(a):
             out = os.path.join(os.path.abspath(a.out), title)
             if os.path.isdir(out) and os.listdir(out):
                 # NOT "leaving it alone", which counted whatever was there as
-                # done -- including an unsupported build a previous run had
+                # done; including an unsupported build a previous run had
                 # written before refusing it. What is there gets hashed.
                 print(f"  {out} already has files; checking what they are")
                 if verify(out, title, offer_any=False, said_where="existing"):

@@ -16,7 +16,7 @@ There is no CPU emulation here. The game's x86 code executes natively. Everythin
    `kernel32`/`ws2_32` in a single pass.
 2. **The address span is *owned*, not requested.** The game is a LinkLoc flat image with no
    `.reloc`: it must live at its link-time base, from `0x100000`. That range cannot be
-   `VirtualAlloc`ed -- five methods were tried and all return `ERROR_INVALID_ADDRESS`, because
+   `VirtualAlloc`ed; five methods were tried and all return `ERROR_INVALID_ADDRESS`, because
    the PEB and the initial thread stack are already inside it. So `VCThunder.exe` is *based* at
    `0x100000` with a `.bss` large enough that its `SizeOfImage` covers the whole span, and the
    Windows loader reserves it before the kernel places anything.
@@ -103,7 +103,7 @@ calls `ExitProcess`.
 | `src/game.h`, `src/game.c` | The multi-title contract: the profile type, the active profile `G`, title selection. Read the header comment before touching any installer. |
 | `generated/` | **Generated from your own dump; never edited.** Image layout, named anchors, the Glide/`__imp__`/Win32/hardware tables, and the span. Produced by `scripts/gen-gamedefs.py`. |
 | `src/stub.c` | `VCThunder.exe`. Reserves the span via its own `SizeOfImage`, verifies the loader honoured it, hands off to the DLL. |
-| `src/launcher.c` | The native no-argument launcher: settings, per-title bindings, live device testing. |
+| `src/launcher.c` | The native no-argument launcher: settings, per-title bindings, live device testing. Its settings model is `launcher_model.c` (no window in it, so a test reaches it), Add/Detect/Set up are `launcher_capture.c`, and the palette and fonts are `launcher_theme.c`. |
 | `src/loader.c` | Maps the span, copies CODE, calls `__pl_unpackrom`, enters the game. |
 | `src/patch.c` | The patch primitives: slot, jmp, single call site, cdecl→stdcall thunk, prologue-relocating hook. |
 | `src/win32_bind.c` | Replaces the ETS kernel. Unresolved entries fall back to ETS's own code, logged. |
@@ -111,12 +111,14 @@ calls `ExitProcess`.
 | `src/glide_bind.c` | Binds the Glide entry points onto the provider; owns the mode/surface decision and the frame-pacing reports. |
 | `src/widescreen.c` | The Hor+ engine: seam origin, widened frustum, and the title-scoped repair hooks. |
 | `src/io_*.c`, `src/diego.c` | The cabinet I/O boundary, split along a seam a real board or a traffic replayer can drop into. |
+| `src/dinput.c`, `src/input_probe.c` | DirectInput wheels and the game's own force passed to them; `input_probe.c` is the launcher's non-exclusive device census. XInput and WinMM are read in `io_host.c`. |
+| `src/ffb_events.c`, `src/rumble.c` | Pad rumble, the one effect this host derives: the game's own force-feedback cells, read rather than the summed DAC byte, turned into two motor levels. |
 | `src/audio.c`, `src/audio_offroad.c` | The shared WASAPI transport and each title's own audio backend. |
 | `src/timebase.c` | Makes a modern CPU look like a 333 MHz Celeron. Without it the game hangs forever in its own sleep. |
 | `src/settings.def` | **The one settings table**: every key the host reads, expanded by both the config parser and the launcher. |
 | `renderer/` | **A separate module and a separate DLL**, sharing no source or header with `src/`. `core/` is portable C99; `win32/` holds the CPU presenter/worker pool and the SDL3 GPU backend. |
-| `tools/` | The CHD ingest front door, the conformance harness (`glide-replay.c`, `frame-diff.py`, the capture readers), the audits `make check` runs, and the address-space probes. |
-| `tests/` | The checks that are programs rather than scripts, each `#include`ing the `.c` files it covers: the INI document model, the configuration parser, every setting round-tripped launcher -> file -> host, the runtime code emitter, the widescreen primitive shift, and the link over real sockets. `make check` runs all six. |
+| `tools/` | The CHD ingest front door, the conformance harness (`glide-replay.c` and its synthetic capture), the audits `make check` runs, and the build's helpers. |
+| `tests/` | The checks that are programs rather than scripts, each `#include`ing the `.c` files it covers: the INI document model, the configuration parser, every setting round-tripped launcher -> file -> host, the runtime code emitter, the widescreen primitive shift, the link over real sockets, the launcher's settings model, the derived pad rumble on a pinned timeline, and the 128-button mask. `make check` runs all nine. |
 
 ---
 

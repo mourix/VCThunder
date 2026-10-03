@@ -1,34 +1,12 @@
 /* net_link.c -- the arcade link: a synthetic ether0 and four Winsock entries.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * Both titles speak ordinary IPv4 UDP, from the game thread, inside the frame,
- * above a Winsock boundary this host patches onto real ws2_32.dll. So nothing
- * in this file carries a packet, parses a message or knows an opcode. It
- * supplies the four things that were missing, and they are all small:
- *
- *   1. ether0 itself. Both link stacks ask ETS for the device by name before
- *      they open a socket, and its whole surface is three calls: name to
- *      handle, read a 0x3a byte configuration block, write it back. None of
- *      them touches a packet, which is why a shim can answer them and an
- *      NE2000 is not needed.
- *   2. SO_BROADCAST, without which Windows answers WSAEACCES to the broadcast
- *      both titles send in their FIRST packet and the link never discovers.
- *   3. A wildcard bind. The game's idea of its own address comes from the
- *      configuration block, never from bind, so rewriting sin_addr and leaving
- *      the port alone is invisible to it.
- *   4. A receive budget, because Hydro drains until WSAEWOULDBLOCK with no
- *      upper bound, inside the frame.
- *
- * The fifth thing is the single machine case, and it is one substitution: in
- * `local` mode this device ADOPTS the address the game wrote into it, so two
- * instances have the distinct identities the protocols require, and
- * 192.168.200.X is carried on 127.0.0.X. See net_local_map() below.
- *
- * The instrumentation is cheap and stays: the resolved identity once, every ETS
- * answer once, every bind with BOTH addresses, and a per-interval census of
- * datagrams in, out, fanned out and refused. Read those lines before believing
- * a link formed. tests/net_link_loopback_test.c covers the same ground with no
- * game at all, so a regression here fails `make check`.
+ * Both titles speak ordinary IPv4 UDP, from the game thread and inside the
+ * frame, above a Winsock boundary this host patches onto real ws2_32.dll, so
+ * nothing here carries a packet, parses a message or knows an opcode. It
+ * supplies what was missing under that boundary: the ether0 device,
+ * SO_BROADCAST, a wildcard bind, a receive budget, and the single-machine
+ * address substitution.
  */
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -39,7 +17,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* off is what every build before this one did, and it stays the default. */
+/* off is the default: a link is opted into. */
 typedef enum { LINK_OFF = 0, LINK_LAN, LINK_LOCAL } link_mode_t;
 
 static link_mode_t s_mode;
@@ -261,6 +239,11 @@ static int resolve_host_address(void)
 }
 
 /* ---- the synthetic ether0 ----------------------------------------------- */
+
+/* Both link stacks ask ETS for the device by name before they open a socket,
+ * and its whole surface is three calls: name to handle, read a 0x3a byte
+ * configuration block, write it back. None of them touches a packet, which is
+ * why a shim can answer them and an NE2000 is not needed. */
 
 /* All three run on the game's stack, under cdecl, exactly as the ETS entry
  * points they replace did, and under the same -O1 rule. */
@@ -556,6 +539,9 @@ void net_link_frame(void)
     s_rx_this_frame = 0;
 }
 
+/* Read this before believing a link formed. With the identity line, the ETS
+ * answers and every bind's BOTH addresses, it is the whole evidence that one
+ * did. */
 void net_link_report(unsigned frames)
 {
     if (s_mode == LINK_OFF || !(s_n.sent || s_n.fanned || s_n.received ||

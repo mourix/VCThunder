@@ -65,17 +65,13 @@ void vgl_log(int level, const char *fmt, ...)
     fflush(s_log);
 }
 
-/* A LOG LINE ON A REPEATABLE FAILURE PATH IS A DISK-FILLING BUG.
- *
- * Not a hypothetical: 28.4 GB of identical lines in 139 minutes, from one
- * failure that returned the same answer every frame.
- * gpu.c's device sites carry a per-site budget for exactly that reason; this is
- * the same budget for every other path that can fail once per frame, per lock
- * or per download, so nobody has to invent it a third time.
+/* A LOG LINE ON A REPEATABLE FAILURE PATH IS A DISK-FILLING BUG: 28.4 GB of
+ * identical lines in 139 minutes, from one failure returning the same answer
+ * every frame. This is gpu.c's per-site budget for every other path that can
+ * fail once per frame, lock or download.
  *
  * `seen` is the caller's own counter, so the budget is per SITE and lasts the
- * life of the process. The last permitted line says the site has gone quiet;
- * after that the counter is all that grows. */
+ * life of the process. The last permitted line says the site has gone quiet. */
 void vgl_log_capped(unsigned *seen, unsigned max, const char *fmt, ...)
 {
     va_list ap;
@@ -163,6 +159,13 @@ int __stdcall vglHealth(void)
     return vgl_gpu_lost() ? VGL_HEALTH_DEVICE_LOST : VGL_HEALTH_OK;
 }
 
+/* The host knows a screen frames its world in native-width art; black both
+ * side strips at the next swap even though the frame drew into them. */
+void __stdcall vglBlackMargins(void)
+{
+    vgl.margin_black = 1;
+}
+
 void vgl_init(void)
 {
     if (vgl_ready)
@@ -242,14 +245,26 @@ void vgl_init(void)
         vgl_opt.lodf = -1;                      /* unset, or out of range */
     vgl_log(0, "entry points: %u, GrVertex %u bytes", VGL_COUNT,
             (unsigned)GR_VERTEX_BYTES);
-    vgl_log(0, "MODE: rasteriser, renderer=%s, internal=%dx. "
+    /* render_scale is the GPU backend's internal target multiple and nothing
+     * else reads it: device.c hands it to vgl_gpu_open() only when the
+     * renderer is not "cpu", so the rasteriser draws at the cabinet's own
+     * resolution whatever the ini asked for. This line printed the request,
+     * which reported an internal resolution no pixel was ever rendered at,
+     * and the number came out of the user's ini, so it read as a measurement.
+     * "auto" and "gpu" can still end on the CPU path by falling back; that is
+     * not knowable here, and device.c names the renderer that did open. */
+    const int cpu_only = strcmp(vgl_cfg.renderer, "cpu") == 0;
+    vgl_log(0, "MODE: rasteriser, renderer=%s, internal=%dx%s. "
                "There is no forwarding path and no backend is loaded; every "
                "pixel below is ours. XRGB8888, no dither; "
                "itrgb=%d lodfrac=%d lodgrad=%d lodclamp=%d",
-            vgl_cfg.renderer, vgl_cfg.render_scale, vgl_opt.itrgb,
-            vgl_opt.lodfrac, vgl_opt.lodgrad, vgl_opt.lodclamp);
+            vgl_cfg.renderer, cpu_only ? 1 : vgl_cfg.render_scale,
+            cpu_only && vgl_cfg.render_scale > 1
+                ? " (render_scale is the GPU backend's; this path ignores it)"
+                : "",
+            vgl_opt.itrgb, vgl_opt.lodfrac, vgl_opt.lodgrad, vgl_opt.lodclamp);
     /* Preload graphics modules before the host replaces its PE mappings. */
-    if (strcmp(vgl_cfg.renderer, "cpu") != 0)
+    if (!cpu_only)
         vgl_gpu_preload();
     if (vgl_cfg.capture[0])
         vgl_cap_open();

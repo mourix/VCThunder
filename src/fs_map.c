@@ -2,23 +2,11 @@
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * THE DUMP IS READ-ONLY, and this file is the only thing that makes that true.
- * The rule is the ACCESS MODE, never a list of names, because a list is a thing
- * that goes stale and this one has to hold for both titles: whatever the game
- * opens for writing goes to save/, whatever it opens for reading comes from
- * save/ if it has written one and from data/ otherwise. A file the game means
- * to update in place is SEEDED into save/ from the dump on first write, so the
- * user's accumulated settings survive. Between them the two titles write eight
- * such files.
- *
- * IT ALSO OWNS CASE, and by the same rule. The dump's names are FAT 8.3 upper
- * case (`HT.R2`, `AUDT1.NVR`); both games ask in lower or mixed case (`ht.r2`,
- * `d:\audt1.nvr`, `d:\HiSc1.nvr`). Those are one name on a case-insensitive
- * filesystem and two on a case-sensitive one, which a data directory reached
- * through `\\wsl.localhost\` is. So an open that misses is retried against what
- * the directory ACTUALLY HOLDS -- never against a table of the names the titles
- * ask for in the wrong case, which would be an invariant about the table, and
- * neither title's set of filenames is closed. The exact hit comes first, so
- * none of this runs on an ordinary drive letter.
+ * The rule is the ACCESS MODE, never a list of names, because a list goes stale
+ * and this one holds for both titles: whatever the game opens for writing goes
+ * to save/, whatever it opens for reading comes from save/ if it has written
+ * one and from data/ otherwise. A file it means to update in place is SEEDED
+ * into save/ from the dump on first write, so the user's settings survive.
  */
 #include "vcthunder.h"
 
@@ -43,7 +31,7 @@ static int exists(const char *path)
 
 /* The one name in `dir` that equals `want` but for case. Returns 0 when the
  * directory holds no such entry, which is the answer whenever a path is simply
- * absent -- so a miss still reaches CreateFileA as the path the game asked for
+ * absent, so a miss still reaches CreateFileA as the path the game asked for
  * and the log still names it. */
 static int match_ci(const char *dir, const char *want, char *got, size_t got_sz)
 {
@@ -79,11 +67,20 @@ static int match_ci(const char *dir, const char *want, char *got, size_t got_sz)
 
 /* Resolve `rel` under `base` in the case the filesystem actually uses, one
  * component at a time so a subdirectory in the game's path is covered too.
- * `out` is written only on success, so a caller keeps the naive path -- and
- * therefore its own error message -- when this cannot help.
+ * `out` is written only on success, so a caller keeps the naive path, and
+ * therefore its own error message; when this cannot help.
  *
  * Exported because game.c and launcher.c locate the executable before
  * fs_map_init() has run, and they have the same problem. */
+/* THIS FILE OWNS CASE, AND BY THE SAME RULE. The dump's names are FAT 8.3 upper
+ * case (`HT.R2`, `AUDT1.NVR`) and both games ask in lower or mixed case. Those
+ * are one name on a case-insensitive filesystem and two on a case-sensitive
+ * one, which a data directory reached through a WSL UNC path is. So an open
+ * that misses is retried against what the directory ACTUALLY HOLDS, never
+ * against a table of the names the titles ask for in the wrong case: that would
+ * be an invariant about the table, and neither title's set of filenames is
+ * closed. The exact hit comes first, so none of this runs on an ordinary drive
+ * letter. */
 int fs_resolve_ci(const char *base, const char *rel, char *out, size_t out_sz)
 {
     char cur[MAX_PATH], next[MAX_PATH], comp[MAX_PATH], got[MAX_PATH];
@@ -130,7 +127,7 @@ int fs_resolve_ci(const char *base, const char *rel, char *out, size_t out_sz)
  *
  * Ask rather than infer from the path: a `\\wsl.localhost\` share is ext4, a
  * drive letter usually is not, and an NTFS directory carrying the per-directory
- * case-sensitivity flag is. The run works either way -- this is here so that a
+ * case-sensitivity flag is. The run works either way; this is here so that a
  * log from such a directory says so without anyone having to ask. */
 static void probe_case(const char *dir)
 {
@@ -290,7 +287,7 @@ const char *fs_map_path_mode(const char *in, char *out, size_t out_sz,
         /* The game's own copy wins once it has written one; otherwise the
          * cabinet's. `htlowres.bin` has no copy in the dump at all, so a
          * first-run Hydro correctly reads a name in save/ that is not there
-         * yet, exactly as it did before this file changed. save/ gets the same
+         * yet. save/ gets the same
          * case fallback as the dump: a pack carried from a case-insensitive
          * host to a case-sensitive one has the game's own files in whatever
          * spelling that host recorded. */

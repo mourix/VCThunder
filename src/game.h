@@ -73,6 +73,8 @@ typedef struct game_profile {
     uint32_t ws_lensflare, ws_drawqueue;
     uint32_t ws_spark_cluster, ws_racer_tag;
     uint32_t ws_race_update, ws_flag_icon;
+    /* Hydro's select screens: a native-width frame over the world. */
+    uint32_t ws_select_draw;
     /* Retain the cabinet raster while submitting full-screen fades and sky. */
     uint32_t screen_fade;
     /* Offroad's fade is not a leaf: it runs registered callbacks after its own
@@ -91,7 +93,7 @@ typedef struct game_profile {
     uint32_t grsstvidmode, grsstwinopen, grbufferswap;
 
     /* ---- R2 asset archive ---- */
-    uint32_t r2_find_name, r2_name_to_doid, r2_directory, r2_directory_count;
+    uint32_t r2_find_name, r2_name_to_doid;
 
     /* ---- I/O board. Exactly one family is nonzero per title. ---- */
     uint32_t io_receive;            /* _diego_io_receive / _mb_receive             */
@@ -102,12 +104,56 @@ typedef struct game_profile {
      * security exchange never arms. */
     uint32_t io_ack_write, io_ack_security, io_ack_read;
     /* The board's DAC channel 0: the signed byte the game writes its steering
-     * force into, in the same send buffer the handshake toggles live in. Both
-     * cabinets drive force feedback through this one cell and both scale it the
-     * same way (`(int)(force * -128)` clamped to a signed byte), so the host
-     * recovers -1..+1 without hooking anything the game does above it. Nonzero
-     * in both supported titles; 0 would mean a board with no motor output. */
+     * force into. Both cabinets drive force feedback through this one cell and
+     * scale it the same way (`(int)(force * -128)` clamped), so the host
+     * recovers -1..+1 without hooking anything above it. 0 would mean a board
+     * with no motor output. */
     uint32_t io_dac_out;
+
+    /* ---- the game's OWN force-feedback state, per title ----
+     *
+     * io_dac_out is the SUM and a wheel wants the sum; a pad cannot use it,
+     * because both titles compose the force out of named units and the byte
+     * has thrown away which was which. These are the cells the host READS
+     * (never writes) to recover the events instead.
+     *
+     * The titles share no shape: Hydro's are unnamed .bss statics, Offroad's
+     * are globals of its _ffbnew_ module. Each is 0 in the title that does not
+     * have it, and 0 is a real answer: game_require() and refuse. */
+    uint32_t ffb_accum;         /* Hydro: sum before MASTER and the clamp   */
+    uint32_t ffb_collide;       /* Hydro: COLLIDE +-1 flag, spent per frame */
+    uint32_t ffb_impulse_a;     /* Hydro: decaying impulse A state          */
+    uint32_t ffb_impulse_b;     /* Hydro: decaying impulse B, fired on hit  */
+    uint32_t ffb_attached;      /* Hydro: object the feedback is attached to*/
+    /* Hydro's boost STATE, as an offset into that object. The BOOSTER force
+     * unit itself is _xmath_RandomFloat computed inline and reaches no cell, so
+     * the only way to know the boat is boosting is to ask the boat. */
+    uint32_t ffb_boost_field;
+    uint32_t ffb_force_type;    /* Offroad: _ffbnew_curForceType, 0..2      */
+    uint32_t ffb_mode;          /* Offroad: _ffbnew_curMode, DoFFB's gate   */
+    /* Offroad's TEXTURE terms, and why the collision cell alone was the wrong
+     * place to look: _ffbnew_FFBFunc zeroes _ffbnew_CurHitVal on the 60 Hz
+     * thread, so a 30 Hz poll never catches a hit. These three persist and can
+     * be polled. Counts come from the next symbol along; an array length this
+     * host wrote down would be a hardcoded size. */
+    uint32_t ffb_tire_jolts,  ffb_tire_jolts_n;
+    uint32_t ffb_shocks_hist, ffb_shocks_hist_n;
+    uint32_t ffb_shock_vals,  ffb_shock_vals_n;
+    uint32_t ffb_hit_val;       /* Offroad: _ffbnew_CurHitVal               */
+    /* Whether boost is FIRING, as the game knows it; pressing is not boosting,
+     * because both titles burn fuel the player collects. A chain: deref
+     * boost_root, then boost_hop_n hops through boost_hop1/2, then the field.
+     * When boost_index is set, boost_root is an array of boost_index_n
+     * pointers and the cell at boost_index picks the local player's entry.
+     * boost_kind 1 is fuel (Hydro's seconds, firing while it falls), 2 a flag
+     * (Offroad's nitro, firing while non-zero). 0 when the title has neither. */
+    uint32_t boost_root, boost_hop_n, boost_hop1, boost_hop2;
+    uint32_t boost_field, boost_kind;
+    uint32_t boost_index, boost_index_n;
+    /* Offroad's FFB tick and its prologue, hooked to READ ONLY: it consumes
+     * _ffbnew_CurHitVal on the game's 60 Hz thread, so the hook takes the value
+     * on the way in and changes nothing. */
+    uint32_t ffb_hit_fn, hook_ffb_hit;
 
     /* ---- non-volatile storage (Hydro: _wrs_* raw sectors) ---- */
     uint32_t wrs_module_init, wrs_init, wrs_read_block, wrs_write_block;
@@ -115,9 +161,8 @@ typedef struct game_profile {
 
     /* ---- audio -----------------------------------------------------------
      * Hydro cuts at _audio_dspcmd_*. Offroad keeps its dsound/cookie layer and
-     * replaces the 11-entry Audiolib YMF backend table instead. The table
-     * address and count are derived together from _audiolib_ymf_ModuleOpen;
-     * neither is a cross-title constant. */
+     * replaces the 11-entry Audiolib YMF backend table instead; that table's
+     * address and count are derived together from _audiolib_ymf_ModuleOpen. */
     uint32_t ymf_init, ymf_shutdown, ymf_alloc_buffer, ymf_free_buffer, ymf_info;
     uint32_t dspcmd_init, dspcmd_play, dspcmd_stop, dspcmd_pitch, dspcmd_volume;
     uint32_t dspcmd_pan, dspcmd_master_vol, dspcmd_lr_atten;
@@ -138,35 +183,28 @@ typedef struct game_profile {
     /* The arcade link. See net_link_disable() in win32_bind.c. */
     uint32_t network_enable, network_enabled;
 
-    /* ether0, which is three functions and not a chipset. Both titles ask ETS
+    /* ether0, which is three functions and not a chipset: both titles ask ETS
      * for the device by name, read its 0x3a byte configuration block for the
-     * cabinet's own IPv4 address at +0x18, and write the block back with
-     * 192.168.200.<unit + 10> in it. Nothing below Winsock is reached through
-     * any of them. src/net_link.c answers all three. */
+     * cabinet's IPv4 address at +0x18, and write it back. Nothing below Winsock
+     * is reached through any of them. src/net_link.c answers all three. */
     uint32_t ets_tcp_get_device_handle, ets_tcp_get_device_cfg;
     uint32_t ets_tcp_configure_device;
 
     /* ---- the CODE checksum each title computes over itself -----------------
-     * The link's compatibility gate: a peer whose value differs is marked
-     * incompatible and its game traffic discarded. `cksum_table` is the
-     * (start,end) pair list the summing loop walks, in DATA; the others are the
-     * cells the answer ends up in. Complementary per title and 0 is the
-     * ordinary answer for the other one: Hydro caches the sum for an accessor,
-     * Offroad computes it a second time for the link. See src/cksum.c. */
+     * The link's compatibility gate. `cksum_table` is the (start,end) pair list
+     * the summing loop walks, in DATA; the others are the cells the answer ends
+     * up in. Complementary per title, and 0 is the ordinary answer for the
+     * other one. See src/cksum.c. */
     uint32_t cksum_table, cksum_result, cksum_getter;
     uint32_t cksum_link_table, cksum_link_result;
     /* The one function per title the shim answers in place of, so the value
-     * that reaches the wire is the one an unmodified image would have computed
-     * rather than the one this host's own patches produce. Hydro's is the
-     * accessor, which is all of its readers; Offroad's is the unnamed second
-     * copy of the loop, whose caller stores the result in __nMyExeChecksum.
+     * reaching the wire is what an unmodified image would have computed.
      * Complementary, like the cells above. See cksum_install_shim(). */
     uint32_t cksum_getter_fn, cksum_link_fn;
-    /* The other half of the same gate: an XOR over the R2 archive's own
-     * directory, `^= entry[+0x3c] + entry[+0x00]`, accumulated as the archive
-     * is opened. A pure function of the asset file, which this host neither
-     * patches nor hooks, so unlike the code checksum it is expected to survive
-     * this host untouched. `cksum_r2_link` is Offroad's memoised copy. */
+    /* The other half of the same gate: an XOR over the R2 archive's directory,
+     * accumulated as the archive is opened. A pure function of the asset file,
+     * which this host neither patches nor hooks, so it is expected to survive
+     * untouched. `cksum_r2_link` is Offroad's memoised copy. */
     uint32_t cksum_r2_result, cksum_r2_link;
 
     /* ---- material / texture object field offsets ---- */
@@ -184,6 +222,7 @@ typedef struct game_profile {
     uint32_t hook_ws_lensflare, hook_ws_drawqueue;
     uint32_t hook_ws_spark_cluster, hook_ws_racer_tag;
     uint32_t hook_ws_race_update, hook_ws_flag_icon;
+    uint32_t hook_ws_select_draw;
     uint32_t hook_ymf_alloc, hook_ymf_free;
     uint32_t hook_r2_find_name, hook_r2_name_to_doid;
     /* Call-timer targets. Per-title, for the reason in gen-gamedefs.py: Hydro's
@@ -220,10 +259,8 @@ const game_profile_t *game_find(const char *id);
  * and logs the offending table if the profile does not fit. */
 int game_select(const game_profile_t *p);
 
-/* Fill in the title's data directory and image path under data_root, accepting
- * either the multi-title layout (data/<id>/<exe>) or the flat one every pack
- * built before this refactor uses (data/<exe>). Returns 0 and says where it
- * looked if neither exists. */
+/* Fill in the title's data directory and image path, data_root/<id>/<exe>.
+ * Returns 0 and says where it looked if it does not exist. */
 int game_resolve_paths(const game_profile_t *p, const char *data_root,
                        char *data_dir, size_t data_sz, char *exe, size_t exe_sz);
 
@@ -232,5 +269,13 @@ int game_resolve_paths(const game_profile_t *p, const char *data_root,
  * reads `if (!game_require("audio", "_audio_dspcmd_Play", G->dspcmd_play))
  * return 0;` and cannot accidentally patch the null page. */
 int game_require(const char *subsystem, const char *what, uint32_t va);
+
+/* The same refusal, at INFO, for an installer whose target a title lacks BY
+ * NATURE and whose absence costs that title nothing: Hydro has no compiled-out
+ * printf to reroute and no _network_Enable to hold off. Every stock Hydro run
+ * printed both at WARN, and a tester reads a WARN in a clean run as a fault. A
+ * missing anchor for something a user ASKED for (widescreen, say) stays
+ * game_require()'s. */
+int game_optional(const char *subsystem, const char *what, uint32_t va);
 
 #endif /* VCT_GAME_H */

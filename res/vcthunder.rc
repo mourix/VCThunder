@@ -4,15 +4,20 @@
  * Not to the exe: the loader maps the game over our own image and the exe's PE
  * headers do not survive it, so a resource lookup against the exe at the moment
  * a window exists would be reading whatever the game left there. The DLL is an
- * ordinary module outside the span and keeps everything it was built with.
- *
- * The .ico itself is generated: tools/make-icon.py holds the shape as
- * coordinates. Redraw it there, not in a paint program.
+ * ordinary module outside the span and keeps everything it was built with. The
+ * .ico itself is generated from coordinates and checked in.
  */
 #include <windows.h>
 #include "src/resource.h"
 
 IDI_VCTHUNDER ICON "res/vcthunder.ico"
+
+/* THE SHIPPED SETTINGS FILE, CARRIED IN THE BINARY. config_seed_ini() writes
+ * it out when the pack has none, which is what lets a release zip ship no
+ * vcthunder.ini at all: an upgrade then cannot overwrite the user's, and
+ * deleting theirs is the supported way to start again from the shipped one.
+ * The path is relative to the -I directory windres is given (the repo root). */
+IDR_DEFAULT_INI RCDATA "vcthunder.ini"
 
 /* What Explorer's Properties tab and every crash reporter read. It carries no
  * timestamp and no build counter on purpose: two builds of identical source

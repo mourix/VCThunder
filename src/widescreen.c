@@ -3,12 +3,10 @@
  *
  * The game is told it has a wider raster than the cabinet gave it, every
  * primitive is translated by a whole-pixel seam origin, and the frustum is
- * widened to match so the extra columns contain scene rather than stretch.
- * Six consumers decide before that seam or round-trip their state through it
- * and need a title-scoped repair each; they are the reason this is an engine
- * and not a matrix multiply.
- *
- * See src/glide_int.h for the seam and what stays behind it.
+ * widened to match so the extra columns contain scene rather than stretch. Six
+ * consumers decide before that seam or round-trip their state through it and
+ * need a title-scoped repair each; they are the reason this is an engine and
+ * not a matrix multiply. src/glide_int.h is the seam.
  */
 #include "vcthunder.h"
 #include "glide_int.h"
@@ -164,7 +162,7 @@ static void __cdecl gl_viewport_init(float znear, int fov)
     }
 
     /* Pass 2: put back everything the 2D layer reads. These are the members
-     * `gref.py` found an external reader for; the rest of the block is either
+     * with a reader outside the 3D path; the rest of the block is either
      * culling (keep it wide) or written and never read. */
     wr_i(G->viewport_hres, native);
     wr_i(G->viewport_half_hres, native / 2);
@@ -267,10 +265,12 @@ static void ws_fov_leave(const ws_fov_scope_t *s)
 typedef void (__cdecl *ws_void_fn)(void);
 typedef int  (__cdecl *ws_one_fn)(void *);
 typedef void (__cdecl *ws_flag_fn)(uint32_t, uint32_t);
+typedef void (__cdecl *ws_arg_fn)(uint32_t);
 static ws_void_fn s_real_ws_lensflare, s_real_ws_drawqueue;
 static ws_one_fn  s_real_ws_spark_cluster, s_real_ws_racer_tag;
 static ws_void_fn s_real_ws_race_update;
 static ws_flag_fn s_real_ws_flag_icon;
+static ws_arg_fn  s_real_ws_select_draw;
 
 static void __cdecl gl_ws_lensflare(void)
 {
@@ -295,6 +295,17 @@ static void __cdecl gl_ws_drawqueue(void)
     }
     s_real_ws_drawqueue();
     ws_raster_leave(&scope);
+}
+
+/* Hydro's select screens frame the world in native-width art, so the widened
+ * world would show beside the frame: letterbox them once the screen is drawn. */
+static void __cdecl gl_ws_select_draw(uint32_t a0)
+{
+    if (!s_real_ws_select_draw)
+        return;
+    s_real_ws_select_draw(a0);
+    if (s_ws_dx > 0.0f)
+        glide_black_margins();
 }
 
 static int __cdecl gl_ws_spark_cluster(void *cluster)
@@ -402,15 +413,12 @@ static int s_ws_extent_reported;
  * the margin census it gates lives further down with its own table. */
 static int s_ws_margin_enabled;
 
-/* Is anything still going to READ the census below?
- *
- * Two consumers, and both stop. The extent report is one-shot and fires a few
- * seconds into any session; the margin census is a developer switch that is
- * off by default. Everything the census computes after that is a compare and a
- * store whose value nothing will ever look at again, and it runs per VERTEX,
- * on the game's own thread, in the shipped default configuration, for the rest
- * of the run. It was roughly ten times the arithmetic of the one thing this
- * function exists to do, which is to add an origin to x. */
+/* Is anything still going to READ the census below? Two consumers and both
+ * stop: the extent report is one-shot, the margin census is a developer switch
+ * that is off by default. After that every compare and store here runs per
+ * VERTEX, on the game's thread, in the shipped configuration, for the rest of
+ * the run, about ten times the arithmetic of the one thing this function
+ * exists to do, which is add an origin to x. */
 static int ws_census_wanted(void)
 {
     return !s_ws_extent_reported || s_ws_margin_enabled;
@@ -418,16 +426,12 @@ static int ws_census_wanted(void)
 
 /* ...and is there anything left to do to a primitive at all?
  *
- * A widescreen raster that is not wider than the game's own leaves the origin
- * at zero (widescreen_settle logs it as INERT), but the primitives stay
- * claimed: patch_jmp cannot be taken back. Without this the wrappers copy
- * three 60-byte vertices to a stack buffer in order to add zero to each.
- *
- * The ortho clamp has to be off too: it is not a function of the origin and
- * applies at dx = 0 exactly as it does above it. The one arithmetic difference
- * this skips is that `-0.0f + 0.0f` is `+0.0f` while an untouched vertex keeps
- * `-0.0f`; the two compare equal and floor and ceil alike to 0, so no pixel
- * can tell them apart. */
+ * A widescreen raster no wider than the game's own leaves the origin at zero,
+ * but the primitives stay claimed, patch_jmp cannot be taken back, so
+ * without this the wrappers copy three 60-byte vertices to a stack buffer to
+ * add zero to each. The ortho clamp goes too: it is not a function of the
+ * origin. The one arithmetic difference is `-0.0f + 0.0f` giving `+0.0f`, and
+ * no pixel can tell those apart. */
 static int ws_shift_is_identity(void)
 {
     return s_ws_dx == 0.0f && !s_ws_ortho_depth && !ws_census_wanted();
@@ -908,6 +912,7 @@ static void widescreen_arm(void)
     s_real_ws_spark_cluster = s_real_ws_racer_tag = NULL;
     s_real_ws_race_update = NULL;
     s_real_ws_flag_icon = NULL;
+    s_real_ws_select_draw = NULL;
     if (!g_cfg.widescreen)
         return;
     if (!game_require("widescreen", "the sole writer of the viewport block and "
@@ -973,6 +978,21 @@ static void widescreen_arm(void)
         }
         LOGI("geometry: widescreen; Hydro's lens-flare LFB read and "
              "projected draw queue are hooked at their pre-seam decisions");
+        /* Not fatal: without it the select screens show the world beside
+         * their frame instead of black. */
+        if (game_require("widescreen", "Hydro's select-screen draw",
+                         G->ws_select_draw && G->hook_ws_select_draw)) {
+            s_real_ws_select_draw = (ws_arg_fn)hook_call_through(
+                G->ws_select_draw, (void *)gl_ws_select_draw,
+                G->hook_ws_select_draw);
+            if (s_real_ws_select_draw)
+                LOGI("geometry: widescreen; Hydro's select screens are "
+                     "letterboxed to their native-width frame");
+            else
+                LOGW("geometry: widescreen; the select-screen hook was "
+                     "refused; the world will show beside the boat-select "
+                     "frame");
+        }
     } else {
         s_real_ws_spark_cluster = (ws_one_fn)hook_call_through(
             G->ws_spark_cluster, (void *)gl_ws_spark_cluster,

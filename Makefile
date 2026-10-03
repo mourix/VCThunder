@@ -34,7 +34,7 @@ CC      := $(if $(shell command -v i686-w64-mingw32-gcc 2>/dev/null),i686-w64-mi
 # target, so it does not have to come from the same environment as the compiler.
 # ANY python3 works: MSYS2 has no capstone for any 32-bit environment, so
 # scripts/x86len.py decodes without it. capstone is still used when the
-# interpreter has it -- it is the oracle x86len is validated against -- but
+# interpreter has it, it is the oracle x86len is validated against, but
 # nothing requires it.
 PYTHON  ?= python3
 # -Werror: the tree has been warning-clean at these flags throughout, so this
@@ -42,34 +42,25 @@ PYTHON  ?= python3
 # shipping past a warning: this code patches a live game image by address.
 # -MMD -MP: every object writes a .d beside itself naming every header it
 # actually included, and -include pulls those back in below. Without it the only
-# header dependencies are the ones spelled out by hand in the pattern rules:
-# so editing a struct in, say, renderer/core/vcglide.h relinked stale objects
-# and the build reported success. That failure mode is silent and this project
-# has already paid for it once (see .DEFAULT_GOAL below). The explicit
-# prerequisites on the rules stay: they are what the FIRST build has before any
-# .d file exists.
-# -msse2 -mfpmath=sse: THE HOST RUNS ON THE GAME'S OWN THREAD.
-# renderer/'s flags below already argue this at length (a float expression
-# compiled for the default i386 ABI pushes and pops the same eight x87
-# registers the game is holding values in), and src/ was exempt from that
-# argument only by omission. It is not academic: ws_shift() in glide_bind.c
-# runs per VERTEX inside grDrawTriangle and compiled to seven consecutive
-# `flds` (measured 2026-08-19). SSE2 is on every CPU that can run Windows 10,
-# and the two files here that deliberately MEASURE x87 (profile.c's time_fmul
+# header dependencies are the ones spelled out by hand in the pattern rules, so
+# editing a struct in a header relinks stale objects and the build reports
+# success. The explicit prerequisites on the rules stay: they are what the FIRST
+# build has before any .d file exists.
+# -msse2 -mfpmath=sse: THE HOST RUNS ON THE GAME'S OWN THREAD. A float
+# expression compiled for the default i386 ABI uses the same eight x87
+# registers the game is holding values in, and widescreen.c's ws_shift() runs
+# per vertex inside grDrawTriangle. SSE2 is on every CPU that can run Windows
+# 10. The two files here that deliberately MEASURE x87 (profile.c's time_fmul
 # and x87_probe) use explicit inline asm and are unaffected.
 CFLAGS  := -std=gnu11 -Wall -Wextra -Wshadow -Werror -O1 -g -I. -MMD -MP \
            -msse2 -mfpmath=sse
 
 # -Wl,--no-insert-timestamp: WITHOUT IT, TWO BUILDS OF IDENTICAL SOURCE PRODUCE
 # DIFFERENT BINARIES. mingw's ld stamps the PE header and the export directory
-# with the wall clock, so relinking vcglide.dll unchanged moved three bytes and
-# its SHA-256: measured 2026-08-19, offsets 0x88, 0xd8 and 0x26004.
-#
-# That is not cosmetic here. This project signs a change off by reporting both
-# hashes, and the renderer's own rule is to build the CONTROL from the previous
-# revision and compare; with a wall-clock stamp in the file, a hash can say which binary you
-# shipped and can never say that a binary is unchanged. Every link therefore
-# gets this flag, and `make` twice now yields the same bytes.
+# with the wall clock, so relinking an unchanged DLL moves three bytes and its
+# SHA-256. A change is signed off by comparing hashes against a control build,
+# and with a wall-clock stamp a hash can never say that a binary is unchanged.
+# Every link therefore gets this flag, and `make` twice yields the same bytes.
 LDFLAGS_REPRO := -Wl,--no-insert-timestamp
 
 # Two modules, and the split is architectural; see src/stub.c.
@@ -132,21 +123,22 @@ DLL     := build/VCThunder.dll
 INI_DOC_TEST := build/tests/ini-doc-test.exe
 WS_SHIFT_TEST     := build/tests/ws-shift-test.exe
 NET_LINK_TEST     := build/tests/net-link-test.exe
+RUMBLE_TEST       := build/tests/rumble-model-test.exe
+BUTTON_TEST       := build/tests/button-mask-test.exe
+DI_ROLE_TEST      := build/tests/di-role-test.exe
+LAUNCHER_MODEL_TEST := build/tests/launcher-model-test.exe
 CONFIG_TEST       := build/tests/config-test.exe
 ROUND_TRIP_TEST   := build/tests/settings-round-trip-test.exe
 # NOT patch-emit-test.exe. WINDOWS REFUSES TO LAUNCH AN UNELEVATED EXE WHOSE
 # FILENAME CONTAINS `patch`, `setup` or `install`: UAC's installer-detection
 # heuristic decides a legacy installer needs elevation, and an unelevated
 # non-interactive launch fails before main() with "Invalid argument" and no
-# other word. Measured 2026-08-31 on byte-identical copies of one binary --
-# emitter-test.exe and codegen-test.exe ran, patch-emit-test.exe, patchy.exe,
-# setup-test.exe and install-x.exe did not. The SOURCE keeps its name; only
-# what lands on disk matters.
+# other word. The SOURCE keeps its name; only what lands on disk matters.
 EMITTER_TEST      := build/tests/emitter-test.exe
 
 # The window icon rides in the DLL, because the exe's PE headers are overwritten
 # by the game long before there is a window to put an icon on. The .ico is
-# generated by tools/make-icon.py and checked in, so a build needs no Pillow.
+# checked in, so a build needs no Pillow.
 WINDRES := $(if $(shell command -v i686-w64-mingw32-windres 2>/dev/null),i686-w64-mingw32-windres,windres)
 OBJDUMP := $(if $(shell command -v i686-w64-mingw32-objdump 2>/dev/null),i686-w64-mingw32-objdump,objdump)
 DLLTOOL := $(if $(shell command -v i686-w64-mingw32-dlltool 2>/dev/null),i686-w64-mingw32-dlltool,dlltool)
@@ -157,7 +149,7 @@ SPAN    := generated/span.h
 SDL3_VERSION := 3.4.10
 
 # SDL3 LIVES UNDER build/, ALWAYS. `make deps` fetches the official i686 MinGW
-# SDK and checks its SHA-256 before extracting, into build/deps/ — which
+# SDK and checks its SHA-256 before extracting, into build/deps/, which
 # .gitignore covers, and which `make clean` deliberately does NOT remove, since
 # re-downloading a pinned dependency on every clean serves nobody.
 #
@@ -169,13 +161,10 @@ SDL3_HOME    := build/deps
 SDL3_ROOT    ?= $(SDL3_HOME)/$(SDL3_DIR)
 SDL3_IMPORT  := $(SDL3_ROOT)/lib/libSDL3.dll.a
 SDL3_RUNTIME := $(SDL3_ROOT)/bin/SDL3.dll
-# The one file every renderer object needs, and the reason it is a variable: the
-# "run 'make deps'" refusals below used to live ONLY on the link and on the
-# staged DLL, both of which run after every renderer .c has already compiled. A
-# tree with no SDK never reaches them -- the FIRST compile dies on `SDL3/SDL.h:
-# No such file or directory` and the helpful message is unreachable. It is a
-# prerequisite of the object rule now, so the refusal is what a fresh clone that
-# runs a bare `make` actually sees.
+# The one file every renderer object needs, and the reason it is a variable: it
+# is a prerequisite of the object rule, so a fresh clone that runs a bare `make`
+# sees the "run 'make deps'" refusal below instead of the first compile dying on
+# `SDL3/SDL.h: No such file or directory`.
 SDL3_HEADER  := $(SDL3_ROOT)/include/SDL3/SDL.h
 
 # The run directory is the USER'S: one pack, both titles, holding the tuned ini,
@@ -257,8 +246,9 @@ $(VGL_DEF): renderer/api/entries.def Makefile
 	     $<; \
 	   echo "    vglInit@0 = vglInit@0"; \
 	   echo "    vglHealth@0 = vglHealth@0"; \
+	   echo "    vglBlackMargins@0 = vglBlackMargins@0"; \
 	   echo "    _grLfbReadRegion@28 = grLfbReadRegion@28"; } > $@
-	@echo "generated $@ ($$(grep -c '^VGL_ENTRY' $<) game entry points + 3)"
+	@echo "generated $@ ($$(grep -c '^VGL_ENTRY' $<) game entry points + 4)"
 
 # Missing SDK: refuse by name, the way generated/ does, rather than leaving the
 # compiler to report a missing include. Nothing regenerates this file, so once
@@ -319,7 +309,6 @@ $(REPLAY): tools/glide-replay.c renderer/core/png.c renderer/api/glide2.h \
 	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -o $@ $< renderer/core/png.c -lkernel32 -luser32
 	@echo "built $@ (capture replay / golden-frame harness)"
 
-
 # ---- the synthetic conformance capture ----------------------------------
 #
 # The renderer's own regression test, and the one check that needs no game
@@ -336,9 +325,8 @@ $(REPLAY): tools/glide-replay.c renderer/core/png.c renderer/api/glide2.h \
 # W buffer, a polygon vertex list and an LFB page.
 #
 # It is NOT an oracle. It says the renderer draws what it drew before; only
-# 86Box can say it draws what a Voodoo2 drew. And it does not replace the game
-# captures: Offroad's 408 palette downloads in 60 frames found a bug that
-# 1,600 identical Hydro frames called perfect.
+# 86Box can say it draws what a Voodoo2 drew. And it does not replace replaying
+# real game captures, which exercise state no authored scene thinks of.
 #
 # CPU backend on purpose: it is the reference path, and the GPU backend is not
 # expected to be bit-identical to it. The hashes are this toolchain's output.
@@ -354,10 +342,14 @@ $(CONF_CAPTURE): tools/make-conformance-capture.py renderer/api/entries.def
 # MSYS2 the harness is native and WSLENV means nothing, so it is set only where
 # it does something.
 WSLENV_PASS := $(if $(wildcard /proc/sys/fs/binfmt_misc/WSLInterop),WSLENV=VCGLIDE_RENDERER:VCGLIDE_PRESENT:VCGLIDE_LOG/p,)
+# A binfmt entry matching every MZ binary (mono's `cli`) claims a .exe before
+# WSL interop does, and then nothing runs. Where one is enabled, go through
+# cmd.exe; anywhere else, by path, which also works from a Linux-side checkout.
+WIN_EXE := $(if $(filter enabled,$(shell head -n1 /proc/sys/fs/binfmt_misc/cli 2>/dev/null)),/init /mnt/c/WINDOWS/System32/cmd.exe /c ,./)
 conformance: $(CONF_CAPTURE) $(VGL_DLL) $(REPLAY)
 	@cd build && $(WSLENV_PASS) \
 	   VCGLIDE_RENDERER=cpu VCGLIDE_PRESENT=0 VCGLIDE_LOG=conformance.log \
-	   ./glide-replay.exe conformance.vglc --provider vcglide.dll \
+	   $(WIN_EXE)glide-replay.exe conformance.vglc --provider vcglide.dll \
 	   --hash conformance.hash > conformance.out 2>&1 \
 	  || { echo "conformance: the replay itself failed:"; cat conformance.out; exit 1; }
 	@diff -u $(CONF_GOLDEN) build/conformance.hash > /dev/null 2>&1 \
@@ -372,7 +364,7 @@ conformance-frames: $(CONF_CAPTURE) $(VGL_DLL) $(REPLAY)
 	@mkdir -p build/conf-frames
 	@cd build && $(WSLENV_PASS) \
 	   VCGLIDE_RENDERER=cpu VCGLIDE_PRESENT=0 VCGLIDE_LOG=conformance.log \
-	   ./glide-replay.exe conformance.vglc --provider vcglide.dll \
+	   $(WIN_EXE)glide-replay.exe conformance.vglc --provider vcglide.dll \
 	   --hash conformance.hash --out conf-frames > conformance.out 2>&1
 	@echo "wrote build/conf-frames/*.png: LOOK AT THEM before accepting anything"
 
@@ -384,30 +376,10 @@ conformance-accept: conformance-frames
 	@cat $(CONF_GOLDEN)
 
 
-# ---- the real-capture regression ----------------------------------------
-#
-# NOT part of `make check`, and that is the whole design. check must run on a
-# clone in half a minute; this replays gigabytes of captures that cannot live
-# in this repository and builds a second copy of the renderer to compare
-# against. It is the A/B that used to be described in prose and executed by
-# hand, one session at a time.
-#
-#   make regress                 control = HEAD, current = the working tree
-#   make regress TIER=full       and the three long captures
-#   make regress REV=abc123      control = that revision
-#   make regress BACKENDS=gpu    one backend instead of both
-#
-# `make renderer tools` first, because it compares what is BUILT: a source
-# change that has not been compiled would be scored as no change at all.
-TIER     ?= quick
-REV      ?= HEAD
-BACKENDS ?= cpu,gpu
-
-regress: $(VGL_DLL) $(REPLAY) $(SDL3_RUNTIME_OUT)
-	@$(PYTHON) tools/regress.py --tier $(TIER) --rev $(REV) --backends $(BACKENDS)
 
 .PHONY: all check check-full defs deps pack pack-cfg pack-ini clean renderer tools ini-doc-test \
-        config-test round-trip-test emitter-test regress \
+        launcher-model-test \
+        config-test round-trip-test emitter-test button-test di-role-test \
         FORCE \
         conformance conformance-frames conformance-accept widescreen-test net-link-test \
         probe-dll
@@ -460,16 +432,18 @@ $(DLL): $(DLL_OBJ) $(RES) $(SRC_LIST)
 	@echo "built $@ (all logic, loaded outside the span)"
 	@sha256sum $@
 
-$(RES): res/vcthunder.rc res/vcthunder.ico src/resource.h
+# vcthunder.ini IS a prerequisite: it is embedded as RCDATA and written out by
+# config_seed_ini() when a pack has no settings file. Editing the shipped ini
+# and not rebuilding would leave the binary handing out the previous one.
+$(RES): res/vcthunder.rc res/vcthunder.ico src/resource.h vcthunder.ini
 	@mkdir -p $(dir $@)
 	$(WINDRES) -I . -i $< -o $@
 
 # THE HOST STAYS AT -O1, AND -O2 IS NOT A FREE CHOICE HERE.
 #
-# MEASURED 2026-08-19, and it cost a live run to find: widescreen.c compiled at
-# -O2 faults on the THIRD FRAME (0xC0000005 executing a non-executable page at
-# a fresh heap address), while the identical source at -O1 runs indefinitely.
-# Bisected to the twelve `__cdecl` entry points the game jumps into through a
+# widescreen.c compiled at -O2 faults on the THIRD FRAME (0xC0000005 executing
+# a non-executable page at a fresh heap address); at -O1 it runs indefinitely.
+# The cause is its twelve `__cdecl` entry points the game jumps into through a
 # relocated prologue: pin just those to -O1 and the rest of the file is fine at
 # -O2. So the hazard is not the file, it is the CLASS: our functions that the
 # game's own code enters through a patched prologue, on the game's stack, under
@@ -484,10 +458,8 @@ $(RES): res/vcthunder.rc res/vcthunder.ico src/resource.h
 #                     table: an ordinary indirect call with a declared
 #                     signature, which is a different thing entirely.
 #
-# glide_bind.c and audio.c were briefly in this list and are not any more: both
-# carry patched entry points (gl_init3dfx, av_alloc_buffer, av_free_buffer), and
-# glide_bind.c's only compute justification (ws_shift) moved to
-# widescreen.c. A percent of a percent of a core is not worth a frame-3 crash.
+# glide_bind.c and audio.c are not in this list: both carry patched entry points
+# (gl_init3dfx, av_alloc_buffer, av_free_buffer).
 #
 # -fno-strict-aliasing rides with the -O2: this host reads and writes the game's
 # memory through casts of arbitrary addresses to arbitrary pointer types, and
@@ -535,23 +507,20 @@ $(SRC_LIST): FORCE
 	printf '%s\n' $(DLL_SRC) $(VGL_SRC) > $@; \
 	test -z "$$existed" || echo "the source list changed; relinking"
 
-# Everything a CI job would run, run locally, because until this directory is
-# published there is no CI to run it. The GitHub workflow, when it exists, calls
-# exactly this target so the two cannot drift.
+# Everything a CI job would run, run locally. A CI workflow, if one is added,
+# should call exactly this target so the two cannot drift.
 #
 # Deliberately ordered cheapest-first: the scan takes milliseconds and is the one
 # whose failure is unrecoverable once published.
 #
-# TWO OF THESE READ INPUTS THAT CANNOT CHANGE BETWEEN RUNS. Verifying four CHDs
-# against their own checksums was 8.1 s and verifying generated/ against the two
-# dumps was 10.4 s, of a 28 s loop; both re-read files last written months ago.
-# Each now records a key when it passes (tools/stamp.py) and re-reads only when
-# something it depends on has moved. The key is content for the checker and its
-# outputs, size+mtime for the gigabytes -- which is a cache key and not
-# evidence, so the skip prints as a skip and `make check-full` ignores every
-# stamp. What each key covers is spelled out rather than derived: forgetting an
-# input here buys a stale pass, which is the failure this whole file is written
-# against.
+# TWO OF THESE READ INPUTS THAT CANNOT CHANGE BETWEEN RUNS: verifying the CHDs
+# against their own checksums, and generated/ against the dumps. They dominate
+# the loop, so each records a key when it passes (tools/stamp.py) and re-reads
+# only when something it depends on has moved. The key is content for the
+# checker and its outputs, size+mtime for the gigabytes, which is a cache key
+# and not evidence, so the skip prints as a skip and `make check-full` ignores
+# every stamp. What each key covers is spelled out rather than derived:
+# forgetting an input here buys a stale pass.
 STAMPS := build/.stamps
 
 # generated/ is checked against the dumps by the generator, so the key is: the
@@ -575,14 +544,21 @@ check-full:
 check:
 	@echo "== contraband scan =="
 	@$(PYTHON) tools/scan-contraband.py
+	@# EVERY PYTHON TOOL PARSES. The C is checked by being compiled; nothing
+	@# checked the Python until a tree-wide comment edit turned four blank
+	@# lines in tools/chd.py into a bare `,` and the ingest stopped importing.
+	@# It reached a staged public tree, because the one check that reads a CHD
+	@# SKIPS when there is no CHD to read, and a stranger's first command is
+	@# the one that broke. Parsing costs milliseconds and moves the finding to
+	@# the commit that broke it.
+	@for f in tools/*.py scripts/*.py; do \
+	   $(PYTHON) -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" $$f \
+	     || { echo "$$f does not parse"; exit 1; }; \
+	 done
+	@echo "python: $$(ls tools/*.py scripts/*.py | wc -l) tool(s) parse"
 	@$(PYTHON) tools/check-launcher-settings.py
-	@# Every relative markdown link resolves. It runs in milliseconds and it
-	@# used to run only inside stage-public.sh -- that is, at release time,
-	@# against the staged tree, where a finding is a document already written
-	@# around a link that does not exist. Checking it here as well costs
-	@# nothing and moves the finding to the commit that broke it. Both still
-	@# run: this checks THIS tree, and staging checks the tree it assembles,
-	@# where the same links sit at different depths.
+	@# Every relative markdown link resolves. It runs in milliseconds, so a
+	@# broken link is caught by the commit that broke it.
 	@$(PYTHON) tools/check-links.py
 	@echo
 	@echo "== build =="
@@ -590,6 +566,9 @@ check:
 	@echo
 	@echo "== INI document round trip =="
 	@$(MAKE) --no-print-directory ini-doc-test
+	@echo
+	@echo "== the launcher's model, with no launcher =="
+	@$(MAKE) --no-print-directory launcher-model-test
 	@echo
 	@echo "== the loader's own parser, over an ini a person wrote =="
 	@$(MAKE) --no-print-directory config-test
@@ -606,11 +585,20 @@ check:
 	@echo "== the link's single machine case, over real sockets =="
 	@$(MAKE) --no-print-directory net-link-test
 	@echo
+	@echo "== the derived pad rumble, on a pinned timeline =="
+	@$(MAKE) --no-print-directory rumble-test
+	@echo
+	@echo "== the 128-button mask, against the 32-bit code it replaced =="
+	@$(MAKE) --no-print-directory button-test
+	@echo
+	@echo "== steering, gas and brake from different controllers =="
+	@$(MAKE) --no-print-directory di-role-test
+	@echo
 	@echo "== renderer conformance (synthetic capture, CPU reference) =="
 	@$(MAKE) --no-print-directory conformance
 	@echo
 	@echo "== generated tables match the registered dumps =="
-	@# Two outcomes, not three. Missing capstone does not skip this check --
+	@# Two outcomes, not three. Missing capstone does not skip this check;
 	@# it would skip it on exactly the host that cannot install capstone,
 	@# MSYS2 MINGW32, which has no capstone package in any 32-bit repository.
 	@# The generator decodes with capstone when it is there and with x86len
@@ -670,10 +658,9 @@ check:
 	@echo
 	@echo "all checks passed"
 
+
 # The document model and the value grammar, and nothing else: the test file
-# #includes both .c files directly. Until 2026-08-31 this built src/launcher.c
-# and src/settings.c as well, because the model lived inside the launcher, and
-# needed eight stubs to link a GUI it did not test.
+# #includes both .c files directly.
 $(INI_DOC_TEST): tests/ini_doc_test.c src/ini_doc.c src/ini_doc.h \
                  src/ini.c src/ini.h src/vcthunder.h src/game.h
 	@mkdir -p $(dir $@)
@@ -683,10 +670,25 @@ $(INI_DOC_TEST): tests/ini_doc_test.c src/ini_doc.c src/ini_doc.h \
 ini-doc-test: $(INI_DOC_TEST)
 	@./$(INI_DOC_TEST)
 
+# THE LAUNCHER'S MODEL, WITHOUT THE LAUNCHER. src/launcher_model.c holds the
+# binding validators, the section-precedence rule, the write loop and the ini
+# problem scan, so they can be tested without linking a window procedure. Same
+# shape as ini-doc-test above, and the same rule: if this ever needs a stub for
+# something that draws, the model has grown something it should not have.
+$(LAUNCHER_MODEL_TEST): tests/launcher_model_test.c src/launcher_model.c \
+                src/launcher_model.h src/settings.c src/ini.c src/ini_doc.c \
+                src/bindings.def src/settings.def src/settings.h src/ini.h \
+                src/ini_doc.h src/io.h src/vcthunder.h src/game.h
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -o $@ $< -lkernel32
+
+launcher-model-test: $(LAUNCHER_MODEL_TEST)
+	@./$(LAUNCHER_MODEL_TEST)
+
 # config.c against a vcthunder.ini a person wrote, and settings.def against the
 # round trip through the launcher's document model. They are separate binaries
-# because they ask opposite questions -- what happens to a LEGAL value, and what
-# happens to one that is not -- and a single "config tests passed" would say
+# because they ask opposite questions; what happens to a LEGAL value, and what
+# happens to one that is not, and a single "config tests passed" would say
 # neither. Both #include the .c files directly, as ini-doc-test does: there is
 # no library here to link against, and the parser under test is mostly static
 # functions.
@@ -700,7 +702,8 @@ config-test: $(CONFIG_TEST)
 
 $(ROUND_TRIP_TEST): tests/settings_round_trip_test.c src/config.c src/settings.c \
                     src/ini.c src/ini_doc.c src/settings.def src/settings.h \
-                    src/ini.h src/ini_doc.h src/vcthunder.h src/game.h
+                    src/ini.h src/ini_doc.h src/vcthunder.h src/game.h \
+                    src/di_role.c src/di_role.h src/io.h
 	@mkdir -p $(dir $@)
 	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -o $@ $< -lkernel32
 
@@ -770,6 +773,45 @@ $(NET_LINK_TEST): tests/net_link_loopback_test.c src/net_link.c src/vcthunder.h
 net-link-test: $(NET_LINK_TEST)
 	@./$(NET_LINK_TEST)
 
+# The derived pad rumble is the one INVENTED effect in this project, and what
+# it claims is a discrimination, a held force to the heavy motor, a shaking
+# one to the light motor; that no screenshot shows and no hand can separate
+# from "the motors are on". So the model is driven here on a pinned timeline,
+# with no game data and no device. It also pins ini_read_scoped()'s
+# absolute-path rule for dinput.c.
+$(RUMBLE_TEST): tests/rumble_model_test.c src/rumble.c src/ini.c src/io.h \
+                src/vcthunder.h
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -Isrc -Itests -o $@ $< src/ini.c \
+	  -lkernel32
+
+rumble-test: $(RUMBLE_TEST)
+	@./$(RUMBLE_TEST)
+
+# The 128-button mask against the 32-bit expression it replaced. pad_down() is
+# on every user's play path, and buttons past 32 need a device that has them.
+# So the control is the 32-bit expression, evaluated side by side over ordinals
+# 1..32, which is the whole range both are meant to agree on.
+$(BUTTON_TEST): tests/button_mask_test.c src/io.h src/vcthunder.h
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -Isrc -Itests -o $@ $< -lkernel32
+
+button-test: $(BUTTON_TEST)
+	@./$(BUTTON_TEST)
+
+# Which controller each axis role is read from, and what it reads when that
+# controller does not answer. src/di_role.c
+# holds no DirectInput on purpose, so this drives it with a fake slot table
+# and a fake reading, and needs no device.
+$(DI_ROLE_TEST): tests/di_role_test.c src/di_role.c src/di_role.h src/ini.c \
+                 src/ini.h src/io.h src/vcthunder.h src/game.h \
+                 src/xinput_hid.c src/xinput_hid.h
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -o $@ $< -lkernel32 -luser32
+
+di-role-test: $(DI_ROLE_TEST)
+	@./$(DI_ROLE_TEST)
+
 # The address tables are derived, never hand-written. Regenerate after any
 # change to the analysis; never edit anything under generated/.
 #
@@ -777,12 +819,8 @@ net-link-test: $(NET_LINK_TEST)
 # emits is an offset into that exact file; against another build they are
 # plausible numbers pointing at the wrong instructions.
 # The symbol cache comes first, and is rebuilt every time rather than reused.
-# gen-gamedefs.py reads it, and only p1-symbols.py writes it: on a maintainer's
-# machine it has existed for months, so the dependency is invisible until someone
-# clones the repository and `make defs` tells them to run a second command. It
-# also means the cache can never be stale against the dump beside it, which is a
-# correctness point, not a convenience: this project has twice been misled by an
-# instrument that was describing a different input.
+# gen-gamedefs.py reads it and only p1-symbols.py writes it, so a clone needs no
+# second command, and the cache can never be stale against the dump beside it.
 # THE ONE COMMAND. A user who has just ingested their CHDs should not have to
 # learn the difference between defs, all and pack: this is the whole journey.
 .PHONY: setup
@@ -838,7 +876,10 @@ $(SPAN) generated/profiles.c:
 # does not, and two packs meant two copies of every binary and two inis that had
 # to agree.
 #
-# The game dumps are NOT copied; they are hundreds of MB and they are Midway's.
+# THE GAME DATA IS COPIED IN, so the pack stands alone: moving or deleting the
+# clone does not break it. Only a title the pack lacks, and only while the ini
+# reads the pack's own data/; the data never leaves your machine. LINK_DATA=1
+# on the first pack points data_dir at the ingested data/ instead of copying it.
 #
 # Everything here is written with the assumption that the destination is the
 # USER'S and this build is the guest. Binaries are overwritten; nothing else is.
@@ -849,27 +890,30 @@ pack: $(EXE) $(DLL) $(VGL_DLL) $(SDL3_RUNTIME_OUT)
 	@cp $(EXE) $(DLL) $(VGL_DLL) $(SDL3_RUNTIME_OUT) $(PACKDIR)/
 	@echo "staged $(PACKDIR)"
 	@$(MAKE) --no-print-directory pack-cfg RUNDIR=$(PACKDIR)
+	@if grep -q "^data_dir = data$$" $(PACKDIR)/vcthunder.ini 2>/dev/null; then \
+	  for d in data/*/; do \
+	    [ -d "$$d" ] || continue; t=$$(basename "$$d"); \
+	    [ -d $(PACKDIR)/data/$$t ] && continue; \
+	    echo "  copying data/$$t into the pack ($$(du -sh "$$d" | cut -f1))"; \
+	    rm -rf $(PACKDIR)/data/$$t.part; \
+	    cp -r "$$d" $(PACKDIR)/data/$$t.part && \
+	      mv $(PACKDIR)/data/$$t.part $(PACKDIR)/data/$$t || exit 1; \
+	  done; fi
 	@echo
 	@echo "the run directory is $(RUN)/, in the tree that built it."
 	@if grep -q "^data_dir = ." $(PACKDIR)/vcthunder.ini 2>/dev/null && \
 	    ! grep -q "^data_dir = data$$" $(PACKDIR)/vcthunder.ini 2>/dev/null; then \
 	  printf 'its game data is%s\n' "$$(grep '^data_dir = ' $(PACKDIR)/vcthunder.ini | cut -d= -f2-)"; \
-	else \
+	elif [ ! -d $(PACKDIR)/data/hydro ] || [ ! -d $(PACKDIR)/data/offroad ]; then \
 	  echo "it needs both dumps: $(PACKDIR)/data/hydro/, $(PACKDIR)/data/offroad/"; \
 	fi
 	@echo "run it as:  VCThunder.exe (launcher) | VCThunder.exe hydro | VCThunder.exe offroad"
 
 # The INI is the RUN directory's configuration, not a build output. Copying it
-# unconditionally silently discards whatever was being tested there: it has
-# already cost one diagnostic session, where a profiler enabled in the run
-# directory was reset to 0 by the next `make pack` and the run produced no
-# profile at all. Seed it when absent; never overwrite. `make pack-ini` forces
-# a refresh.
-# Never overwriting has its own failure mode, and it has now also cost a
-# session: a setting whose SHIPPED DEFAULT changes, or a key that did not exist
-# before, never reaches a run directory that already has an ini, which is how
-# raster_height = 400 stayed a hand edit in one run directory while every fresh
-# pack shipped the value it replaced. So keep the file, but say what it is
+# unconditionally would silently discard whatever was being tested there, so
+# seed it when absent and never overwrite; `make pack-ini` forces a refresh.
+# But then a changed SHIPPED DEFAULT, or a new key, never reaches a run
+# directory that already has an ini. So keep the file, but say what it is
 # missing.
 pack-cfg:
 	@if [ -f $(RUNDIR)/vcthunder.ini ]; then \
@@ -882,14 +926,14 @@ pack-cfg:
 	    echo "  WARNING: it has no $$new-- new shipped keys, defaults apply"; fi; \
 	else cp vcthunder.ini $(RUNDIR)/vcthunder.ini; \
 	  echo "  seeded vcthunder.ini"; \
-	  if [ ! -d $(RUNDIR)/data/hydro ] && [ ! -d $(RUNDIR)/data/offroad ] \
-	     && [ -d data ]; then \
+	  if [ -n "$(LINK_DATA)" ] && [ ! -d $(RUNDIR)/data/hydro ] \
+	     && [ ! -d $(RUNDIR)/data/offroad ] && [ -d data ]; then \
 	    abs=$$(cd data && pwd); \
 	    if command -v wslpath > /dev/null 2>&1; then abs=$$(wslpath -w "$$abs"); \
 	    elif command -v cygpath > /dev/null 2>&1; then abs=$$(cygpath -w "$$abs"); fi; \
 	    $(PYTHON) tools/pack-datadir.py $(RUNDIR)/vcthunder.ini "$$abs"; \
 	    echo "     (your game data stays where it was ingested; the pack points"; \
-	    echo "      at it rather than duplicating several gigabytes)"; \
+	    echo "      at it rather than copying 1.4 GB into it)"; \
 	  fi; fi
 # No .bat launchers are staged: a bare VCThunder.exe opens the settings
 # launcher, whose Launch page has a Play button per title.

@@ -147,6 +147,7 @@ int vgl_device_open(void *caller_window, int res_enum, int refresh_enum,
     vgl.field_x1 = s_lfb_field_width > 0
         ? s_lfb_field_offset + s_lfb_field_width : vgl.w;
     vgl.margin_drawn = 0;
+    vgl.margin_black = 0;
     vgl_tex_init();
 
     vgl.gpu = 0;
@@ -343,12 +344,15 @@ void vgl_buffer_clear(uint32_t color, uint32_t alpha, uint32_t depth)
 static void margin_strips_clear(void)
 {
     uint32_t *dst = vgl.color[vgl.draw_buffer];
+    /* The game's own clip ends one column short of its field, so its frame
+     * never covers the field's last column; a forced clear takes that too. */
+    int fx1 = vgl.field_x1 - (vgl.margin_black ? 1 : 0);
     int x, y;
 
     s_mt_mask |= MT_STRIP;
     if (vgl.gpu) {
         vgl_gpu_clear_margins(vgl.clip_x0, vgl.clip_x1, vgl.clip_y0,
-                              vgl.clip_y1, vgl.field_x0, vgl.field_x1);
+                              vgl.clip_y1, vgl.field_x0, fx1);
         return;
     }
     if (!dst)
@@ -357,7 +361,7 @@ static void margin_strips_clear(void)
         uint32_t *d = dst + (size_t)y * vgl.w;
 
         for (x = vgl.clip_x0; x < vgl.clip_x1; x++)
-            if (x < vgl.field_x0 || x >= vgl.field_x1)
+            if (x < vgl.field_x0 || x >= fx1)
                 d[x] = 0;
     }
 }
@@ -395,7 +399,7 @@ void vgl_buffer_swap(int interval)
         return;
     s_lfb_partial_hint = interval > 0;
     vgl.frames++;
-    if (s_lfb_field_width > 0 && !vgl.margin_drawn)
+    if (s_lfb_field_width > 0 && (!vgl.margin_drawn || vgl.margin_black))
         margin_strips_clear();
     if (!vgl.gpu)
         vgl_raster_collect();           /* the workers' counters become ours */
@@ -416,6 +420,7 @@ void vgl_buffer_swap(int interval)
     vgl.frame_drawn = 0;
     vgl.margin_drawn = 0;
     vgl.margin_geom = 0;
+    vgl.margin_black = 0;
     s_mt_mask = 0;
 }
 
@@ -549,6 +554,15 @@ int vgl_lfb_lock(uint32_t type, uint32_t buffer, uint32_t write_mode,
          * unbounded line fills a disk. */
         VGL_LOG_CAPPED(3, "lfb: SDL GPU colour readback failed; returning the "
                           "last native-resolution snapshot");
+    /* The GPU draws into its own depth target; the array a depth lock hands
+     * out holds nothing until it is read back. Only a read uses it: depth
+     * writes are dropped at unlock. A failed readback refuses the lock rather
+     * than hand out depth that was never drawn, which reads as "occluded". */
+    if (vgl.gpu && zsrc && type == GR_LFB_READ_ONLY &&
+        !vgl_gpu_sync_depth(zsrc, vgl.w, vgl.h)) {
+        VGL_LOG_CAPPED(3, "lfb: SDL GPU depth readback failed; lock refused");
+        return 0;
+    }
 
     s_lfb_active = 1;
     s_lfb_buffer = (int)buffer;
@@ -815,6 +829,9 @@ int vgl_lfb_read_region(uint32_t buffer, uint32_t x, uint32_t y,
     if (vgl.gpu && src &&
         !vgl_gpu_sync_color((int)buffer, (uint32_t *)src, vgl.w, vgl.h))
         return 0;
+    if (vgl.gpu && zsrc &&
+        !vgl_gpu_sync_depth((uint16_t *)zsrc, vgl.w, vgl.h))
+        return 0;
     for (r = 0; r < h; r++) {
         if (zsrc) {
             memcpy((uint8_t *)dst + (size_t)r * stride,
@@ -900,7 +917,7 @@ static void pipeline_save(vgl_pipeline_state_t *s)
 /* A texture unit carries five members that belong to THIS session rather than
  * to the saved state: the memory it was given, its extent, the addresses the
  * game was told, and the generation the caches key on. Restoring a snapshot
- * must not roll any of them back -- a state saved before a texture upload would
+ * must not roll any of them back; a state saved before a texture upload would
  * otherwise hand the unit a stale mem_ver and the GPU would keep a texture the
  * game has already replaced. They are read out before the copy and put back
  * after it. */
@@ -968,13 +985,9 @@ void vgl_state_set(const void *blob)
     memcpy(&token, (const uint8_t *)blob + 4, 4);
     slot = magic == VGL_STATE_MAGIC ? saved_find(token) : NULL;
     if (!slot) {
-        static int announced;
-        if (!announced) {
-            announced = 1;
-            vgl_log(0, "state: grGlideSetState with a block this provider "
-                       "never filled: ignored. A state saved through one "
-                       "provider cannot be restored through another");
-        }
+        VGL_LOG_ONCE("state: grGlideSetState with a block this provider "
+                     "never filled: ignored. A state saved through one "
+                     "provider cannot be restored through another");
         return;
     }
     /* draw_state_version was incremented by native.c before this call. It is

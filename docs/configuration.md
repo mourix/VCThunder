@@ -1,342 +1,420 @@
 # Configuration
 
-**§8 is the key reference**; everything before it is what a key list cannot say.
-
-> Inline `;` and `#` comments are accepted when whitespace separates them from the value. An
-> invalid boolean or number is logged and keeps the value from the layer before.
+**Most people need none of this page.** Run `VCThunder.exe` with no arguments: the launcher shows
+every shipped setting with its own help text. To get back to the shipped defaults, delete
+`vcthunder.ini` and start again. This page is what the launcher cannot show; §8 lists every key.
 
 ---
 
 ## 1. The file model
 
-**One pack, one file, both cabinets.**
+One pack, one file, both cabinets:
 
 ```
-[section]            applies to both titles
-[<title>.section]    applies to that title only, and wins key by key
+[section]            both titles
+[<title>.section]    one title only; wins key by key
+[analog.<label>]     one CONTROLLER only; wins over both (§4.1.1)
 
 built-in defaults  ->  [section]  ->  [<title>.section]  ->  command line
 ```
 
-Last wins, key by key: `[offroad.audio] output = front` leaves Hydro alone, and anything a title
-does not name falls through to the plain section.
+So `[offroad.audio] output = front` leaves Hydro alone; anything a title section does not name
+falls through to the plain one. There is no flat `[offroad]` section.
 
-**The section names inside a scope are the same ones**, so `[offroad.digital]` *is* Offroad's
-keyboard map. They cannot collapse into one flat `[offroad]`, because `[digital]` and `[gamepad]`
-use the same key names for different things: `coin1` is a keyboard key in one and a pad button
-ordinal in the other.
+- **The log names where each value came from.** An illegal value is refused with a reason and
+  the previous one stands. An unknown key is ignored; only the launcher names it.
+- Inline `;` and `#` comments need whitespace before them.
+- `log_file` is read only from the plain `[diagnostics]`, because the log is open before the title
+  is known.
 
-**Which section a value came from is logged**, and so is any key the host does not recognise,
-which is named once and ignored. A value outside a key's range or choice set is refused with a
-reason, and the previous value stands.
-
-`log_file` is read only from the plain `[diagnostics]`: it names a file already open by the time
-a title is known, so `[hydro.diagnostics] log_file` would read as applied and would not be.
+> **Never paste a second copy of a section or a key**; edit the one that is there. In `[analog]`,
+> `[ffb]`, the bindings and `[devices]` the game reads only the **first** block and the **first**
+> copy of a key, silently. The launcher lists both on *Troubleshooting*.
 
 ### 1.1 The launcher
 
-`VCThunder.exe` with no arguments opens the settings launcher, which exposes every shipped key
-and writes it back: shared values stay in their plain sections, and control differences go only
-to the four `[<title>.digital]` and `[<title>.gamepad]` sections. Any other per-title section is
-preserved untouched, with a warning. A save writes `vcthunder.ini.bak` first, then atomically
-replaces the file, keeping ordering, comments, unknown keys and line endings.
+- **Apply writes only what changed**, keeping ordering, comments, unknown keys and line endings.
+  Every save first copies the old file to `vcthunder.ini.bak`.
+- **`vcthunder.ini.good` is your known-good copy**, updated only by *Save these as known-good* on
+  *Troubleshooting*; *Revert to known-good* puts it back.
+- **Per-title values are shown, not edited**, except control bindings. A key set in
+  `[<title>.<section>]` says so on its row, as the shipped `[hydro.ffb]` rumble trims do.
+- ***Troubleshooting* lists lines nothing reads** (unknown keys, duplicate sections) and never
+  changes them.
+- **Set up... measures your axes**: move each control when asked. It listens on **every**
+  DirectInput controller, so the accelerator can be a pedal on the wheel or a throttle lever on
+  another controller; an axis on another controller is written `<label>:<axis>` (§4.1.3). A lever
+  counts once it has moved and stays put. **Skip step** leaves that row as it was. Nothing is
+  written until you confirm what it measured and press Apply.
+- **Show advanced settings on every page** (on *Troubleshooting*) reveals the rest of the keys.
 
-A checkbox cannot show "neither", so a boolean the file spells wrongly is shown -- and saved --
-as the key's shipped default rather than as `false`.
-
-Every key -- its caption, type, default, range and legal values -- comes from
-[`src/settings.def`](../src/settings.def), which the loader and the launcher both expand, so
-they cannot disagree. A key that carries a warning leads with `Caution:` or `Warning:` **in the
-text** rather than in a colour.
-
-### 1.2 The command line
-
-**The title is a command-line word and there is no `title` key**: one pack carries both dumps, so
-a key that chose the game would make every other key conditional on it.
+### 1.2 The command line and the shipped file
 
 ```sh
 VCThunder.exe                VCThunder.exe hydro          VCThunder.exe offroad
 ```
 
-These words override the file for one run:
+**The title is a command-line word; there is no `title` key.** These words override the file for
+one run:
 
-| Word | Overrides | For |
-|---|---|---|
-| `--link off\|lan\|local` | `[link] link` | the link transport (§7) |
-| `--save DIR` | `[paths] save_dir` | a second instance: one save directory is one cabinet's settings |
-| `--log FILE` | `[diagnostics] log_file` | a second instance: both logs are opened `"w"` |
-| `--glide-log FILE` | `[graphics] vcglide_log` | a second instance, for the same reason |
-| `--data DIR` / `--exe PATH` | `[paths] data_dir` / `exe` | a dump outside the pack |
+| Word | Overrides |
+|---|---|
+| `--link off\|lan\|local` | `[link] link` (§7) |
+| `--save DIR` | `[paths] save_dir` |
+| `--log FILE` | `[diagnostics] log_file` |
+| `--glide-log FILE` | `[graphics] vcglide_log` |
+| `--data DIR` / `--exe PATH` | `[paths] data_dir` / `exe` |
 
-Two cabinets on one machine therefore differ by four words:
+Two cabinets on one machine need their own save directory and logs:
 
 ```sh
 VCThunder.exe hydro --link local --save save2 --log link2.log --glide-log vcglide2.log
 ```
 
-`--trace` raises the log level for one run and `--dry-run` stops after mapping and patching,
-without starting the game; neither is a setting and neither is written to the file.
-[`docs/building.md`](building.md) has both.
+`--trace` raises the log level for one run; `--dry-run` stops after loading, without starting the
+game. See [`building.md`](building.md).
+
+**The shipped `vcthunder.ini` is built into `VCThunder.dll`** and written out whenever the pack has
+none; an existing file is never overwritten. That is why a release zip carries no ini: extracting
+an update over your pack cannot replace your controller setup. The ini always sits beside the exe.
+
+If it cannot be written, the log says why: usually a pack under `Program Files` or still inside a
+zip viewer.
 
 ## 2. Paths
 
-Everything the run directory owns is named relative to `VCThunder.exe`, which sets its own
-working directory to make that true.
-
-**The dump is never written to, so it can be read-only**, and that holds by construction: a file
-is routed by the ACCESS MODE the game opens it with, so anything opened for writing lands in
-`save_dir`, and anything opened for reading comes from `save_dir` first and `data_dir`
-otherwise.
+Paths are relative to `VCThunder.exe`. **The game dump is never written to**, so it can be
+read-only: anything the game opens for writing goes to `save_dir`, and reads check `save_dir`
+first, then `data_dir`.
 
 ## 3. The picture
 
-`[graphics]` is the whole of it. The first two constraints below come from the cabinet's
-hardware rather than from taste.
+Everything here is in `[graphics]`.
 
-### 3.1 The raster
+### 3.1 Raster and video mode
 
-**The raster is 400 lines, and 512x400 is not a legal Glide mode.** `raster_height = 400` takes
-a 640x400 surface -- the shortest legal mode containing the raster -- and lets the game clip
-itself to the left 512 columns; `vcglide` crops the other 128 away. `raster_height = auto`
-instead normalises the game to 512x384 and **cuts the top off every full-screen bitmap**.
+The cabinet's picture is 512x400. Keep `raster_height = 400` and `video_mode = auto`:
 
-`video_mode = auto` leaves the game asking for its own mode 1 -- 512x384 plus the cabinet's
-512x400 CRT timing -- which is the only correct setting for a cabinet, and `raster_height` is
-ignored while any other mode is set. **Mode `2` is 640x480 and may damage an original arcade
-monitor.**
+- `raster_height = auto` gives 512x384 and **cuts the top off every full-screen bitmap**.
+- `video_mode = auto` is the only correct setting for a real cabinet. **Mode `2` is 640x480 and
+  may damage an original arcade monitor.** `raster_height` is ignored under any other mode.
 
 ### 3.2 Window, fullscreen and aspect
 
-**Fullscreen never changes the display mode**: it is a borderless window covering the monitor
-the game is on, toggled with Alt+Enter. Exclusive fullscreen is not an option, because the arcade
-binary has no message loop, so its mode-change handshake never completes and `grSstWinOpen`
-hangs.
-
-`aspect` means the same thing windowed and fullscreen: `raster` preserves the active game grid,
-`4:3` and `16:9` fit that ratio, `stretch` fills the monitor, and every preserving mode is
-centred with black bars. `window_scale` fixes the window at a multiple of the raster; there is
-no maximise button and no resize frame.
-
-`render_scale` re-renders the 3D scene at a multiple of the cabinet's resolution on the GPU
-backend, and does cost GPU time; HUD and menu pixels stay native and are point-upscaled over it.
-The CPU backend ignores it.
+- **Fullscreen is a borderless window** over the game's monitor; Alt+Enter toggles it. The display
+  mode never changes; exclusive fullscreen would hang the game.
+- `aspect`: `raster` keeps the game's own shape, `4:3` and `16:9` force that ratio, `stretch` fills
+  the screen. The others add black bars.
+- `window_scale` sizes the window as a multiple of the raster; it cannot be resized.
+- `render_scale` renders the 3D scene at a higher resolution on the GPU. HUD and menus stay native
+  and are scaled up. It costs GPU time and does nothing on the CPU renderer.
 
 ### 3.3 Widescreen
 
-`widescreen` **ships off**, and the launcher calls it *Widescreen hack*, which is what it is:
-Hor+ widening, not anything the cabinet did.
+`widescreen` is **off by default** and is a hack: Hor+ widening the cabinet never had. With the
+default raster it gives a 711x400 picture, with the HUD and menus left where the game put them.
+A title missing an address it needs, or `aspect = 4:3`, turns it off with a warning.
 
-With it on, the game keeps its **entire native coordinate system** and the host carries the
-difference as an origin at the Glide seam: the culling frustum widens while every viewport member
-the 2D layer reads is put back to the cabinet's value, so no HUD, text, dial or menu coordinate
-is rewritten anywhere. With `video_mode = auto` and `raster_height = 400` that is a **711x400
-game raster inside an 856x480 backing surface**, field at x=99..610. Six consumers need a
-per-title repair to follow it, so **widescreen refuses to arm if any address is absent**.
+### 3.4 Frame rate
 
-`aspect = 4:3` contradicts it and wins, turning `widescreen` off with a warning: presenting a
-16:9 raster at 4:3 would squash the picture to 75% horizontally.
+**There is no frame-rate setting.** Both titles run locked at 30 fps, and one frame is one game
+tick, so more frames would speed the game up.
 
-### 3.4 Frame rate: 30, locked, and there is no key
-
-There is no `frame_rate` key, shipped or developer. Both titles hold a locked 30 fps in play, up
-to `render_scale = 5`.
-
-**In both titles one rendered frame is exactly one simulation tick**, so rendering more often
-means ticking more often, and the game runs at double speed. Both ways out have been measured and
-neither ships. `render_scale` is unaffected by any of this.
-
-### 3.5 The provider, and GPU or CPU
-
-`vcglide.dll` is the fixed provider in every pack and rasterises every call itself: the host
-loads the copy beside `VCThunder.exe`, and there is no provider choice. `SDL3.dll` is the GPU
-runtime staged beside it, and is the pack's only third-party file.
+### 3.5 GPU or CPU
 
 | `vcglide_renderer` | Result |
 |---|---|
-| `auto` | **Default.** Try SDL3 GPU; fall back to CPU if shader, device or window setup fails. |
-| `gpu` | Request SDL3 GPU, and log an explicit warning before the same safe CPU fallback. |
-| `cpu` | Never initialise SDL or a GPU driver; use the CPU reference rasteriser. |
+| `auto` | **Default.** Use the GPU (Direct3D 12); fall back to the CPU if setup fails. |
+| `gpu` | The same, but warns if it has to fall back. |
+| `cpu` | CPU renderer only; never touches the GPU. |
 
-The GPU path is SDL 3.4.10 on Direct3D 12, and a render-target allocation failure steps
-`render_scale` down one at a time rather than failing the game open; the CPU path presents
-through Direct3D 9/GDI.
-
-**The rasteriser is not conformant**: it reproduces both games' 2D and LFB output exactly and
-their 3D output to a threshold. The CPU path is the control; GPU output is replay-tested but not
-byte-identical to it, by design.
-
-`vcglide_threads` is how many workers the CPU rasteriser splits a triangle across, and **0, the
-default, is one per PHYSICAL core**: hyperthread siblings contend for the execution units a span
-loop wants. **It cannot change the picture** -- the split is by scanline row, so no two workers
-share a pixel.
+GPU and CPU pictures match closely, not pixel for pixel, by design.
 
 ### 3.6 Captures and frame dumps
 
-**`glide_capture` and `glide_frames` are diagnostics, not modes.** A capture writes ~280 KB of
-vertices per frame, and a frame dump reads back the whole framebuffer and writes a PNG; both run
-on the render thread, so nothing timed during such a run means anything. `glide_capture_frames`
-bounds both, so a live run's frames and a replay's line up.
+`glide_capture` and `glide_frames` are slow diagnostics: never time a run with one on.
 
 ## 4. Controls
 
-The host synthesises the cabinet's I/O board packets and runs the game's own decoder, so
-everything downstream -- the operator menus' switch and analogue tests included -- behaves as it
-did on the cabinet. `input_background = true` samples keys process-wide, so another window
-holding focus cannot suppress cabinet controls.
+The host builds the cabinet's I/O board packets and the game decodes them itself, so the operator
+menus' switch and analogue tests work as they did on the cabinet. With
+`input_background = true`, keys are read even when another window has focus.
 
 ### 4.1 Choosing a device
 
-`[analog] provider = auto` tries **DirectInput, then XInput, then WinMM**, which costs pad
-users nothing: unnamed, DirectInput claims only a controller that publishes force-feedback
-effects -- a wheel does, an XInput pad does not. `dinput_name` or `dinput_device` claims a named
-device whatever it is.
+`[analog] provider = auto` tries **DirectInput, then XInput, then WinMM**. Unless you name a
+device, DirectInput only takes a controller with force feedback, so a wheel gets DirectInput and an
+Xbox pad falls through to XInput. **An Xbox pad is listed once, as XInput**: DirectInput sets aside
+any controller Windows tags as an XInput device, as MAME does, unless it has force feedback, which
+only DirectInput can drive. `dinput_name` (part of the controller's name or device id, see
+§4.1.1) picks a specific device; there is no device number, because a number shifts whenever
+anything is plugged in.
 
-`pov_digital` defaults to `true`, which is a pad's behaviour: on a pad the D-pad *is* the
-steering. **Set it `false` on a wheel**, where the hat is under a thumb that is also steering and
-a full-lock override is a crash. `[diagnostics] input_trace` names every axis and button the
-device reports, which is how it gets mapped.
+`pov_digital = auto` lets a D-pad steer on a pad but not on a force-feedback wheel, where a
+bumped hat would jolt to full lock. `true` or `false` overrides it.
+
+**If an axis does not work, turn on `[diagnostics] input_trace`** (launcher *Controls*, advanced).
+The log then lists every axis and button the device reports, warns about a configured axis it
+lacks, and shows the map in use. A missing axis is ignored, so it cannot silence the
+pedal beside it.
+
+#### 4.1.1 One section per controller: `[devices]` and `[analog.<label>]`
+
+Name a controller and it gets its own section, so setting up a pad cannot overwrite a wheel's
+pedals:
+
+```ini
+[devices]
+; <label> = <provider>:<match>
+tmx = dinput:Thrustmaster TMX
+pad = xinput:0
+
+[analog.tmx]
+dinput_throttle_axis = rz
+dinput_brake_axis    = y
+dinput_pedal_mode    = separate
+```
+
+- **label**: yours to choose; up to 15 letters, digits, `_` or `-`.
+- **match**: on DirectInput, part of the controller's **name**, or of its whole
+  **device id** when the match holds `product_` or `instance_`. The log prints the id for each
+  one: `io:   device id: Thrustmaster TMX Racing Wheel product_b67f044f-… instance_5be31ef0-…`,
+  in [MAME's](https://docs.mamedev.org/advanced/devicemap.html) format. A GUID without its prefix
+  matches nothing, because a few hex letters would otherwise match some GUID by chance. On XInput
+  and WinMM, the device number.
+- **Two controllers with one name** (two identical button boxes, or the two halves a Fanatec
+  wheel presents) are told apart by the `instance_` part. A line holding `instance_` **pins**
+  that controller: it belongs to the lines that pin it, and a line matching only the name opens the
+  other one, whatever order Windows lists them in. The launcher writes the name when the name is
+  enough and the full id when it is not. A pinned controller plugged into another USB port may get
+  a new id; it then shows `(not connected)` and is added again once.
+- **Lookup order**: `[<title>.analog.<label>]` → `[analog.<label>]` → `[<title>.analog]` →
+  `[analog]` → default. So a profile holds only what is different about that controller.
+- **What goes in a profile**: the `dinput_*`, `xinput_*` and `winmm_*` keys, except the four that
+  choose the device (`dinput_name`, `xinput_device`, `winmm_device`).
+
+The launcher writes the `[devices]` line for you. The log warns about an `[analog.<label>]` that
+no `[devices]` line names, usually a typo.
+
+#### 4.1.2 Extra controllers: shifters, button boxes
+
+**A `dinput:` entry in `[devices]` also opens that controller**, so a USB shifter or button box
+works next to the wheel. Put its label in front of the button number:
+
+```ini
+[devices]
+tmx = dinput:Thrustmaster TMX
+th8 = dinput:TH8A
+
+[offroad.gamepad]
+shift1 = th8:1
+shift2 = th8:2
+shift3 = th8:3
+boost  = 1, th8:4      ; wheel button 1 OR the shifter's button 4
+```
+
+- **A bare number is the primary controller**, the one with force feedback and the hat. The
+  primary is `dinput_name`, then the first controller with force feedback;
+  never this table, so adding a shifter cannot move your axes onto it. `dinput_name` follows the
+  same pins as the table: a name skips a controller a `[devices]` line pins.
+- Extra controllers give their buttons, and any axis §4.1.3 names on them. They are `dinput:`
+  controllers or **XInput pads**: `pad = xinput:0` beside a wheel makes `pad:1` the pad's A button
+  and `pad:rt` its right trigger.
+- **An Xbox pad has no DirectInput view here**: name it `xinput:0`, never `dinput:`.
+- A binding naming a controller that is not open **does nothing** and the log says why.
+- **Two labels for one controller are two names for it**: bindings on either reach it.
+- **Two controllers with the same name each get a label**: the first by name, the second by its
+  device id (§4.1.1).
+- Limits: eight controllers, four buttons per action, 128 buttons per controller.
+
+The launcher's *Add* writes the label for you on DirectInput devices.
+
+#### 4.1.3 Steering, gas and brake from different controllers
+
+Put a label and a colon in front of an axis to read it from that controller:
+
+```ini
+[devices]
+fanatec = dinput:FANATEC
+twcs    = dinput:TWCS Throttle
+
+[analog.fanatec]
+dinput_steering_axis = x        ; no label: the primary controller
+dinput_throttle_axis = twcs:z   ; the TWCS's z axis
+dinput_brake_axis    = rz
+
+[analog.twcs]
+dinput_throttle_invert = false  ; facts about the TWCS's own axis
+```
+
+- **The three axis keys and `dinput_pedal_mode` belong to the primary controller's section.** A
+  file without labels reads exactly as before.
+- **Invert, deadzone and steering range are read from the section of the controller the axis is
+  on**: `[analog.twcs]` above, then `[analog]`. The launcher shows and writes them there.
+- **A controller that is not plugged in, or stops answering, reads released**: steering centred,
+  pedal up. It never falls back to the primary controller's axis of the same name. The log names
+  the line and says why.
+- **`combined` pedals with the brake on another controller** are read as separate, with a warning:
+  combined means one axis carries both pedals.
+- **On an XInput pad the axis names are XInput's**: `lx ly rx ry lt rt`. `dinput_throttle_axis =
+  pad:rt` with `[analog.pad] dinput_throttle_invert = false` is the right trigger as gas; a trigger
+  rests low, so the invert is false (*Set up...* measures it).
+- Only the DirectInput role keys take a label; the `xinput_*` and `winmm_*` keys read one
+  controller, the one driving.
+- *Set up...* writes these for you: move the lever when it asks for the accelerator.
+- The log prints one line saying where each axis is read from:
+  `io: axis roles: steering x on "FANATEC Wheel", accelerator twcs:z on "TWCS Throttle", ...`.
+  `--dry-run` prints it without starting a race.
 
 ### 4.2 The two control panels
 
-The cabinets do not share one, which is why the per-title layer exists. Hydro has a throttle
-lever, three views, and Boost as start and confirm; Offroad has a pedal box, a separate START and
-NITRO, three cameras, and a three-speed shifter, where **releasing all three shift buttons is
-neutral**. That shifter is a *maintained* gate, so a paddle cannot be wired to one position:
-`shift_up` / `shift_down` step a latch on each rising edge and hold the selected line, leaving
-the direct `shift1..3` bindings untouched.
+Hydro has a throttle lever, three views, and Boost as start. Offroad has pedals, START, NITRO,
+three cameras, and a three-speed shifter where **releasing all shift buttons is neutral**.
+
+Because that shifter holds its position, a paddle cannot be wired to one gear. `shift_up` and
+`shift_down` step through the gears instead and hold the one selected. **In Offroad they are on
+LB/RB by default** (`shift_down = 5`, `shift_up = 6`); Hydro has no shifter. `shift1..3` are for
+an H-pattern shifter and are unbound by default. Bind a wheel's paddles on the launcher's
+*Controls* page.
 
 ### 4.3 Force feedback
 
-**During gameplay the game computes the force and the host only carries it**, from the I/O
-board's DAC byte to a DirectInput constant-force effect. No effect is invented -- no canned
-rumble, no road texture -- so what the wheel does is the arcade physics. The launcher's Test
-button is separate: one bounded 850 ms pulse.
+**The game computes the force; the host only passes it on** to a DirectInput constant-force
+effect. Nothing is invented (no canned rumble, no road texture), except rumble on a pad (§4.3.1).
 
-**Three switches gate it, in three different places:** `[ffb] enabled`; `[analog] provider`,
-which has to admit a wheel at all; and **the title's own F2 operator menu**, which the host
-deliberately does not override. `[diagnostics] ffb_trace` censuses what the game commanded, so
-"the wheel is not answering" and "the game is not asking" stay distinguishable.
+Three switches must all be on: `[ffb] enabled`; `[analog] provider`, which has to allow a wheel;
+and **the game's own F2 operator menu**, which the host leaves alone. `[diagnostics] ffb_trace`
+logs what the game asked for, so you can tell "the wheel is not answering" from "the game is not
+asking".
 
-`autocenter` must stay off while a constant force plays: the driver's spring is a second force
-on the same axis and the wheel feels the sum. That leaves the wheel limp wherever the game
-commands nothing, and **nothing here fills that gap on purpose** -- a centring spring would be an
-invented force fighting the arcade's own.
+**Keep `autocenter` off.** The driver's centring spring would fight the game's force. The wheel
+therefore goes limp when the game asks for nothing; nothing here adds a spring on purpose.
+
+#### 4.3.1 A gamepad: `rumble`
+
+A pad has no force motor, so the host turns the game's force into rumble. It is on by default,
+needs `[ffb] enabled` too, and **a DirectInput wheel never gets it**. It works through XInput only.
+
+The raw force mixes steering into everything, so the pad reads the game's own values:
+
+| Channel | Hydro | Offroad |
+|---|---|---|
+| **impact** | collisions | the game's hit value |
+| **texture** | n/a | four per-tyre jolts |
+| **body** | n/a | the suspension |
+| **engine** | the force's fast part, above ~8 Hz | the same |
+| **boost** | firing while its boost seconds fall | firing while its nitro flag is set |
+
+Boost is its own path. When the game starts boosting, a spark on both motors; while it runs, a
+buzz on the light motor as strong as the boost's alternation in the force. Pressing the button
+with an empty tank does nothing, as in the game. `rumble_boost_percent` sets it and the
+surface trim does not touch it.
+
+`rumble_events = false` filters the raw force instead, as Offroad's menus always do.
+
+**The titles need different numbers**, which is why the shipped ini sets `[hydro.ffb]` and
+`[offroad.ffb]` separately. Tune rumble in those sections, not in `[ffb]`.
 
 ## 5. Audio
 
-`[audio] output` is not a preference. Both cabinets wired the left output to the front speakers
-bridged to mono, and the right to the woofer in the seat -- two transducers, not a stereo image
--- so faithful playback sounds broken on PC speakers.
+Both cabinets sent the left channel to the front speakers and the right to a woofer in the seat.
+That is two separate speakers, not stereo, and played faithfully it sounds wrong on a PC.
 
 | `output` | What it does |
 |---|---|
-| `mix` | **Default.** Both cabinet buses to both speakers. |
-| `cabinet` | The faithful wiring: front bus left, seat woofer right. |
-| `front` | The front bus to both speakers; the seat-woofer bus is dropped. |
+| `mix` | **Default.** Both channels to both speakers. |
+| `cabinet` | The real wiring: front left, seat woofer right. |
+| `front` | Front channel only, on both speakers. |
 
-`balance` attenuates only, in both directions: 50 is unity on both buses, below it the seat
-woofer comes down and above it the front speakers do. **The shipped default is 15**, which suits
-desk speakers; a cabinet wants 50.
+`balance` only turns things down. `50` is equal; below it the seat woofer gets quieter, above it
+the front. **The default, 15, suits desk speakers; a cabinet wants 50.**
 
 ## 6. Diagnostics
 
-`[diagnostics]` is off by default, and several of its switches ruin the picture on purpose. Two
-rules apply to all of them:
+`[diagnostics]` is off by default. Two rules for every switch in it:
 
-- **Be sceptical of a number any of them produces.** Measure against a control at the same
-  cadence, scale and depth.
-- **Restore every switch after a run.** An experiment left enabled in a run directory is a
-  hidden variable in everything measured afterwards.
+- **Be sceptical of any number it produces.** Compare against a run without it.
+- **Turn it off afterwards.** A switch left on skews everything measured later.
 
-**Four keys ship in the ini**: `log_file`, `log_level`, and the read-only `r2_cache` and
-`stall_ms`, which are safe to leave on.
+The shipped ini has only `log_file` and `log_level`. `stall_ms` and `input_trace` are in the
+launcher under advanced.
 
-**The rest are developer switches and ship in no file.** Each is off by default and still works
-if the line is added: the parser takes any key it knows, wherever it finds it, and **says so in
-the log** (`[audio] render_scale belongs in [graphics]. It was applied anyway, but move it`). A
-key of `[analog]`, `[ffb]` or a binding section gets a stronger line: those are read only within
-their own section, so a misplaced one does nothing at all.
+**Everything else is a developer switch**, off by default and in no file; add the line to use it. The parser takes any key it knows, wherever it finds it, and **the log
+says to move it**. The exception is `[analog]`, `[ffb]` and the binding sections: their keys are read only in their own
+section, so a misplaced one does nothing.
 
 ## 7. The arcade link
 
-`[link]` selects **the transport this host puts under the games' own link protocol**, and is the
-whole of what the ini decides about link play. Both keys are on the launcher's **Link Play** page:
+`[link] link` chooses **how** two cabinets reach each other.
 
-| Key | Default | What it does |
-|---|---|---|
-| `link` | `off` | `off` \| `lan` \| `local`. `off` is standalone: nothing looks for a peer. `local` is two instances of one pack on this machine, and is the case that has been **measured**. `lan` is a second machine on the network: it runs, but has never had one to answer it |
-| `link_rx_budget` | `64` | datagrams a single frame may take before `recvfrom` answers `WSAEWOULDBLOCK`, 1..4096 |
+| `link` | Meaning |
+|---|---|
+| `off` | **Default.** Standalone. |
+| `local` | Two instances of one pack on this machine. Tested. |
+| `lan` | A second machine on the network. Implemented, not yet tested. |
 
-**`link` is not the link's on/off switch, and it is not a cabinet number.** Whether a cabinet
-links at all, and which unit it is, are the GAME's own operator settings in its NVRAM, reached
-through the service menu, `F2`. Turning `link` on does not enable the link; it makes that
-setting able to work. A second instance needs three files of its own (§1.2).
+**This is not the on/off switch for link play, and it is not a cabinet number.** Both are the
+game's own operator settings, in its F2 service menu. `link` only makes those settings able to
+work. A second instance on one machine: §1.2.
 
 ## 8. Key reference
 
-Defaults are the shipped ini's.
+Defaults are the built-in ones. The shipped ini changes none of them, except the per-title rumble
+trims (§4.3.1).
 
 ### `[paths]`
 
 | Key | Default | Meaning |
 |---|---|---|
-| `data_dir` | `data` | the title's assets: `data/<title>/`, or a title's files directly |
-| `save_dir` | `save` | everything the game writes: operator settings, audits, high scores, race statistics |
+| `data_dir` | `data` | the folder holding each title's dump, as `<title>/` |
+| `save_dir` | `save` | everything the game writes: settings, audits, high scores |
 | `exe` | empty | developer key: an executable outside the pack |
-
-Both are relative to `VCThunder.exe`, and the dump is never written to (§2). **A second instance
-needs its own `--save`**: one save directory is one cabinet's settings.
 
 ### `[graphics]`
 
 | Key | Default | Values |
 |---|---|---|
 | `vcglide_renderer` | `auto` | `auto` \| `gpu` \| `cpu` (§3.5) |
-| `vcglide_threads` | `0` | CPU-backend workers; 0 = one per physical core, 1 = off |
-| `vcglide_log` / `vcglide_verbose` | `vcglide.log` / `false` | the provider's log; verbose adds a line per entry point |
-| `fullscreen` | `false` | borderless; Alt+Enter toggles, the display mode never changes |
-| `window_scale` | `1` | 1..8 or `auto`; the window cannot be resized |
-| `render_scale` | `1` | 1..8 internal 3D resolution, GPU backend only |
-| `aspect` | `raster` | `raster` \| `4:3` \| `16:9` \| `stretch`; **`4:3` turns `widescreen` off** |
-| `widescreen` | `false` | 711x400 Hor+ raster when on (§3.3) |
-| `raster_height` | `400` | the cabinet's raster; `auto` gives 512x384 and **cuts the top off every 400-row bitmap** |
-| `video_mode` | `auto` | the game's own mode table. **`2` is 640x480 and may damage an original monitor** |
-| `glide_capture` / `glide_frames` | empty | write a `.vglc` call stream / a PNG per frame (§3.6) |
-| `glide_capture_frames` | `60` | how many frames both of those cover; 0 = until exit |
+| `vcglide_threads` | `0` | CPU renderer threads; 0 = one per physical core, 1 = off |
+| `vcglide_log` / `vcglide_verbose` | `vcglide.log` / `false` | the renderer's log |
+| `fullscreen` | `false` | borderless; Alt+Enter toggles |
+| `window_scale` | `1` | 1..8 or `auto` |
+| `render_scale` | `1` | 1..8, GPU only |
+| `aspect` | `raster` | `raster` \| `4:3` \| `16:9` \| `stretch`; `4:3` turns `widescreen` off |
+| `widescreen` | `false` | 711x400 Hor+ (§3.3) |
+| `raster_height` | `400` | `auto` gives 512x384 and **cuts the top off full-screen bitmaps** |
+| `video_mode` | `auto` | **`2` is 640x480 and may damage an original monitor** |
+| `glide_capture` / `glide_frames` | empty | a call-stream capture / a PNG per frame (§3.6) |
+| `glide_capture_frames` | `60` | frames those cover; 0 = until exit |
 
 ### `[timing]`
 
 | Key | Default | Values |
 |---|---|---|
-| `cpu_hz` | `333000000` | 1 MHz..4000 MHz: the cabinet's Celeron identity, which its `rdtsc` pacing was tuned to. It does *not* control game speed. The launcher shows MHz |
-| `speed_percent` | `100` | the virtual clock's ratio, 25..400 |
-
-There is no `frame_rate` key; §3.4 says why.
+| `cpu_hz` | `333000000` | the cabinet CPU speed the game expects; **not** game speed |
+| `speed_percent` | `100` | 25..400, the game clock's speed |
 
 ### `[audio]`
 
 | Key | Default | Values |
 |---|---|---|
 | `audio` | `true` | sound on |
-| `volume` | `100` | host-side gain, percent |
+| `volume` | `100` | percent |
 | `output` | `mix` | `mix` \| `cabinet` \| `front` (§5) |
-| `balance` | `15` | 0..49; attenuates only, 50 is unity on both buses |
-| `dcs_ms` | `5` | 1..100: the thread standing in for the ~5.4 ms audio interrupt, a scheduling granularity rather than a latency |
+| `balance` | `15` | 0..100; 50 is equal (§5) |
+| `dcs_us` | `5400` | 1000..100000, the sound thread's period in microseconds; 5400 is the cabinet's, and the game's fades are sized for it |
 
 ### `[controls]`
 
 | Key | Default | Values |
 |---|---|---|
-| `dip_switches` | `0xFF` | the cabinet's DIP block |
-| `io_ms` | `16` | board poll period; the cabinet ran ~60 Hz |
-| `input_background` | `true` | sample keys process-wide (§4) |
+| `dip_switches` | `0xFF` | the cabinet's DIP switches |
+| `io_ms` | `16` | I/O board poll period (the cabinet ran ~60 Hz) |
+| `input_background` | `true` | read keys when not focused (§4) |
 
-`backend` and `port` also parse here, for a board transport other than the synthesised one. Both
-are developer keys and ship in no file.
+`backend` and `port` are developer keys for a real I/O board.
 
-### `[digital]` — the keyboard
-
-**This is what the pack ships bound.** Offroad overrides six of the shared rows:
+### `[digital]`: the keyboard
 
 | Action | Hydro | Offroad | | Action | Both |
 |---|---|---|---|---|---|
@@ -345,53 +423,71 @@ are developer keys and ship in no file.
 | `brake` | Down | **LAlt** | | `service1` | 9 |
 | `boost` | LCtrl | **Space** | | `service_mode` (F2 menu) | F2 |
 | `view_high` / `view_low` / `view_pilot` | LAlt / Space / LShift | **V / B / N** | | `volume_down` / `volume_up` | - / = |
-| `shift1` / `shift2` / `shift3` | — | **Z / X / C** | | | |
+| `shift1` / `shift2` / `shift3` | n/a | **Z / X / C** | | | |
 
-Steering and throttle are analogue cabinet fields, so a digital binding moves them to full
-lock, and Offroad will not leave the grid on the throttle alone: its gate wants a gear. Escape
-quits and Alt+Enter toggles fullscreen; neither is bindable. Key names are MAME's (`A`-`Z`,
-`F1`-`F24`, `LEFT`, `LCTRL`, `SPACE`, `MINUS`, `NONE`, …), with an optional `KEYCODE_` prefix.
+A key moves steering or throttle to full. Offroad needs a gear to leave the grid. Escape quits
+and cannot be rebound. Key names are
+MAME's (`A`-`Z`, `F1`-`F24`, `LEFT`, `LCTRL`, `SPACE`, `MINUS`, `NONE`, …), with an optional
+`KEYCODE_` prefix.
 
-### `[analog]` — wheels and pads
+### `[devices]`
+
+`<label> = <provider>:<match>`: see §4.1.1 and §4.1.2.
+
+### `[analog]`: wheels and pads
+
+Most `dinput_`, `xinput_` and `winmm_` keys may also go in `[analog.<label>]` (§4.1.1).
 
 | Key | Default | Values |
 |---|---|---|
-| `provider` | `auto` | `auto` (DirectInput, XInput, WinMM in that order) \| `dinput` \| `xinput` \| `winmm` \| `none` |
+| `provider` | `auto` | `auto` \| `dinput` \| `xinput` \| `winmm` \| `none` (§4.1) |
 | `deadzone_percent` | `12` | 0..49 |
-| `pov_digital` | `true` | let a hat or D-pad drive the axes at full lock. **`false` on a wheel** (§4.1) |
-| `xinput_device` / `winmm_device` | `0` | zero-based device index |
-| `dinput_device` | `auto` | `auto` is the attached controller that has a motor |
-| `dinput_name` | empty | a substring of the product name; overrides `dinput_device` |
-| `dinput_deadzone_percent` | `0` | DirectInput's own, separate from `deadzone_percent` |
-| `dinput_steering_range_percent` | `100` | how much travel reaches full lock: 100 suits the cabinet's ~270°, 30 a wheel left at 900°. **Check the wheel first** |
+| `pov_digital` | `auto` | `auto` \| `true` \| `false`: let a hat or D-pad steer (§4.1) |
+| `xinput_device` / `winmm_device` | `0` | device number, from 0 |
+| `dinput_name` | empty | part of the device name or id (§4.1.1); empty = the first controller with force feedback, or none |
+| `dinput_deadzone_percent` | `0` | DirectInput's own deadzone |
+| `dinput_steering_range_percent` | `100` | 100 for a wheel at ~270°, 30 for one at 900° |
 
-Then one axis group per backend: `<backend>_steering_axis`, `_throttle_axis`, `_brake_axis`,
-each with a matching `_invert`.
+Each backend has `_steering_axis`, `_throttle_axis` and `_brake_axis`, each with an `_invert`:
 
-| Backend | Axis names |
-|---|---|
-| XInput | `lx ly rx ry lt rt none` |
-| WinMM | `x y z r u v none` |
-| DirectInput | `x y z rx ry rz slider0 slider1 none`, as its own control panel names them |
+| Backend | Axis names | Defaults |
+|---|---|---|
+| XInput | `lx ly rx ry lt rt none` | `lx` / `rt` / `lt` |
+| WinMM | `x y z r u v none` | `x` / `y` / `none`, `combined`, throttle inverted |
+| DirectInput | `x y z rx ry rz slider0 slider1 none`, or `<label>:<axis>` on another controller (§4.1.3) | `x` / `y` / `rz`, `separate`, pedals inverted |
 
-`winmm_pedal_mode` and `dinput_pedal_mode` are `combined` (one centred axis) or `separate` (brake
-subtracted from throttle). **A wheel whose driver merges its pedals has only one axis, and
-pointing `separate` at a second one is a permanent half-brake.**
+`dinput_pedal_mode` and `winmm_pedal_mode` are `combined` (one axis for both pedals) or
+`separate`. **If the driver combines the pedals, `separate` leaves you with a permanent
+half-brake.**
 
 ### `[ffb]`
 
 | Key | Default | Values |
 |---|---|---|
-| `enabled` | `true` | the host's own switch; two more gate it (§4.3) |
-| `invert` | `true` | which way the cabinet's motor was wired |
-| `strength_percent` | `100` | 0..200, this host's scale on the game's force |
+| `enabled` | `true` | (§4.3) |
+| `direction` | `normal` | `normal` \| `reversed` |
+| `strength_percent` | `100` | 0..200 |
 | `device_gain_percent` | `100` | the device's overall gain |
-| `autocenter` | `false` | **and it must stay off** (§4.3) |
+| `autocenter` | `false` | **keep it off** (§4.3) |
+| `rumble` | `true` | pad rumble (§4.3.1) |
+| `rumble_events` | `true` | read the game's own values; off filters the raw force |
+| `rumble_texture_percent` | `50` | 0..400, the background rumble |
+| `rumble_texture_curve_percent` | `35` | 2..100, compression; 100 is none |
+| `rumble_strength_percent` | `100` | 0..200, everything |
+| `rumble_sustain_percent` | `100` | 0..200, the heavy motor |
+| `rumble_impact_percent` | `100` | 0..200, the light motor |
+| `rumble_spring_percent` | `0` | 0..100, adds the steering force back |
+| `rumble_agc_percent` | `100` | 100..800, boosts quiet stretches; 100 is off |
+| `rumble_boost_percent` | `100` | 0..200, the boost spark and buzz (§4.3.1) |
 
-### `[gamepad]` — button ordinals
+The shipped ini sets `[hydro.ffb]` texture 100 / curve 100 and `[offroad.ffb]` texture 8.
 
-Numbered as the device's own control panel numbers them; `0` unbinds, 32 is the ceiling. XInput
-is A=1 B=2 X=3 Y=4 LB=5 RB=6 Back=7 Start=8 LStick=9 RStick=10.
+### `[gamepad]`: button numbers
+
+Numbered as the device's own control panel numbers them. `0` unbinds; the maximum is 128 (32 on
+WinMM). XInput: A=1 B=2 X=3 Y=4 LB=5 RB=6 Back=7 Start=8 LStick=9 RStick=10.
+
+A value is a comma list of up to four `[<label>:]<number>` (§4.1.2).
 
 | Action | Default | | Action | Default |
 |---|---|---|---|---|
@@ -400,22 +496,42 @@ is A=1 B=2 X=3 Y=4 LB=5 RB=6 Back=7 Start=8 LStick=9 RStick=10.
 | `view_low` | `3` | | `coin2` | `0` |
 | `view_pilot` | `4` | | `service1` / `service_mode` | `0` |
 | `shift1` / `shift2` / `shift3` | `0` | | `volume_down` / `volume_up` | `0` |
-| `shift_up` / `shift_down` | `0` | | | |
+| `shift_up` / `shift_down` | `0`; **Offroad `6` / `5`** | | | |
 
-`shift1..3` are Offroad's gate directly; `shift_up` / `shift_down` are the same gate on two
-paddles (§4.2).
+A binding written into the shared `[gamepad]` beats a per-title default, so setting `shift_up` there takes the paddles
+away from Offroad.
+
+#### A PlayStation pad
+
+A native PlayStation pad is neither XInput nor force-feedback, so **WinMM** picks it up and Cross
+is button `2`, not `1`. Either run it as an Xbox controller (the only way to get rumble), or bind
+it on the launcher's *Controls* page, or merge this in (community-reported numbers, untested here):
+
+```ini
+[gamepad]
+boost      = 2    ; Cross
+view_high  = 3    ; Circle
+view_low   = 1    ; Square
+view_pilot = 4    ; Triangle
+coin1      = 9    ; Share / Create
+start1     = 10   ; Options
+
+[offroad.gamepad]
+shift_down = 5    ; L1
+shift_up   = 6    ; R1
+```
 
 ### `[link]`
 
-`link` (`off`) and `link_rx_budget` (`64`): §7.
+`link` (`off`) and `link_rx_budget` (`64`, 1..4096, datagrams per frame): §7.
 
 ### `[diagnostics]`
 
 | Key | Default | Values |
 |---|---|---|
 | `log_file` | `vcthunder.log` | read only from the plain section (§1) |
-| `log_level` | `info` | `error` \| `warn` \| `info` \| `trace`; `trace` logs every stub hit and binding |
-| `r2_cache` | `true` | read-only accelerator, safe to leave on |
-| `stall_ms` | `60` | frame-stall threshold in ms; a read-only classification |
+| `log_level` | `info` | `error` \| `warn` \| `info` \| `trace` |
+| `stall_ms` | `60` | frame-stall threshold, for the log only |
+| `input_trace` | `false` | log every axis and button (§4.1) |
 
-Everything else in this section is a developer switch that ships in no file: §6.
+Everything else here is a developer switch: §6.

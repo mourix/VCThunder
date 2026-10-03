@@ -3,27 +3,15 @@
 """titles.py -- the one place that knows which game binary a script reads.
 
 Both the input path and the output path are derived from the title, never
-written into a script. With two titles a constant output path is actively
-dangerous: running p1-symbols.py on the second binary would overwrite the first
-title's symbols.json with no warning at all.
-
-Layout facts are read out of the PE section table and out of the binary's own
-code, NOT written down here. The two ETS titles have identical section layouts
-with different extents, so anything hardcoded would be right for Hydro and wrong
-for Offroad in a way nothing would report.
-
-Usage from a script:
+written into a script: with two titles a constant output path is actively
+dangerous, because a run against the second binary would overwrite the first
+title's symbols.json with no warning. Layout facts are read out of the PE
+section table and the binary's own code, never written down here.
 
     from titles import pick
     t = pick()                       # honours --title, defaults to hydro
     data = t.read()                  # the image bytes
-    syms = t.symbols()               # the CodeView map, from the per-title cache
-    print(t.code_va, t.real_code_end_va, t.span_end)
-
-Command line:
-
-    python3 scripts/titles.py            # table of every known title
-    python3 scripts/titles.py --title offroad
+    syms = t.symbols()               # the CodeView map, per-title cache
 """
 import hashlib
 import json
@@ -34,20 +22,11 @@ import sys
 # The repository root: scripts/ lives inside it.
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# The maintainer's workspace, if there is one: the directory holding the
-# repository, the game dumps and analysis/. A CLONE HAS NO WORKSPACE, and
-# everything below has to work without one: that is the whole point of the
-# resolution order in Title._locate().
-WORKSPACE = os.path.dirname(REPO)
-
-
-def _has_workspace():
-    """True when this checkout sits in the maintainer's workspace layout.
-
-    Tested by the presence of analysis/ rather than by the directory existing,
-    because every clone has a parent directory and almost none of them is a
-    workspace."""
-    return os.path.isdir(os.path.join(WORKSPACE, "analysis"))
+# Where derived per-title data goes (the symbol cache above all), and any
+# directories searched for a dump after data/. Inside the checkout by default,
+# so a clone creates nothing outside it; build/ is already in .gitignore.
+ANALYSIS_ROOT = os.path.join(REPO, "build", "analysis")
+DUMP_DIRS = {}
 
 # --- the registry ---------------------------------------------------------
 #
@@ -59,16 +38,11 @@ def _has_workspace():
 #           VCThunder loader can host these.
 #   "win32" an ordinary Windows executable that already runs on an OS. Nothing
 #           here applies: no span to own, no ETS boundary, no record stream.
-#           Listed so its classification is recorded rather than assumed.
-#
-# Arctic Thunder is "win32" and that is not a detail. Its disk is a Windows 2000
-# install and snow.exe imports KERNEL32/USER32/DSOUND/glide3x/goose.dll. It needs
-# a wrapper, not a shim.
 TITLES = {
     "hydro": {
         "name":    "Hydro Thunder",
         "kind":    "ets",
-        "exe":     "extracted_hydro_101b/C/HYDRO.EXE",
+        "exe":     "HYDRO.EXE",
         "sha256":  "a421f5fd4ee0d90f57815975d4a47bb784f2b46d48085e42b422605a029f8e3f",
         "build":   "v01.01b, 1999-02-27",
         "assets":  ["HT.R2"],
@@ -78,22 +52,12 @@ TITLES = {
     "offroad": {
         "name":    "Offroad Thunder",
         "kind":    "ets",
-        "exe":     "extracted_offroad/C/offroad3.exe",
+        "exe":     "offroad3.exe",
         "sha256":  "fa739d0f1a80c6e429ca73fdee04c3d6d6325bb95848cb701114f74bf2a5e9bf",
         "build":   "2000-02-25",
         "assets":  ["GD3.R2"],
         "io":      "MagicBus",  # Diego successor; _mb_io_comm_* in the binary
         "glide":   2,
-    },
-    "arctic": {
-        "name":    "Arctic Thunder",
-        "kind":    "win32",
-        "exe":     "extracted_arctic/C/Midway games/Arctic Thunder/snow.exe",
-        "sha256":  None,        # not pinned: out of scope for this host
-        "build":   "2000-12-18",
-        "assets":  ["*.mif", "*.bnk", "*.sal"],
-        "io":      "goose",     # goose.dll
-        "glide":   3,
     },
 }
 
@@ -151,8 +115,7 @@ class Title:
     def _locate(self):
         """The title's executable, from whichever source this machine has.
 
-        A clone has no workspace and no `extracted_*` tree, so the dump has to
-        be supplied from outside. First hit wins:
+        First hit wins:
 
           1. VCT_DUMP_<TITLE>   an explicit path to the one executable. The
                                 escape hatch for a layout nobody predicted.
@@ -161,8 +124,9 @@ class Title:
                                 <VCT_DUMPS>/<title>/<exe>. One ingest run then
                                 feeds both the build and the run directory, and
                                 nobody has to learn a second layout.
-          3. the workspace      extracted_<title>/... , the maintainer's own
-                                layout.
+          3. data/              this repository's own <title>/<exe>, where
+                                ingest-chd.py writes by default.
+          4. DUMP_DIRS          a per-title directory, when one is set.
 
         Nothing here decides whether the file is the RIGHT one: verify() does
         that against the registered SHA-256, and it is the only thing that may.
@@ -174,33 +138,24 @@ class Title:
 
         dumps = os.environ.get("VCT_DUMPS")
         if dumps:
-            leaf = os.path.basename(self.meta["exe"])
             return os.path.join(os.path.abspath(os.path.expanduser(dumps)),
-                                self.id, leaf)
+                                self.id, self.meta["exe"])
 
         # The repository's own data/: where tools/ingest-chd.py writes by
         # default and where the run directory keeps the same layout. Checking
         # it means the ordinary path (ingest, then build) needs NO environment
         # variable at all; without it the tool has to end by telling the user
         # to set VCT_DUMPS, which is one more thing to get wrong.
-        local = os.path.join(REPO, "data", self.id, os.path.basename(self.meta["exe"]))
-        if os.path.isfile(local):
+        local = os.path.join(REPO, "data", self.id, self.meta["exe"])
+        if os.path.isfile(local) or self.id not in DUMP_DIRS:
             return local
-
-        return os.path.join(WORKSPACE, self.meta["exe"])
+        return os.path.join(DUMP_DIRS[self.id], self.meta["exe"])
 
     # --- paths ------------------------------------------------------------
     @property
     def analysis_dir(self):
-        """Where derived per-title data goes: the symbol cache above all.
-
-        The workspace's analysis/ when there is one, so nothing moves for the
-        maintainer; otherwise inside build/, which .gitignore already covers.
-        A clone must be able to run p1-symbols.py and gen-gamedefs.py without
-        creating directories outside the checkout."""
-        if _has_workspace():
-            return os.path.join(WORKSPACE, "analysis", self.id)
-        return os.path.join(REPO, "build", "analysis", self.id)
+        """Where derived per-title data goes: the symbol cache above all."""
+        return os.path.join(ANALYSIS_ROOT, self.id)
 
     @property
     def symbols_path(self):
@@ -249,6 +204,23 @@ class Title:
         _net_link_PreWorkReceive exists in Hydro and not in Offroad."""
         v = self.symbols().get(name)
         return v["va"] if v and v["va"] else None
+
+    def sym_floats(self, name):
+        """How many 4-byte floats a symbol spans, taken from the distance to the
+        NEXT symbol. An array's length is not written down anywhere else in a
+        stripped-but-CodeView'd binary, and hardcoding one would be a size,
+        which is per-title DATA. None when the symbol is absent or
+        is the last one, because a guess there would be unbounded."""
+        syms = self.symbols()
+        v = syms.get(name)
+        if not v or not v["va"]:
+            return None
+        here = v["va"]
+        nxt = min((s["va"] for s in syms.values() if s["va"] > here),
+                  default=None)
+        if nxt is None or nxt <= here:
+            return None
+        return (nxt - here) // 4
 
     # --- layout, read out of the image ------------------------------------
     def _sects(self):

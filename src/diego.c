@@ -1,12 +1,12 @@
 /* diego.c -- the game's comm layer, the frame boundary, and the poll thread.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * This file's half of the I/O boundary (src/io.h has the split): the five
- * hooks that replace the title's comm-layer API, the seam that runs the board's decoder
- * and the game's control callback ON THE GAME'S OWN THREAD, and the thread
- * that does it when that seam is not available. Nothing in this file knows a
- * key name, an axis, or a byte offset inside a board frame: it moves frames
- * between a transport and the game, and it decides which thread does it.
+ * This file's half of the I/O boundary (src/io.h has the split): the five hooks
+ * that replace the title's comm-layer API, the seam that runs the board's
+ * decoder and the game's control callback ON THE GAME'S OWN THREAD, and the
+ * thread that does it when that seam is not available. Nothing in this file
+ * knows a key name, an axis, or a byte offset inside a board frame: it moves
+ * frames between a transport and the game, and it decides which thread does it.
  */
 #include "vcthunder.h"
 #include "io.h"
@@ -25,8 +25,8 @@ typedef void (__cdecl *game_input_callback_fn)(void);
 
 static diego_rx_fn s_rx;
 /* Which board frame to move. Selected once at install from [controls] backend;
- * `sim` is the only one implemented, and adding another is now a matter of
- * writing it rather than of unpicking this file. */
+ * `sim` is the only one implemented; another is added by writing a transport,
+ * not by changing this file. */
 static const io_transport_t *s_transport;
 static HANDLE s_thread;
 static HANDLE s_poll_start;
@@ -48,7 +48,14 @@ static DWORD s_game_thread;
  * taken ownership of the game's own code. Until then, and forever on a title
  * whose frame boundary is some other thread, the poll thread keeps it. */
 static volatile LONG s_frame_dispatch;
-static DWORD s_last_callback;
+/* When the next control callback is due, on io_clock_ms(). The game asks for
+ * a period and the board ran its callback on that timer; here callbacks can
+ * only run where game code may run, so each pass runs the ones owed. */
+static double s_due_ms;
+static int s_due_set;
+/* The interval between passes, smoothed: how much time a burst has to be
+ * spread over before the next pass arrives with its own. */
+static double s_pass_last, s_pass_ms = 1000.0 / 30.0;
 
 /* One board frame, from whichever transport is installed. Returns its length,
  * or 0 when there is nothing to deliver this cycle. */
@@ -79,6 +86,16 @@ int diego_preload(const char *ini)
         LOGI("io: [analog] provider = %s, so no wheel is opened and there is "
              "no force feedback", cfg->provider == PROVIDER_XINPUT ?
              "xinput" : "winmm");
+    /* AFTER di_preload() AND ON EVERY PATH OUT OF IT, including the two above
+     * where no wheel is opened: a [gamepad] binding may name its device and
+     * that name is only a label until the devices are open. Called even when
+     * nothing opened, because that is the run where a binding naming a device
+     * owes the user a warning rather than silence. */
+    io_config_bind_devices();
+    /* After di_preload(), because a wheel that took the real force must be the
+     * thing that decides: rumble.c is the derived effect and it exists only
+     * for the device that cannot receive the real one. */
+    rumble_preload(ini);
     return 1;
 }
 /* --- original Diego comm API replacements ---------------------------- */
@@ -114,39 +131,187 @@ static void __cdecl shim_set_callback(game_input_callback_fn callback)
     LOGI("io: game control callback registered @ %p", callback);
 }
 
-static void dispatch_game_callback(DWORD *last_tick)
+/* How often the game's control callback actually ran, against the period it
+ * asked for. Every 30 s, once callbacks are flowing: this is the rate the
+ * game's control driver and force feedback run at, and nothing else shows it. */
+#define IO_CENSUS_MS 30000.0
+
+static unsigned s_census_calls, s_census_resyncs;
+static double s_census_t0;
+
+static void callback_census(void)
 {
-    game_input_callback_fn callback;
-    DWORD now = GetTickCount();
+    double now = io_clock_ms();
     LONG period = InterlockedCompareExchange(&s_callback_period_ms, 0, 0);
 
-    if (!InterlockedCompareExchange(&s_comm_enabled, 0, 0)) {
-        *last_tick = now;
+    if (!s_census_t0) {
+        s_census_t0 = now;
+        s_census_calls = s_census_resyncs = 0;
         return;
     }
+    if (now - s_census_t0 < IO_CENSUS_MS)
+        return;
+    LOGI("io: control callback ran %u times in %.1f s, %.1f Hz; the game asked "
+         "for every %ld ms (%.1f Hz); %u resyncs", s_census_calls,
+         (now - s_census_t0) / 1000.0,
+         s_census_calls * 1000.0 / (now - s_census_t0), (long)period,
+         period > 0 ? 1000.0 / (double)period : 0.0, s_census_resyncs);
+    s_census_t0 = now;
+    s_census_calls = s_census_resyncs = 0;
+}
+
+double io_clock_ms(void)
+{
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+
+    if (!freq.QuadPart)
+        QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (double)now.QuadPart * 1000.0 / (double)freq.QuadPart;
+}
+
+/* Stamps never go backwards. A burst is spread over the pass interval it
+ * expects, and a pass that arrives early (the frame after a catch-up) would
+ * otherwise stamp its first tick before the burst's last: the pad model and
+ * ffb_events read that as no interval and drop the tick, and the wheel sends
+ * the queued force early. The floor keeps the order and a 1 ms interval. */
+#define IO_STAMP_MIN_MS 1.0
+
+static double s_stamp_last;
+
+static void transmit(double when_ms)
+{
+    if (s_stamp_last && when_ms < s_stamp_last + IO_STAMP_MIN_MS)
+        when_ms = s_stamp_last + IO_STAMP_MIN_MS;
+    s_stamp_last = when_ms;
+    if (s_transport)
+        s_transport->transmit(when_ms);
+}
+
+/* One board frame into the game's decoder. On the poll thread the decoder runs
+ * as the UART interrupt would, so it waits out the game's masked regions. */
+static void decode_frame(int as_irq)
+{
+    unsigned char payload[IO_PACKET_MAX];
+    unsigned len = io_frame(payload);
+
+    if (as_irq)
+        game_irq_wait(IO_IRQ_WAIT_US);
+    if (len)
+        s_rx(payload);
+}
+
+/* Run every control callback the game's period owes, each followed by its own
+ * transmit: the callback writes the DAC, and the force it wrote belongs to that
+ * tick. Offroad asks for 16 ms and renders at 30 fps, so a pass usually owes
+ * two; the second tick's force is stamped one period later, which is when the
+ * board would have sent it and when the transport delivers it. A burst that
+ * would not fit before the next pass at a full period (62.5 Hz into 30 fps
+ * owes three every twelfth frame) is spread evenly over the pass interval
+ * instead, so no tick's force is overwritten as soon as it is sent.
+ *
+ * ONE BOARD FRAME PER CALLBACK. The board answered every flush, so each
+ * callback had a fresh frame behind it, and the frame echoes the handshake
+ * toggles that retire the game's pending requests. The caller decodes the
+ * first; each further tick decodes its own.
+ *
+ * A tick may run up to half a period early, so a frame that lands a little
+ * before the deadline still gets its tick instead of doubling up on the next.
+ * Falling more than IO_CATCHUP_MAX periods behind (a load, a dragged window)
+ * resyncs rather than replaying the backlog. With no callback registered or
+ * comm off, every pass transmits once, as the DAC can still move. */
+#define IO_CATCHUP_MAX 4u
+
+static void dispatch_game_callbacks(int as_irq)
+{
+    game_input_callback_fn callback;
+    double now = io_clock_ms();
+    double period = (double)InterlockedCompareExchange(&s_callback_period_ms, 0, 0);
+    double step;
+    unsigned n, owed = 0;
+
+    if (s_pass_last && now - s_pass_last > 0.0 && now - s_pass_last < 250.0)
+        s_pass_ms += (now - s_pass_last - s_pass_ms) * 0.1;
+    s_pass_last = now;
+
     callback = (game_input_callback_fn)InterlockedCompareExchangePointer(
         (PVOID volatile *)&s_game_callback, NULL, NULL);
-    if (!callback || (DWORD)(now - *last_tick) < (DWORD)period)
+    if (!InterlockedCompareExchange(&s_comm_enabled, 0, 0) || !callback) {
+        s_due_set = 0;
+        transmit(now);
         return;
-
+    }
+    if (period < 1.0)
+        period = 1.0;
+    if (!s_due_set || now - s_due_ms > IO_CATCHUP_MAX * period) {
+        if (s_due_set)
+            s_census_resyncs++;
+        s_due_ms = now;
+        s_due_set = 1;
+    }
+    while (owed < IO_CATCHUP_MAX &&
+           now >= s_due_ms + owed * period - period / 2.0)
+        owed++;
+    if (!owed)
+        return;
+    step = owed > 1 && s_pass_ms / owed < period ? s_pass_ms / owed : period;
     game_thread_seen("the game's control-driver callback");
-    callback();
-    *last_tick = now;
+    for (n = 0; n < owed; n++) {
+        if (n)
+            decode_frame(as_irq);
+        callback();
+        transmit(now + n * step);
+    }
+    s_due_ms += owed * period;
+    s_census_calls += owed;
+    callback_census();
     if (!InterlockedExchange(&s_callback_seen, 1))
         LOGI("io: game control callback active; decoded inputs now reach gameplay");
+}
+
+/* The poll thread's sleep between passes. The transport's wake handle fires
+ * when a queued force falls due, and is served here so the next pass keeps
+ * its own cadence. Returns 1 when asked to stop. */
+static int poll_wait(DWORD period_ms)
+{
+    double until = io_clock_ms() + (double)period_ms;
+    HANDLE wake = s_transport && s_transport->wake ? s_transport->wake() : NULL;
+
+    for (;;) {
+        HANDLE h[2];
+        double left = until - io_clock_ms();
+        DWORD r;
+
+        h[0] = s_poll_stop;
+        h[1] = wake;
+        r = WaitForMultipleObjects(wake ? 2u : 1u, h, FALSE,
+                                   left > 0.0 ? (DWORD)(left + 0.5) : 0u);
+        if (r == WAIT_OBJECT_0)
+            return 1;
+        if (wake && r == WAIT_OBJECT_0 + 1) {
+            s_transport->deliver();
+            continue;
+        }
+        if (r == WAIT_FAILED && wake) {
+            /* A wait that fails returns at once, so retrying it spins. Drop
+             * the wake handle for this pass; queued forces go out late. */
+            wake = NULL;
+            continue;
+        }
+        return 0;
+    }
 }
 
 /* Transfer ownership of game code with an acknowledgement, not a frame-sized
  * timing assumption. The poller resets s_poll_idle before its final flag check,
  * so this either sees it already outside the decoder/callback or waits until
  * the in-flight pass has returned. */
-/* Long enough that a poll pass which is merely slow still wins it, short
- * enough that a poll thread stuck inside a driver costs one refusal instead of
- * the rest of the session. It was INFINITE: this runs on the render thread, at
- * the frame boundary, and a DirectInput call that never returns would have
- * hung the game with the watchdog able to describe it and not to break it.
- * Refusing here is not a failure: the poll thread keeps the dispatch it
- * already has, which is what every title did before this seam existed. */
+/* Long enough that a merely slow poll pass still wins it, short enough that a
+ * poll thread stuck inside a driver costs one refusal rather than the session.
+ * It was INFINITE: this runs on the render thread at the frame boundary, so a
+ * DirectInput call that never returned would hang the game. Refusing is not a
+ * failure; the poll thread keeps the dispatch it has. */
 #define IO_CLAIM_WAIT_MS 250u
 
 static int claim_frame_dispatch(void)
@@ -197,13 +362,11 @@ void diego_frame_boundary(void)
         DWORD logic = game_thread_logic();
 
         if (!checked) {
-            /* Wait for the printf only where there is one to wait for.
-             * `G->printf_empty` is 0 in Hydro: its build kept a real printf,
-             * so log.c never hooks anything and no amount of waiting will ever
-             * name a logic thread. Waiting anyway cost that title four seconds
-             * of the exposure this whole function exists to close, measured:
-             * the seam moved from the first frame to 12.4 s in. Offroad prints
-             * throughout boot and answers before the first frame. */
+            /* Wait for the printf only where there is one. `G->printf_empty`
+             * is 0 in Hydro, its build kept a real printf, so log.c hooks
+             * nothing and no waiting will name a logic thread, and waiting
+             * anyway cost that title four seconds of the exposure this
+             * function exists to close. */
             if (!logic && G->printf_empty && waited < 120u) {
                 waited++;
                 return;
@@ -249,16 +412,11 @@ void diego_frame_boundary(void)
     }
     if (!InterlockedCompareExchange(&s_frame_dispatch, 0, 0))
         return;             /* this title's frame boundary is not the seam */
-    if (!s_last_callback)
-        s_last_callback = GetTickCount();
     if (io_frame(payload))
         s_rx(payload);
-    dispatch_game_callback(&s_last_callback);
-    /* AFTER the callback, not before: the callback is what runs the game's
-     * control driver, and on Hydro it is the function that writes the DAC.
-     * Reading first would deliver every force one frame late. */
-    if (s_transport)
-        s_transport->transmit();
+    /* Transmits AFTER each callback, not before: the callback is what runs
+     * the game's control driver, and it is what writes the DAC. */
+    dispatch_game_callbacks(0);
 }
 
 static DWORD WINAPI poll_thread(LPVOID arg)
@@ -268,18 +426,15 @@ static DWORD WINAPI poll_thread(LPVOID arg)
         return 0;
     LOGI("io: poll thread running at %u ms", s_period_ms);
     while (!InterlockedCompareExchange(&s_stop, 0, 0)) {
-        unsigned char payload[IO_PACKET_MAX];
-
         /* Sampled every cycle regardless of who delivers frames: this thread
          * runs at the board's cadence and the frame boundary runs at the
          * game's, and the cabinet's controls were read at the former. */
         io_board_sample_input();
         /* Only while the frame boundary has not claimed the game's code: at
-         * startup, before the first frame, and for the whole run on a title
-         * whose frame boundary turns out to be a different thread. Keeping the
-         * old behaviour there is deliberate: it is what those titles have
-         * always done, and swapping one cross-thread dispatch for another is
-         * not a fix. */
+         * startup, and for the whole run on a title whose frame boundary turns
+         * out to be a different thread. Keeping the old behaviour there is
+         * deliberate; swapping one cross-thread dispatch for another is not a
+         * fix. */
         if (!InterlockedCompareExchange(&s_frame_dispatch, 0, 0)) {
             ResetEvent(s_poll_idle);
             /* Close the race with claim_frame_dispatch(): it may have set the
@@ -288,24 +443,15 @@ static DWORD WINAPI poll_thread(LPVOID arg)
              * acknowledges quiescence. */
             if (!InterlockedCompareExchange(&s_frame_dispatch, 0, 0) &&
                 !InterlockedCompareExchange(&s_stop, 0, 0)) {
-                unsigned len;
-
-                if (!s_last_callback)
-                    s_last_callback = GetTickCount();
-                len = io_frame(payload);
                 /* The fallback decoder executes game code as the UART interrupt
                  * and must honour the emulated interrupt-disable depth. */
                 game_thread_seen("the board's packet decoder");
-                game_irq_wait(IO_IRQ_WAIT_US);
-                if (len)
-                    s_rx(payload);
-                dispatch_game_callback(&s_last_callback);
-                if (s_transport)
-                    s_transport->transmit();
+                decode_frame(1);
+                dispatch_game_callbacks(1);
             }
             SetEvent(s_poll_idle);
         }
-        if (WaitForSingleObject(s_poll_stop, s_period_ms) == WAIT_OBJECT_0)
+        if (poll_wait(s_period_ms))
             break;
     }
     return 0;
@@ -398,9 +544,16 @@ int diego_install(unsigned dips, unsigned period_ms)
     else if (di_present())
         LOGI("io: force feedback: DAC @ 0x%08X -> %s",
              G->io_dac_out, di_device_name());
+    else if (rumble_active())
+        LOGI("io: force feedback: DAC @ 0x%08X -> derived pad rumble "
+             "(no wheel attached)", G->io_dac_out);
     else
         LOGI("io: force feedback: DAC @ 0x%08X, no wheel attached",
              G->io_dac_out);
+    /* After the DAC line above, which says what the SUM is: this says what the
+     * game composed it from, when asked to. */
+    ffb_events_install();
+    rumble_report_source();
     io_config_report();
     return 1;
 
@@ -440,6 +593,9 @@ void diego_shutdown(void)
         s_transport = NULL;
     }
     di_close();
+    /* Same ordering and the same reason: the transmit direction commands the
+     * motors, so nothing may stop them while a caller could still be in one. */
+    rumble_close();
     if (s_poll_start) CloseHandle(s_poll_start);
     if (s_poll_idle) CloseHandle(s_poll_idle);
     if (s_poll_stop) CloseHandle(s_poll_stop);

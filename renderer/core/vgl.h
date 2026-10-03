@@ -111,8 +111,8 @@ typedef struct {
      * `lvl_le[f]` is the largest PRESENT level <= f and `lvl_gt[f]` the
      * smallest present level > f, both -1 when there is none. The nearest
      * present level to any lod in [f, f+1) is one of those two, so the scan
-     * over the whole chain that select_level would otherwise run per sample
-     *: twice per pixel, 1.3 billion pixels: becomes two array reads and a
+     * over the whole chain that select_level would otherwise run per sample:
+     * twice per pixel, 1.3 billion pixels: becomes two array reads and a
      * comparison. Filled by vgl_tex_source alongside lod_off. */
     int8_t   lvl_le[VGL_MAX_LOD + 1], lvl_gt[VGL_MAX_LOD + 1];
     int8_t   lvl_first;                 /* sharpest level held, or -1 */
@@ -155,20 +155,16 @@ typedef struct {
  * per-frame bookkeeping, statistics, or cache generations. */
 /* THE PIPELINE STATE, WRITTEN ONCE.
  *
- * Every member below lives in two structs -- vgl_dev_t, where the rasteriser
- * reads it, and vgl_pipeline_state_t, which is what grGlideGetState saves and
- * grGlideSetState puts back -- and is copied between them in both directions.
- * That was four hand-written lists over one set of fields, and the failure mode
- * of a member added to the device and forgotten in the other three is a state
- * the game saves, restores, and quietly does not get back: a wrong picture some
- * frames after the call that caused it, with nothing logged anywhere.
+ * Every member below lives in vgl_dev_t, where the rasteriser reads it, and in
+ * vgl_pipeline_state_t, which grGlideGetState saves and grGlideSetState puts
+ * back: four hand-written lists over one set of fields. A member added to the
+ * device and forgotten in the other three is a state the game saves, restores
+ * and quietly does not get back, which is a wrong picture some frames later
+ * with nothing logged.
  *
- * So the list is written here, once, and the four expansions are generated from
- * it. Adding a member to the pipeline is now one line and cannot be half done.
- *
- * SCALAR copies by assignment; ARRAY needs a memcpy, which is the only reason
- * the two are distinguished. The order is the order both structs had, so no
- * layout changes. */
+ * So the list is here once and the four expansions are generated from it.
+ * SCALAR copies by assignment, ARRAY needs a memcpy, which is the only reason
+ * the two are distinguished. The order is the order both structs had. */
 #define VGL_PIPELINE_MEMBERS(SCALAR, ARRAY)                                   \
     SCALAR(int,      origin_lower_left)                                       \
     SCALAR(int,      clip_x0)                                                 \
@@ -225,6 +221,7 @@ typedef struct {
     int       field_x0, field_x1;
     int       margin_drawn;
     int       margin_geom;              /* a PRIMITIVE reached a strip, not a clear */
+    int       margin_black;             /* host: black the strips at this swap */
     int       presenting;               /* a platform surface is attached */
     int       gpu;                      /* SDL GPU owns triangle rasterisation */
     /* The state grGlideGetState saves, in the struct the rasteriser reads it
@@ -333,6 +330,7 @@ void vgl_gpu_clear_margins(int x0, int x1, int y0, int y1, int field_x0,
 void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c);
 void vgl_gpu_swap(int interval);
 int  vgl_gpu_sync_color(int buffer, uint32_t *dst, int w, int h);
+int  vgl_gpu_sync_depth(uint16_t *dst, int w, int h);
 void vgl_gpu_upload_lfb(int buffer, const uint32_t *rgba_masked, int w, int h);
 void vgl_gpu_pump(void);
 /* Non-zero once the GPU device has been declared gone: a state, not a failed
@@ -423,6 +421,37 @@ static inline int vgl_narrow8(int v, int max, int dith)
     if (v >= 255) return max;
     /* Exact division by 255 for the full 16-bit numerator domain. */
     return (int)(((unsigned)(v * max + dith) * 32897u) >> 23);
+}
+
+/* DOES THE CURRENT STATE READ A TEXTURE AT ALL, and if so does TMU0's combine
+ * reach TMU1? A frame of Hydro's HUD is hundreds of untextured triangles, and
+ * paying for two bilinear fetches on each of them is pure loss.
+ *
+ * HERE RATHER THAN IN EITHER BACKEND, because both must answer it identically
+ * and nothing in the build would say if they stopped. The CPU rasteriser
+ * skipping a fetch the GPU shader still makes is a difference in the picture,
+ * and a replay A/B scores each backend against a control built from its own
+ * source: two copies drifting apart pass it. */
+static inline int vgl_needs_texture(int *need_tmu1)
+{
+    int t0_uses_other;
+
+    *need_tmu1 = 0;
+    if (vgl.cc.other != VGL_OTHER_TEXTURE &&
+        vgl.ac.other != VGL_OTHER_TEXTURE &&
+        (vgl.cc.factor & 7) != VGL_FAC_TEXTURE_ALPHA &&
+        (vgl.cc.factor & 7) != VGL_FAC_TEXTURE_RGB &&
+        (vgl.ac.factor & 7) != VGL_FAC_TEXTURE_ALPHA &&
+        !vgl.itrgb_lighting)
+        return 0;
+
+    /* TMU1 is only read when TMU0's own combine refers to `other`, which is
+     * where TMU1's result arrives. */
+    t0_uses_other = vgl.tmu[0].c_func >= VGL_CF_SCALE_OTHER &&
+                    vgl.tmu[0].c_func <=
+                    VGL_CF_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL_ALPHA;
+    *need_tmu1 = t0_uses_other && vgl.tmu[1].valid;
+    return 1;
 }
 
 /* floor, without libm; see the x87 note in raster.c and the Makefile. */

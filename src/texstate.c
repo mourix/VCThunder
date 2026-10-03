@@ -71,9 +71,8 @@ static unsigned s_repeat_count;
 /* Live Glide state, as the game last set it. */
 /* PER TMU, because the dominant setup chains them: grTexCombine(TMU0,
  * SCALE_OTHER, FACTOR_ONE) makes TMU0 discard its own texel and pass through
- * TMU1's. Recording one "current texture" across both units therefore attributes
- * the wrong texture to the majority of the scene, which the first version of
- * this instrument did. */
+ * TMU1's. Recording one "current texture" across both units therefore
+ * attributes the wrong texture to the majority of the scene. */
 static unsigned s_cur_tex[2] = { 0xffffffffu, 0xffffffffu };
 static unsigned s_cur_constant;
 static int s_cur_cc[5], s_cur_tc[2][7], s_cur_ac[5];
@@ -188,15 +187,14 @@ static const char *const TS_NAME[TS_N] = {
 static uint64_t s_ts_cycles[TS_N], s_ts_calls[TS_N];
 static uint64_t s_ts_t0;
 
-/* Gated, because texstate_claim() takes six entry points UNCONDITIONALLY
- * (grTexSource, both colour combines, grTexCombine, grConstantColorValue and
- * grTexDownloadMipMap), while the only reader of what these accumulate,
- * texstate_report_cycles(), returns immediately unless glide_timing is set.
- * Every one of those calls was paying two serialising reads for a report that
- * is off in every shipped configuration.
+/* Gated, because texstate_claim() takes six entry points UNCONDITIONALLY while
+ * the only reader of what they accumulate, texstate_report_cycles(), returns
+ * immediately unless glide_timing is set, so every one of those calls paid
+ * two serialising reads for a report that is off in every shipped
+ * configuration.
  *
  * Not reentrant: one s_ts_t0 for all six. They are called from the render
- * thread and none of them nests inside another across the DLL boundary. */
+ * thread and none nests inside another across the DLL boundary. */
 /* diag_rdtsc_fenced() honours [diagnostics] time_fence, which is required
  * around a call this short: two bare reads sit in the same
  * out-of-order window and retire at nearly the same value, which is a wrong

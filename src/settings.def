@@ -4,9 +4,11 @@
  * ONE table, three consumers: config.c builds both its defaults and its parser
  * from it, launcher.c builds its catalogue from it, and
  * tools/check-launcher-settings.py holds it against the shipped vcthunder.ini.
- * Nothing else may carry a second copy of any column here: that is the whole
- * point of the file. src/settings.h carries the row's shape and says why one
- * table is the only arrangement that can be held to itself.
+ * Nothing else may carry a second copy of any column here; that is the whole
+ * point of the file. src/settings.h carries the row's shape.
+ */
+
+/* ---- the row --------------------------------------------------------------
  *
  *      SETTING(section, key, STORE(...), SHOW(...))
  *          A key the shipped ini carries and the launcher edits. The checker
@@ -28,21 +30,19 @@
  *          launcher still edits them and the ini still ships them.
  *
  * `section` is the CANONICAL section. config.c accepts a known key found in
- * another section too, because docs/configuration.md §6 promises exactly that
- * ("the parser takes any key it knows, wherever it finds it"), but it now
- * says so in the log instead of silently. That fallback needs key names to be
- * unique across sections, which the checker enforces.
- */
+ * another section too, because docs/configuration.md §6 promises exactly that,
+ * and says so in the log. That fallback needs key names to be unique across
+ * sections, which the checker enforces. */
 
 
 /* ---- PAGE_GRAPHICS: the picture. [graphics] ---------------------------- */
 SETTING("graphics", "vcglide_renderer",
         STORE(VCT_STORE_ENUM, vcglide_renderer, "auto", "auto|gpu|cpu", 0, 0),
-        SHOW(PAGE_GRAPHICS, "Renderer", ST_ENUM, SF_NONE, WARNING_NONE,
+        SHOW(PAGE_GRAPHICS, "Renderer", ST_ENUM, SF_UNSHIPPED, WARNING_NONE,
              "Automatic tries the GPU and safely falls back to the CPU renderer."))
 SETTING("graphics", "vcglide_threads",
         STORE(VCT_STORE_UINT, vcglide_threads, "0", NULL, 0, 16),
-        SHOW(PAGE_GRAPHICS, "CPU renderer workers", ST_UINT, SF_NONE, WARNING_NONE,
+        SHOW(PAGE_GRAPHICS, "CPU renderer workers", ST_UINT, SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
              "0 uses one worker per physical core; 1 disables threading."))
 SETTING("graphics", "fullscreen",
         STORE(VCT_STORE_BOOL, fullscreen, "false", NULL, 0, 0),
@@ -54,24 +54,24 @@ SETTING("graphics", "window_scale",
              "Automatic selects the largest fitting integer scale."))
 SETTING("graphics", "render_scale",
         STORE(VCT_STORE_UINT, render_scale, "1", NULL, 1, 8),
-        SHOW(PAGE_GRAPHICS, "Internal 3D scale", ST_UINT, SF_NONE, WARNING_NONE,
+        SHOW(PAGE_GRAPHICS, "3D resolution scale", ST_UINT, SF_NONE, WARNING_NONE,
              "GPU renderer only; software HUD and menus remain native resolution."))
 SETTING("graphics", "aspect",
         STORE(VCT_STORE_ENUM, aspect, "raster", "raster|4:3|16:9|stretch", 0, 0),
         SHOW(PAGE_GRAPHICS, "Aspect ratio", ST_ENUM,
-             SF_NONE, WARNING_NONE, NULL))
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("graphics", "widescreen",
         STORE(VCT_STORE_BOOL, widescreen, "false", NULL, 0, 0),
         SHOW(PAGE_GRAPHICS, "Widescreen hack", ST_BOOL, SF_NONE, WARNING_NONE,
-             "Hor+ widens the frustum instead of stretching; off is the cabinet raster."))
+             "Widens the 3D viewport to 16:9 if enabled."))
 SETTING("graphics", "raster_height",
         STORE(VCT_STORE_UINT_AUTO, raster_height, "400", NULL, 1, 4096),
-        SHOW(PAGE_GRAPHICS, "Cabinet raster height", ST_AUTO_UINT, SF_NONE, WARNING_NONE,
+        SHOW(PAGE_GRAPHICS, "Cabinet raster height", ST_AUTO_UINT, SF_ADVANCED, WARNING_NONE,
              "400 preserves the cabinet's full artwork; automatic crops 400-row pages."))
 SETTING("graphics", "video_mode",
         STORE(VCT_STORE_MODE, video_mode, "auto", "auto|0|1|2", 0, 2),
         SHOW(PAGE_GRAPHICS, "Game video-mode table entry", ST_ENUM,
-             SF_NONE, WARNING_DANGER,
+             SF_ADVANCED, WARNING_DANGER,
              "Mode 2 is a bench/emulator mode and can damage an original arcade monitor."))
 
 /* ---- PAGE_AUDIO: [audio] ----------------------------------------------- */
@@ -90,142 +90,190 @@ SETTING("audio", "balance",
         SHOW(PAGE_AUDIO, "Audio balance", ST_UINT, SF_NONE, WARNING_NONE,
              "50 is both buses at unity; below it attenuates the seat woofer, "
              "above it the front speakers. Never adds gain."))
-SETTING("audio", "dcs_ms",
-        /* audio_shutdown() waits up to 500 ms for the worker; the ceiling keeps
-         * its uninterruptible fallback sleep comfortably inside that bound. */
-        STORE(VCT_STORE_UINT, dcs_ms, "5", NULL, 1, 100),
-        SHOW(PAGE_AUDIO, "Audio interrupt period (ms)", ST_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+SETTING("audio", "dcs_us",
+        /* The cabinet's 5.4 ms, which the game's fades are sized for. The
+         * ceiling keeps the fallback sleep inside audio_shutdown()'s 500 ms. */
+        STORE(VCT_STORE_UINT, dcs_us, "5400", NULL, 1000, 100000),
+        SHOW(PAGE_AUDIO, "Audio interrupt period (us)", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 
-/* ---- PAGE_DEVICES: [analog], read by diego.c and dinput.c -------------- */
+/* ---- PAGE_CONTROLS: [analog], read by diego.c and dinput.c --------------
+ *
+ * EVERY KEY HERE IS `SF_ADVANCED` AND `SF_UNSHIPPED`. What a user does on the
+ * Controls page is pick the controller that drives the car, press `Set up...`
+ * and let the three steps MEASURE the axes, and press buttons to bind them.
+ * Every row below is the manual form of something that page does by
+ * measurement, kept because a wheel that is not plugged in yet still has to be
+ * configurable by hand and because the measurement can refuse. They are one
+ * click away, under `Advanced`.
+ *
+ * SF_UNSHIPPED is the other half: the shipped vcthunder.ini does not carry a
+ * key whose value is the table's own default. `Set up...` and `Use this
+ * controller` write exactly the lines they change, into the device's own
+ * [analog.<label>] section, so a file that says three things says three things
+ * instead of thirty that all agree with the compiled default.
+ */
 SETTING("analog", "provider",
         STORE_ELSEWHERE("auto", "auto|dinput|xinput|winmm|none", 0, 0),
-        SHOW(PAGE_DEVICES, "Analogue provider", ST_ENUM,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "How the controller is read", ST_ENUM,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Automatic prefers a wheel with force feedback and falls through "
+             "to a gamepad. Pinning one is for a controller two of these can "
+             "see and only one can read."))
 SETTING("analog", "deadzone_percent",
         STORE_ELSEWHERE("12", NULL, 0, 49),
-        SHOW(PAGE_DEVICES, "Pad deadzone (%)", ST_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Gamepad: ignore near centre (%)", ST_UINT, SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "A thumbstick does not return exactly to centre; this is how much "
+             "of the middle counts as not moved. A wheel has its own below."))
+/* `auto` ASKS THE OPENED DEVICE. `true` sends a hat press to full lock, which
+ * on a wheel is a crash, and false is right there; auto gets it without the
+ * user having to know. true/false still parse and still win, so an existing
+ * configuration does not move. io_config_pov_digital() resolves it and says in
+ * the log which way it went. */
 SETTING("analog", "pov_digital",
-        STORE_ELSEWHERE("true", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "POV/D-pad overrides analogue axes", ST_BOOL,
-             SF_NONE, WARNING_NONE, "Normally disable this for a wheel."))
+        STORE_ELSEWHERE("auto", "auto|true|false", 0, 0),
+        SHOW(PAGE_CONTROLS, "Let the D-pad or hat steer", ST_ENUM,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Automatic turns it off for a force-feedback wheel, where a hat "
+             "press means full lock, and on for anything else."))
 SETTING("analog", "xinput_device",
         STORE_ELSEWHERE("0", NULL, 0, 3),
-        SHOW(PAGE_DEVICES, "XInput device index", ST_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Gamepad: which XInput pad", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "xinput_steering_axis",
         STORE_ELSEWHERE("lx", "lx|ly|rx|ry|lt|rt|none", 0, 0),
-        SHOW(PAGE_DEVICES, "XInput steering axis", ST_ENUM,
-             SF_AXIS, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Gamepad: steering axis", ST_ENUM,
+             SF_AXIS | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "xinput_throttle_axis",
         STORE_ELSEWHERE("rt", "lx|ly|rx|ry|lt|rt|none", 0, 0),
-        SHOW(PAGE_DEVICES, "XInput throttle axis", ST_ENUM,
-             SF_AXIS, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Gamepad: accelerator axis", ST_ENUM,
+             SF_AXIS | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "xinput_brake_axis",
         STORE_ELSEWHERE("lt", "lx|ly|rx|ry|lt|rt|none", 0, 0),
-        SHOW(PAGE_DEVICES, "XInput brake axis", ST_ENUM,
-             SF_AXIS, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Gamepad: brake axis", ST_ENUM,
+             SF_AXIS | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "xinput_steering_invert",
         STORE_ELSEWHERE("false", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "Invert XInput steering", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Gamepad: steering runs the other way", ST_BOOL,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "xinput_throttle_invert",
         STORE_ELSEWHERE("false", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "Invert XInput throttle", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Gamepad: accelerator runs the other way", ST_BOOL,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "xinput_brake_invert",
         STORE_ELSEWHERE("false", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "Invert XInput brake", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Gamepad: brake runs the other way", ST_BOOL,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "winmm_device",
         STORE_ELSEWHERE("0", NULL, 0, 65535),
-        SHOW(PAGE_DEVICES, "WinMM device index", ST_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Legacy joystick: which device", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "winmm_steering_axis",
         STORE_ELSEWHERE("x", "x|y|z|r|u|v|none", 0, 0),
-        SHOW(PAGE_DEVICES, "WinMM steering axis", ST_ENUM,
-             SF_AXIS, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Legacy joystick: steering axis", ST_ENUM,
+             SF_AXIS | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "winmm_throttle_axis",
         STORE_ELSEWHERE("y", "x|y|z|r|u|v|none", 0, 0),
-        SHOW(PAGE_DEVICES, "WinMM throttle axis", ST_ENUM,
-             SF_AXIS, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Legacy joystick: accelerator axis", ST_ENUM,
+             SF_AXIS | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "winmm_brake_axis",
         STORE_ELSEWHERE("none", "x|y|z|r|u|v|none", 0, 0),
-        SHOW(PAGE_DEVICES, "WinMM brake axis", ST_ENUM,
-             SF_AXIS, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Legacy joystick: brake axis", ST_ENUM,
+             SF_AXIS | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "winmm_pedal_mode",
         STORE_ELSEWHERE("combined", "combined|separate", 0, 0),
-        SHOW(PAGE_DEVICES, "WinMM pedal mode", ST_ENUM,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Legacy joystick: pedals", ST_ENUM,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Combined is one axis carrying both pedals, which is what most "
+             "wheels report unless their driver is set otherwise."))
 SETTING("analog", "winmm_steering_invert",
         STORE_ELSEWHERE("false", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "Invert WinMM steering", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Legacy joystick: steering runs the other way",
+             ST_BOOL, SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "winmm_throttle_invert",
         STORE_ELSEWHERE("true", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "Invert WinMM throttle", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Legacy joystick: accelerator runs the other way",
+             ST_BOOL, SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "winmm_brake_invert",
         STORE_ELSEWHERE("false", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "Invert WinMM brake", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
-SETTING("analog", "dinput_device",
-        STORE_ELSEWHERE("auto", NULL, 0, 15),
-        SHOW(PAGE_DEVICES, "DirectInput device index", ST_AUTO_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Legacy joystick: brake runs the other way",
+             ST_BOOL, SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "dinput_name",
         STORE_ELSEWHERE("", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "DirectInput name match", ST_TEXT,
-             SF_NONE, WARNING_NONE,
-             "A case-insensitive product-name substring; takes precedence over the index."))
+        SHOW(PAGE_CONTROLS, "Wheel: match this product name", ST_TEXT,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Part of the name Windows gives the controller, so the same pack "
+             "finds it whatever order things are plugged in."))
 SETTING("analog", "dinput_deadzone_percent",
         STORE_ELSEWHERE("0", NULL, 0, 49),
-        SHOW(PAGE_DEVICES, "Wheel deadzone (%)", ST_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Wheel: ignore near centre (%)", ST_UINT, SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Zero on a wheel, which centres itself. Raise it only if the car "
+             "drifts with your hands off."))
 SETTING("analog", "dinput_steering_axis",
         STORE_ELSEWHERE("x", "x|y|z|rx|ry|rz|slider0|slider1|none", 0, 0),
-        SHOW(PAGE_DEVICES, "DirectInput steering axis", ST_ENUM,
-             SF_AXIS, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Wheel: steering axis", ST_ENUM,
+             SF_AXIS | SF_AXIS_REF | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "dinput_throttle_axis",
         STORE_ELSEWHERE("y", "x|y|z|rx|ry|rz|slider0|slider1|none", 0, 0),
-        SHOW(PAGE_DEVICES, "DirectInput throttle axis", ST_ENUM,
-             SF_AXIS, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Wheel: accelerator axis", ST_ENUM,
+             SF_AXIS | SF_AXIS_REF | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "dinput_brake_axis",
         STORE_ELSEWHERE("rz", "x|y|z|rx|ry|rz|slider0|slider1|none", 0, 0),
-        SHOW(PAGE_DEVICES, "DirectInput brake axis", ST_ENUM,
-             SF_AXIS, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Wheel: brake axis", ST_ENUM,
+             SF_AXIS | SF_AXIS_REF | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "dinput_pedal_mode",
         STORE_ELSEWHERE("separate", "combined|separate", 0, 0),
-        SHOW(PAGE_DEVICES, "DirectInput pedal mode", ST_ENUM,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Wheel: pedals", ST_ENUM,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Combined is both pedals on one axis. Separate is one axis each."))
 SETTING("analog", "dinput_steering_invert",
         STORE_ELSEWHERE("false", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "Invert DirectInput steering", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Wheel: steering runs the other way", ST_BOOL,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("analog", "dinput_throttle_invert",
         STORE_ELSEWHERE("true", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "Invert DirectInput throttle", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Wheel: accelerator runs the other way", ST_BOOL,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Which end the pedal rests at. Set up measures this; it is here "
+             "for a pedal set that cannot be measured."))
 SETTING("analog", "dinput_brake_invert",
         STORE_ELSEWHERE("true", NULL, 0, 0),
-        SHOW(PAGE_DEVICES, "Invert DirectInput brake", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_CONTROLS, "Wheel: brake runs the other way", ST_BOOL,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
+/* Shown on no page, but read and validated: a wheel left at 900 degrees can be
+ * compensated by hand, and the launcher's steering preview divides by it. */
 SETTING("analog", "dinput_steering_range_percent",
         STORE_ELSEWHERE("100", NULL, 5, 100),
-        SHOW(PAGE_DEVICES, "Wheel travel used (%)", ST_UINT,
-             SF_NONE, WARNING_NONE,
-             "100 suits a wheel set to the cabinet's roughly 270-degree range."))
+        SHOW_NEVER)
+
+/* The one instruction the host gives a user whose wheel will not steer is "run
+ * with input_trace = true and use the axis that moves" (dinput.c), so the
+ * launcher must be able to set it. It lives on the controls page rather than
+ * with the other diagnostics because that is where somebody hunting an axis
+ * already is. */
+SETTING("diagnostics", "input_trace",
+        STORE_ELSEWHERE("false", NULL, 0, 0),
+        SHOW(PAGE_CONTROLS, "Write every axis and button to the log", ST_BOOL,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Names what the device actually reports, which is how an axis "
+             "gets mapped; noisy, so leave it off for play."))
 
 /* ---- PAGE_FFB: [ffb], read by dinput.c --------------------------------- */
 SETTING("ffb", "enabled",
         STORE_ELSEWHERE("true", NULL, 0, 0),
         SHOW(PAGE_FFB, "Enable force feedback", ST_BOOL,
              SF_NONE, WARNING_NONE, NULL))
-SETTING("ffb", "invert",
-        STORE_ELSEWHERE("true", NULL, 0, 0),
-        SHOW(PAGE_FFB, "Invert motor direction", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+/* `direction` AND NOT `invert`: the old key's default was `true`, and `true` is
+ * what every wheel measured here wants, so the file said "inverted" about the
+ * ordinary case. dinput.c still reads the old key and warns. `normal` is the
+ * old `true`. */
+SETTING("ffb", "direction",
+        STORE_ELSEWHERE("normal", "normal|reversed", 0, 0),
+        SHOW(PAGE_FFB, "Motor direction", ST_ENUM,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Which way the wheel pushes. Normal suits every wheel measured "
+             "here; choose reversed only if it pulls you out of a corner "
+             "instead of resisting."))
 SETTING("ffb", "strength_percent",
         STORE_ELSEWHERE("100", NULL, 0, 200),
         SHOW(PAGE_FFB, "Game-force scale (%)", ST_UINT,
@@ -233,34 +281,91 @@ SETTING("ffb", "strength_percent",
 SETTING("ffb", "device_gain_percent",
         STORE_ELSEWHERE("100", NULL, 0, 100),
         SHOW(PAGE_FFB, "Device gain (%)", ST_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
+SETTING("ffb", "rumble",
+        STORE_ELSEWHERE("true", NULL, 0, 0),
+        SHOW(PAGE_FFB, "Gamepad rumble (derived)", ST_BOOL,
+             SF_NONE, WARNING_NONE,
+             "The cabinet had a force-feedback wheel and the game knows nothing about gamepads, so this derives a rumble signal from its own forces and sends it to the pad's motors. XInput controllers only."))
+SETTING("ffb", "rumble_strength_percent",
+        STORE_ELSEWHERE("100", NULL, 0, 200),
+        SHOW(PAGE_FFB, "Rumble strength (%)", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Scales both motors together; the two below set what each one answers to."))
+SETTING("ffb", "rumble_sustain_percent",
+        STORE_ELSEWHERE("100", NULL, 0, 200),
+        SHOW(PAGE_FFB, "Rumble: swell (%)", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "The heavy motor, following the slow half of what the force is doing: the body of a corner, the swell, big undulations."))
+SETTING("ffb", "rumble_impact_percent",
+        STORE_ELSEWHERE("100", NULL, 0, 200),
+        SHOW(PAGE_FFB, "Rumble: impacts (%)", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "The light motor, following how fast the force changes: kerbs, walls, chop and landings."))
+SETTING("ffb", "rumble_events",
+        STORE_ELSEWHERE("true", NULL, 0, 0),
+        SHOW(PAGE_FFB, "Rumble from the game's own units", ST_BOOL,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Takes impacts, terrain and suspension from the game's force-feedback code instead of from the single byte they are summed into. Off falls back to filtering that byte."))
+SETTING("ffb", "rumble_texture_percent",
+        STORE_ELSEWHERE("50", NULL, 0, 400),
+        SHOW(PAGE_FFB, "Rumble: surface and engine bed (%)", ST_UINT,
+             SF_ADVANCED, WARNING_NONE,
+             "The continuous layer a driver sits on all race: road surface and engine. Boost and nitro have their own control. Trimmed below the impacts on purpose, so a hit still stands out from the ground it happens on."))
+SETTING("ffb", "rumble_texture_curve_percent",
+        STORE_ELSEWHERE("35", NULL, 2, 100),
+        SHOW(PAGE_FFB, "Rumble: surface range compression (%)", ST_UINT,
+             SF_ADVANCED, WARNING_NONE,
+             "A rough surface can be many times a smooth one, which is wider than two motors can express. Lower compresses that range so tarmac is felt without dirt overwhelming; 100 is no compression."))
+SETTING("ffb", "rumble_boost_percent",
+        STORE_ELSEWHERE("100", NULL, 0, 200),
+        SHOW(PAGE_FFB, "Rumble: boost and nitro (%)", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "A spark on both motors when the boost catches, then a buzz on the light motor while it runs. Separate from the surface bed, so trimming the bed does not mute it."))
+SETTING("ffb", "rumble_spring_percent",
+        STORE_ELSEWHERE("0", NULL, 0, 100),
+        SHOW(PAGE_FFB, "Rumble: add held force back (%)", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_CAUTION,
+             "A held force reaches the motors as a drone, so it is removed and only changes are sent. This adds some of it back for a driver who wants the corner present; it is also the one control here that can bring the buzz back."))
+SETTING("ffb", "rumble_agc_percent",
+        STORE_ELSEWHERE("100", NULL, 100, 800),
+        SHOW(PAGE_FFB, "Rumble: boost quiet stretches to (%)", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_CAUTION,
+             "Scales quiet stretches up against a slowly decaying peak, never down. Off by default: a race trace showed the signal is not quiet, and boosting it pinned both motors at full scale, which reads as one constant buzz."))
+/* `rumble_pulse_hz` IS RETIRED AND MUST NOT COME BACK. It chopped the heavy
+ * motor at 4..20 Hz to invent road grain, which is a square wave this transport
+ * cannot carry: measured 31..110 ms between edges at 8 Hz, where a regular chop
+ * would be 62, and aliased to 9.9 Hz at the 20 it accepted. No setting worked,
+ * so there was nothing to clamp it to, and the reason it existed stopped being
+ * true when ffb_events.c gave the bed the game's own per-tyre jolts. A key left
+ * in this file is a key the launcher offers. */
 SETTING("ffb", "autocenter",
         STORE_ELSEWHERE("false", NULL, 0, 0),
-        SHOW(PAGE_FFB, "Driver autocentre", ST_BOOL, SF_NONE, WARNING_CAUTION,
+        SHOW(PAGE_FFB, "Driver autocentre", ST_BOOL, SF_ADVANCED | SF_UNSHIPPED, WARNING_CAUTION,
              "Normally keep this off: it adds a second force to the arcade game's own motor command."))
 
 /* ---- PAGE_SYSTEM: [timing] and [controls] ------------------------------ */
 SETTING("timing", "cpu_hz",
         STORE(VCT_STORE_UINT, cpu_hz, "333000000", NULL, 1000000, 4000000000ul),
         SHOW(PAGE_SYSTEM, "Cabinet CPU identity (MHz)", ST_MHZ_UINT,
-             SF_NONE, WARNING_NONE,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
              "This identifies the emulated Celeron; it does not control game speed."))
 SETTING("timing", "speed_percent",
         STORE(VCT_STORE_UINT, speed_percent, "100", NULL, 25, 400),
         SHOW(PAGE_SYSTEM, "Game-clock speed (%)", ST_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+             SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("controls", "dip_switches",
         STORE(VCT_STORE_UINT, dip_switches, "0xFF", NULL, 0, 255),
         SHOW(PAGE_SYSTEM, "DIP switch byte", ST_UINT,
-             SF_HEX, WARNING_NONE, NULL))
+             SF_HEX | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("controls", "io_ms",
         STORE(VCT_STORE_UINT, io_ms, "16", NULL, 1, 60000),
         SHOW(PAGE_SYSTEM, "I/O board poll period (ms)", ST_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("controls", "input_background",
         STORE(VCT_STORE_BOOL, input_background, "true", NULL, 0, 0),
         SHOW(PAGE_SYSTEM, "Sample controls in the background", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+             SF_ADVANCED, WARNING_NONE, NULL))
 
 /* ---- PAGE_LINK: [link], the arcade link's transport -------------------- */
 /* Both titles carry packets here with two instances on one machine:
@@ -278,7 +383,7 @@ SETTING("link", "link",
 SETTING("link", "link_rx_budget",
         STORE(VCT_STORE_UINT, link_rx_budget, "64", NULL, 1, 4096),
         SHOW(PAGE_LINK, "Receive budget (datagrams per frame)", ST_UINT,
-             SF_NONE, WARNING_NONE,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
              "Hydro's drain has no upper bound of its own; this supplies one."))
 
 /* ---- PAGE_FILES: [paths] and the two log files ------------------------- */
@@ -301,34 +406,30 @@ SETTING("diagnostics", "log_level",
 SETTING("graphics", "vcglide_log",
         STORE(VCT_STORE_STR, vcglide_log, "vcglide.log", NULL, 0, 0),
         SHOW(PAGE_FILES, "Renderer log file", ST_TEXT,
-             SF_REQUIRED | SF_SAVE_FILE, WARNING_NONE, NULL))
+             SF_REQUIRED | SF_SAVE_FILE | SF_UNSHIPPED, WARNING_NONE, NULL))
 
 /* ---- PAGE_TROUBLE: the switches that are safe to leave on -------------- */
-SETTING("diagnostics", "r2_cache",
-        STORE(VCT_STORE_BOOL, r2_cache, "true", NULL, 0, 0),
-        SHOW(PAGE_TROUBLE, "Enable R2 directory cache", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
 SETTING("diagnostics", "stall_ms",
         STORE(VCT_STORE_UINT, stall_ms, "60", NULL, 0, 60000),
         SHOW(PAGE_TROUBLE, "Frame-stall threshold (ms)", ST_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("graphics", "vcglide_verbose",
         STORE(VCT_STORE_BOOL, vcglide_verbose, "false", NULL, 0, 0),
         SHOW(PAGE_TROUBLE, "Verbose renderer entry log", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 SETTING("graphics", "glide_capture",
         STORE(VCT_STORE_STR, glide_capture, "", NULL, 0, 0),
         SHOW(PAGE_TROUBLE, "Glide capture file", ST_TEXT,
-             SF_SAVE_FILE, WARNING_NONE,
+             SF_SAVE_FILE | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
              "Capturing is expensive; do not time a capture run."))
 SETTING("graphics", "glide_capture_frames",
         STORE(VCT_STORE_UINT, glide_capture_frames, "60", NULL, 0, 0xFFFFFFFFul),
         SHOW(PAGE_TROUBLE, "Capture/frame-dump length", ST_UINT,
-             SF_NONE, WARNING_NONE,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
              "0 continues until the game exits."))
 SETTING("graphics", "glide_frames",
         STORE(VCT_STORE_STR, glide_frames, "", NULL, 0, 0),
-        SHOW(PAGE_TROUBLE, "Frame-dump folder", ST_TEXT, SF_DIR, WARNING_NONE,
+        SHOW(PAGE_TROUBLE, "Frame-dump folder", ST_TEXT, SF_DIR | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
              "Frame dumping reads back and writes PNG files on the render thread."))
 
 /* ---- Not shown, and not shipped ---------------------------------------- */
@@ -344,7 +445,7 @@ SETTING("graphics", "glide_frames",
  * over an Offroad-only pack. --exe overrides it from the command line. */
 SETTING_DEV("paths", "exe",
         STORE(VCT_STORE_STR, exe, "", NULL, 0, 0))
-/* Only `sim` is implemented; `serial` is M6's, when there is a board to reach.
+/* Only `sim` is implemented; `serial` waits for a real board to reach.
  * The selector is parsed so asking for one that is not built yet gets diego.c's
  * explicit warning, but it is not advertised in the shipped file. */
 SETTING_DEV("controls", "backend",
@@ -390,3 +491,22 @@ SETTING_DEV("diagnostics", "lfb_shadow",
         STORE(VCT_STORE_BOOL, lfb_shadow, "false", NULL, 0, 0))
 SETTING_DEV("diagnostics", "sse_ftz",
         STORE(VCT_STORE_BOOL, sse_ftz, "false", NULL, 0, 0))
+/* Read by io_config.c through the profile API, not by config.c, so they are
+ * STORE_ELSEWHERE. They are here so the launcher knows them: a switch in
+ * neither table was listed on Troubleshooting as a line nothing reads, and
+ * ffb_trace is the one docs/configuration.md tells a wheel owner to turn on.
+ * mark1..mark4 label the four trace marker keys. */
+SETTING_DEV("diagnostics", "ffb_trace",
+        STORE_ELSEWHERE("false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "ffb_events",
+        STORE_ELSEWHERE("false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "ffb_record",
+        STORE_ELSEWHERE("", NULL, 0, 0))
+SETTING_DEV("diagnostics", "mark1",
+        STORE_ELSEWHERE("", NULL, 0, 0))
+SETTING_DEV("diagnostics", "mark2",
+        STORE_ELSEWHERE("", NULL, 0, 0))
+SETTING_DEV("diagnostics", "mark3",
+        STORE_ELSEWHERE("", NULL, 0, 0))
+SETTING_DEV("diagnostics", "mark4",
+        STORE_ELSEWHERE("", NULL, 0, 0))

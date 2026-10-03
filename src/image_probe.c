@@ -1,18 +1,12 @@
 /* image_probe.c -- is overwriting our own image below the game actually safe?
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * Runs off `--probe-image`, after the image is mapped, unpacked and patched --
- * the only state in which the question means anything -- and then stops where
- * --dry-run does rather than handing a probed process to the game. It exercises
- * delay-load resolution, TLS on modules loaded before the mapping, and
- * exception dispatch. Every case reports PASS, FAIL or NOT RUN, and NOT RUN is
- * never counted as a pass: two cases need build/vcprobe.dll
- * (tests/image_probe_dll.c, built by `make probe-dll` and shipped by nothing),
- * and if it is absent they say so.
- *
- * Every case has a control that must fail if the instrument is wrong, and
- * nothing here writes into the game's span: the one case that needs code inside
- * this module's image uses the .bss tail above the game's span end.
+ * Runs off `--probe-image`, after the image is mapped, unpacked and patched,
+ * which is the only state in which the question means anything, and then stops
+ * where --dry-run does. It exercises delay-load resolution, TLS on modules
+ * loaded before the mapping, and exception dispatch. Every case has a control
+ * that must fail if the instrument is wrong, every case reports PASS, FAIL or
+ * NOT RUN, and NOT RUN is never counted as a pass.
  */
 #include "vcthunder.h"
 
@@ -467,9 +461,9 @@ void image_probe_run(void)
  * is in NO image should be refused; if the dispatcher accepts anything, then
  * "it accepted a handler in our overwritten image" is not evidence.
  *
- * It gets its own flag because of what a refusal turns out to be. Measured
- * 2026-08-21: the dispatcher does not decline the handler and walk on to the
- * next frame. It TERMINATES THE PROCESS, and an outer catch-all frame
+ * It gets its own flag because of what a refusal is: the dispatcher does not
+ * decline the handler and walk on to the next frame. It TERMINATES THE
+ * PROCESS, and an outer catch-all frame
  * installed underneath does not run. So this cannot share a run with the
  * battery above, whose summary would never be printed, and the result is read
  * off the exit: dying here is the pass, and surviving is the finding. */

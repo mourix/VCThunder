@@ -1,24 +1,26 @@
 /* entries.def -- the Glide 2.x entry points this provider implements.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * ONE table, included by the C source (to build the export stubs, the index
- * enum and the runtime descriptor array) and by the Makefile (to build the
- * .def that gives each export its leading underscore). Nothing else may carry
- * a second copy of this list.
+ * ONE table, included by the C source (the export stubs, the index enum, the
+ * runtime descriptor array) and by the Makefile (the .def that gives each
+ * export its leading underscore). Nothing else may carry a second copy of this
+ * list: two lists over one set of entry points agree by inspection, which is
+ * to say they do not. Ordering is alphabetical and is part of no file format.
+ */
+
+/* ---- the columns ---------------------------------------------------------
  *
  *      VGL_ENTRY(name, argbytes, payload, state)
  *
  * `argbytes` is the __stdcall stack argument size, and it is a measured fact
- * rather than a declaration: both readings of it come from the games
- * themselves, scripts/gen-gamedefs.py taking the `add esp, N` call-site cleanup
- * where the compiler emitted one and scripts/glide2_pushes.py counting the
- * pushes belonging to the call where it did not. The two titles agree on every
- * one of the 69, so one table serves both.
+ * rather than a declaration: both readings come from the games themselves,
+ * scripts/gen-gamedefs.py taking the `add esp, N` call-site cleanup where the
+ * compiler emitted one and scripts/glide2_pushes.py counting the pushes
+ * belonging to the call where it did not. The two titles agree on all 69.
  *
  * `payload` says what a call REFERENCES that is not in its argument bytes,
  * because a capture that records only the arguments records a pointer whose
- * contents are gone by the time anyone replays it. It is the only per-entry
- * semantic knowledge in this file:
+ * contents are gone by the time anyone replays it:
  *
  *   PL_NONE       everything the call means is in its argument bytes
  *   PL_V2/PL_V3   the first 2/3 arguments are GrVertex pointers
@@ -40,22 +42,13 @@
  *   PL_SWAP       a frame boundary
  *
  * `state` says whether the call changes anything the GPU backend resolves into
- * a draw state, so that backend's cache knows to rebuild. ST_DRAW is the
- * answer for every entry that writes the pixel pipeline, a texture unit, the
- * clip or the origin; ST_NONE for everything else, including the primitives
- * themselves, which consume the state rather than setting it.
- *
- * It lives HERE rather than as a forty-case switch in native.c, beside the
- * switch that does the work. Two lists over one set of entry points agree by
- * inspection, which is to say they do not: an entry added
- * to the dispatch and forgotten in the other one leaves the GPU serving a stale
- * draw state, which is a wrong picture with no error anywhere. Same reason
- * src/settings.def exists.
- *
- * Ordering is alphabetical and is NOT part of any file format: a capture names
- * its entries in its own header, so this list may grow without invalidating
- * one.
- */
+ * a draw state, so that backend's cache knows to rebuild. ST_DRAW for every
+ * entry that writes the pixel pipeline, a texture unit, the clip or the origin;
+ * ST_NONE for everything else, the primitives included, which consume the state
+ * rather than setting it. It lives here rather than as a switch beside the one
+ * that does the work: an entry added to the dispatch and forgotten in a second
+ * list leaves the GPU serving a stale draw state, a wrong picture with no error
+ * anywhere. */
 
 VGL_ENTRY(grAADrawLine,                     8,  PL_V2,                           ST_NONE)
 VGL_ENTRY(grAADrawTriangle,                24,  PL_V3,                           ST_NONE)

@@ -26,21 +26,18 @@ const game_profile_t *game_find(const char *id)
     return NULL;
 }
 
-/* Locate `<dir>[\<sub>]\<name>`, writing the path that actually exists.
+/* Locate `<dir>\<sub>\<name>`, writing the path that actually exists.
  *
  * Case-resolved like every other read (fs_map.c): `p->exe` is whatever spelling
- * the dump carried when the profile was generated -- "HYDRO.EXE" from an 8.3
- * entry, "offroad3.exe" from a long-filename one -- so the two titles agreeing
+ * the dump carried when the profile was generated, "HYDRO.EXE" from an 8.3
+ * entry, "offroad3.exe" from a long-filename one, so the two titles agreeing
  * with their own dumps today is luck, not a property to rely on. */
 static int locate(const char *dir, const char *sub, const char *name,
                   char *out, size_t out_sz)
 {
     char rel[MAX_PATH];
 
-    if (sub)
-        snprintf(rel, sizeof rel, "%s\\%s", sub, name);
-    else
-        snprintf(rel, sizeof rel, "%s", name);
+    snprintf(rel, sizeof rel, "%s\\%s", sub, name);
     if (snprintf(out, out_sz, "%s\\%s", dir, rel) >= (int)out_sz)
         return 0;
     if (GetFileAttributesA(out) != INVALID_FILE_ATTRIBUTES)
@@ -61,8 +58,7 @@ int game_resolve_paths(const game_profile_t *p, const char *data_root,
      * how it was spelled: locate() may have resolved the case of the title
      * subdirectory as well as of the file, and everything the game later opens
      * is composed from this string. */
-    if (locate(data_root, p->id, p->exe, exe, exe_sz) ||
-        locate(data_root, NULL, p->exe, exe, exe_sz)) {
+    if (locate(data_root, p->id, p->exe, exe, exe_sz)) {
         const char *slash = strrchr(exe, '\\');
         size_t n = slash ? (size_t)(slash - exe) : strlen(exe);
 
@@ -72,7 +68,7 @@ int game_resolve_paths(const game_profile_t *p, const char *data_root,
         data_dir[n] = 0;
         return 1;
     }
-    LOGE("game: %s not found in %s\\%s\\ or %s\\", p->exe, data_root, p->id, data_root);
+    LOGE("game: %s not found in %s\\%s\\", p->exe, data_root, p->id);
     return 0;
 }
 
@@ -149,5 +145,14 @@ int game_require(const char *subsystem, const char *what, uint32_t va)
         return 1;
     LOGW("%s: not installed; %s has no %s; the game keeps its own code",
          subsystem, G->id, what);
+    return 0;
+}
+
+int game_optional(const char *subsystem, const char *what, uint32_t va)
+{
+    if (va)
+        return 1;
+    LOGI("%s: nothing to install; %s has no %s, which is expected for this "
+         "title", subsystem, G->id, what);
     return 0;
 }

@@ -137,7 +137,7 @@ uint first_level(uint mask)
 }
 
 /* The nearest level this unit HOLDS to a requested one, with the tie going to
- * the sharper level -- which is what select_level's strict `<` does on the
+ * the sharper level, which is what select_level's strict `<` does on the
  * reference side. A forced level may be absent from one half of a split
  * chain, which is the whole reason this is not `want`. */
 uint forced_level(uint mask, uint want)
@@ -273,7 +273,7 @@ MainPSOut main_ps(MainOut i)
             TexResult t1 = sample_unit(1, st1, lod);
             /* Inside the chain: the measured plain fractional LOD. Past
              * either end the answer is one present level outright, and which
-             * unit carries it is a parity question -- this weight is 0 for the
+             * unit carries it is a parity question; this weight is 0 for the
              * unit holding the EVEN half and 255 for the ODD one. frac()
              * answers 0 at both ends, which is right only when that end's
              * level is even, and unclamped it is a sawtooth under
@@ -368,6 +368,17 @@ float4 overlay_ps(CopyOut i) : SV_Target0
     float4 c = tex0.SampleLevel(smp0, i.uv, 0.0);
     if (c.a < 0.5) discard;
     return float4(c.rgb, 1.0);
+}
+
+/* The depth buffer at native resolution, for a caller that locks it. Each
+ * native pixel takes the sub-pixel at the centre of its scale x scale block,
+ * the one a 1x surface would have rasterised, and loads it unfiltered: a depth
+ * word is compared for equality, so it must come back exact. */
+float4 depth_resolve_ps(CopyOut i) : SV_Target0
+{
+    uint scale = pd[0].x;
+    int2 p = int2(i.pos.xy) * int(scale) + int(scale / 2);
+    return float4(tex0.Load(int3(p, 0)).r, 0.0, 0.0, 1.0);
 }
 
 struct ClearOut

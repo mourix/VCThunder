@@ -1,23 +1,17 @@
 /* config.c -- vcthunder.ini plus a few command-line overrides.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * Deliberately tiny. The pack is meant to be dropped in a folder and run; the
- * only thing a user should ever need to change is where their dump lives.
- *
- * It knows no key names. Every one of them, with its section, type, default,
- * range and choice set, is in src/settings.def, and BOTH the defaults and
- * the file are put through apply_value() below, so a default is by
- * construction something that could have been written in the ini.
- *
- * It also knows no value SPELLINGS: what `true` or `0x1F` or a trailing `;`
- * comment mean is src/ini.c's, shared with the three other readers of this
- * same file. What is local here is only what to DO with a value that will not
- * parse -- keep the previous layer's and file a note -- which is the one thing
- * the other three cannot share, because this pass runs before the log opens.
- */
+ * Deliberately tiny. It knows no key names: every one, with its section, type,
+ * default, range and choice set, is in src/settings.def, and BOTH the defaults
+ * and the file go through apply_value(), so a default is by construction
+ * something that could have been written in the ini. Value SPELLINGS are
+ * src/ini.c's. What is local is only what to DO with a value that will not
+ * parse: keep the previous layer's and file a note. The other readers cannot
+ * share that, because this pass runs before the log opens. */
 #include "vcthunder.h"
 #include "settings.h"
 #include "ini.h"
+#include "resource.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -47,6 +41,90 @@ typedef struct {
 static invalid_note_t s_invalid[INVALID_NOTE_MAX];
 static unsigned s_invalid_count;
 static int s_invalid_overflow;
+
+/* THE FILE ITSELF WAS NOT THERE: one fact about the whole pass, not a per-key
+ * note. Held as the RESOLVED path, so the line names the file rather than the
+ * word "vcthunder.ini".
+ *
+ * IT DOES NOT BLAME THE WORKING DIRECTORY. The recorded "a relative ini
+ * path reads a file in C:\Windows" cannot reach THIS file;
+ * chdir_to_own_folder() runs before every load, and offering cwd would be a
+ * diagnosis that cannot apply. What IS newly said is that the file is missing
+ * at all: a deleted file produced a silent all-defaults run. */
+static char s_no_file[MAX_PATH];
+
+/* ...and the file this run CREATED, which is the other half of the same fact
+ * and must not read as the one above: an all-defaults run whose defaults are
+ * now on disk is a first run, not a lost configuration. */
+static char s_seeded[MAX_PATH];
+/* A pack that could not be written to at all. It is reported as the failure it
+ * is, because every other thing this program saves (the ini, NVRAM, the log)
+ * goes to the same folder, so it is never the only symptom. */
+static char s_seed_failed[MAX_PATH];
+static DWORD s_seed_error;
+/* A file this parser read but the profile API cannot. Controls and force
+ * feedback are read through the profile API, so they silently take their
+ * defaults while everything parsed here applies. A WSL path (\\wsl.localhost)
+ * does this: it refuses the byte-range lock the profile API takes. */
+static char s_unreadable[MAX_PATH];
+static DWORD s_unreadable_error;
+
+/* THE SHIPPED INI IS A RESOURCE IN THIS BINARY, AND THAT IS WHAT LETS A RELEASE
+ * CARRY NO SETTINGS FILE. Shipping vcthunder.ini beside the binaries makes
+ * unzipping a new build over an existing folder replace the user's whole
+ * configuration: [devices], the device's axis section and every binding live in
+ * that one file. A zip without the file cannot do that.
+ *
+ * CREATE_NEW rather than a GetFileAttributes test then a write: the test is the
+ * same question with a window between the answer and the act. It also makes
+ * this safe on every start, which is what makes "delete vcthunder.ini and run
+ * it again" the whole recovery procedure.
+ *
+ * It says nothing HERE, because the log is not open yet; both outcomes are
+ * notes for config_report_notes(). */
+int config_seed_ini(const char *path)
+{
+    HMODULE self = NULL;
+    HRSRC found;
+    HGLOBAL loaded;
+    const void *data;
+    HANDLE file;
+    DWORD size, wrote;
+
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCSTR)(void *)&config_seed_ini, &self))
+        return 0;
+    found = FindResourceA(self, MAKEINTRESOURCEA(IDR_DEFAULT_INI), RT_RCDATA);
+    if (!found)
+        return 0;
+    size = SizeofResource(self, found);
+    loaded = LoadResource(self, found);
+    if (!size || !loaded || !(data = LockResource(loaded)))
+        return 0;
+    file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) {
+        if (GetLastError() != ERROR_FILE_EXISTS) {
+            s_seed_error = GetLastError();
+            ini_resolve_path(path, s_seed_failed, sizeof s_seed_failed);
+        }
+        return 0;
+    }
+    if (!WriteFile(file, data, size, &wrote, NULL) || wrote != size) {
+        s_seed_error = GetLastError();
+        ini_resolve_path(path, s_seed_failed, sizeof s_seed_failed);
+        CloseHandle(file);
+        /* A half-written settings file is worse than none: every key past the
+         * truncation takes its default, which is exactly the silent
+         * half-configured state this whole mechanism exists to prevent. */
+        DeleteFileA(path);
+        return 0;
+    }
+    CloseHandle(file);
+    ini_resolve_path(path, s_seeded, sizeof s_seeded);
+    return 1;
+}
 
 static void note(note_kind_t kind, const char *section, const char *key,
                  const char *value, const char *why)
@@ -144,6 +222,28 @@ static int section_is_per_title(const char *name)
     return 0;
 }
 
+/* THE SECTIONS THAT CAN CARRY A PER-DEVICE PROFILE, and one entry is the whole
+ * list: the axis map is the only thing keyed to a controller. */
+static const char *const k_device_scoped[] = { "analog" };
+
+/* NEITHER PASS OWNS A DEVICE PROFILE, AND SAYING SO IS THE POINT. Without this,
+ * [analog.tmx] reaches setting_lookup(), which resolves a key by NAME from any
+ * section, finds dinput_throttle_axis in [analog], and tells the user
+ * confidently to move the line; destroying the thing the profile exists to
+ * protect. These keys are STORE_ELSEWHERE, so nothing was ever wrongly applied;
+ * the defect was entirely in what the host said about them. */
+static int section_is_device_profile(const char *name)
+{
+    char label[INI_LABEL_CAP];
+    unsigned i;
+
+    for (i = 0; i < sizeof k_device_scoped / sizeof k_device_scoped[0]; i++)
+        if (ini_device_profile_section(name, k_device_scoped[i],
+                                       label, sizeof label))
+            return 1;
+    return 0;
+}
+
 typedef enum {
     LOAD_SHARED,        /* every plain section; skip every per-title one */
     LOAD_TITLE          /* only [<title>] and [<title>.*] */
@@ -169,10 +269,9 @@ static int apply_value(shim_config_t *c, const setting_desc_t *d,
         return 1;
 
     case VCT_STORE_ENUM:
-        /* Validated here for the first time. Before the table, an `aspect` or
-         * an `output` a user mistyped by hand was copied into the config
-         * verbatim and silently behaved as whatever the consumer's fallback
-         * happened to be; only the launcher ever checked the value. */
+        /* Validated here, not only in the launcher: a mistyped `aspect` or
+         * `output` must not silently behave as whatever the consumer's
+         * fallback happens to be. */
         if (!vct_choice_contains(d->choices, v)) {
             snprintf(why, sizeof why, "expected one of %s", d->choices);
             note_invalid(section, d->key, v, why);
@@ -219,15 +318,11 @@ static int apply_value(shim_config_t *c, const setting_desc_t *d,
     return 0;
 }
 
-/* Every default, applied by the same code that applies the file.
- *
- * The table spells each one as ini text, so "the shipped default" and "what
- * the parser makes of it" cannot be two different values, which is what they
- * were while config_defaults() assigned C literals and the launcher's
- * catalogue and vcthunder.ini each carried their own third and fourth copy.
- *
- * Zero is a deliberate starting point for the handful of fields that have no
- * key at all: `title` and `dry_run` come from the command line only. */
+/* Every default, applied by the same code that applies the file: the table
+ * spells each one as ini text, so "the shipped default" and "what the parser
+ * makes of it" cannot be two values. Zero is a deliberate starting point for
+ * the handful of fields with no key at all, `title` and `dry_run` come from
+ * the command line only. */
 void config_defaults(shim_config_t *c)
 {
     unsigned i;
@@ -280,13 +375,10 @@ static const char *plain_section(const char *section, const char *title)
 
 /* Find a key, preferring its own section.
  *
- * docs/configuration.md §6 promises that "the parser takes any key it knows,
- * wherever it finds it", and a developer switch pasted into whichever section
- * was nearest has to keep working. So a key found outside its section is still
- * applied, and now says so, once, instead of leaving the user with two
- * plausible places to have put it and no way to tell which one worked.
- *
- * That fallback needs key names to be unique across sections; the checker in
+ * docs/configuration.md §6 promises "the parser takes any key it knows,
+ * wherever it finds it", so a key found outside its section is still applied,
+ * and now says so once, rather than leaving the user with two plausible places
+ * to have put it. That fallback needs key names unique across sections;
  * tools/check-launcher-settings.py refuses a table where they are not. */
 static const setting_desc_t *setting_lookup(const char *section,
                                             const char *key, int *misplaced)
@@ -317,10 +409,18 @@ static int load(shim_config_t *c, const char *path, load_mode_t mode,
     char line[512];
     char section[64] = "";
     int applied = 0;
+    unsigned sections = 0;
     FILE *fp = fopen(path, "r");
 
-    if (!fp)
-        return -1;                      /* absent is fine: defaults apply */
+    if (!fp) {
+        /* Absent is a legitimate state; every default applies and both
+         * titles boot, so this is a note and not a failure. Recorded on the
+         * SHARED pass only: the title pass opens the same file a moment later
+         * and would say it twice about one missing file. */
+        if (mode == LOAD_SHARED)
+            ini_resolve_path(path, s_no_file, sizeof s_no_file);
+        return -1;
+    }
 
     while (fgets(line, sizeof line, fp)) {
         char *k, *v, *eq;
@@ -331,12 +431,17 @@ static int load(shim_config_t *c, const char *path, load_mode_t mode,
             if (end) {
                 *end = '\0';
                 snprintf(section, sizeof section, "%s", k + 1);
+                sections++;
             }
             continue;
         }
         if (!*k || *k == ';' || *k == '#')
             continue;
 
+        /* Before the title test, not after it: [hydro.analog.tmx] IS owned
+         * by hydro, and the title pass would take it. */
+        if (section_is_device_profile(section))
+            continue;
         if (mode == LOAD_TITLE) {
             if (!section_owner_is_title(section, title))
                 continue;
@@ -377,6 +482,17 @@ static int load(shim_config_t *c, const char *path, load_mode_t mode,
         }
     }
     fclose(fp);
+
+    if (mode == LOAD_SHARED && sections) {
+        char full[MAX_PATH], names[64];
+
+        ini_resolve_path(path, full, sizeof full);
+        SetLastError(0);
+        if (!GetPrivateProfileSectionNamesA(names, sizeof names, full)) {
+            s_unreadable_error = GetLastError();
+            snprintf(s_unreadable, sizeof s_unreadable, "%s", full);
+        }
+    }
     return applied;
 }
 
@@ -408,6 +524,7 @@ int config_load_title(shim_config_t *c, const char *path, const char *title)
 void config_report_notes(void)
 {
     unsigned i;
+    int reported_seed_failure = 0;
 
     for (i = 0; i < s_invalid_count; i++)
         switch (s_invalid[i].kind) {
@@ -433,6 +550,47 @@ void config_report_notes(void)
     if (s_invalid_overflow)
         LOGW("config: more than %u invalid values; further warnings suppressed",
              INVALID_NOTE_MAX);
+    if (s_seeded[0]) {
+        LOGI("config: there was no settings file, so the shipped one was "
+             "written to %s. It is yours from now on: nothing this program "
+             "does overwrites it, and no update can, because a release "
+             "carries no copy of it. Delete it and start this again to get "
+             "the shipped defaults back.", s_seeded);
+        s_seeded[0] = '\0';
+    }
+    if (s_seed_failed[0]) {
+        reported_seed_failure = 1;
+        LOGW("config: %s does not exist and could not be created "
+             "(Windows error %lu). EVERY setting is its built-in default. "
+             "The same folder has to take NVRAM and the log, so if this is a "
+             "read-only or protected location, Program Files, or a folder "
+             "still inside a zip viewer, move the pack somewhere you own.",
+             s_seed_failed, s_seed_error);
+        s_seed_failed[0] = '\0';
+    }
+    /* ...and only when the line above has not already said it better. Since
+     * config_seed_ini() the ordinary reason for a missing file is that it
+     * could not be WRITTEN, which that line names along with the error. */
+    if (s_no_file[0] && !reported_seed_failure) {
+        LOGW("config: %s does not exist, so EVERY setting is its built-in "
+             "default; graphics, audio, controls and paths alike. That is a "
+             "working configuration and both titles run on it, but nothing "
+             "you have tuned is in force. This host always looks for the file "
+             "beside its own exe and takes no path for it, so it is genuinely "
+             "not there, and it writes one itself when it can, so something "
+             "is stopping it.", s_no_file);
+    }
+    s_no_file[0] = '\0';
+    if (s_unreadable[0]) {
+        LOGW("config: %s was read, but Windows' own ini reader cannot read "
+             "it (Windows error %lu), so every CONTROLS and FORCE FEEDBACK "
+             "setting is its built-in default; graphics and audio are not "
+             "affected. This happens when the pack is on a WSL path "
+             "(\\\\wsl.localhost\\...) or a share that refuses file locks: "
+             "move the pack to a local drive.", s_unreadable,
+             s_unreadable_error);
+        s_unreadable[0] = '\0';
+    }
     s_invalid_count = 0;
     s_invalid_overflow = 0;
 }

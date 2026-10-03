@@ -4,19 +4,14 @@
 
 The primary boundary is the directory layout: game dumps, wrappers, VM images
 and research caches live outside this repository, where no `git add` can reach
-them. This is the second backstop, and it is built on a rule that needs no
-corpus to maintain:
+them. This is the second backstop, on a rule that needs no corpus to maintain:
 
     THIS REPOSITORY CONTAINS UTF-8 TEXT AND ONE ICON. NOTHING ELSE.
 
-Every kind of contraband anyone has actually worried about here (a game
-executable, an asset archive, a disk image, a Glide wrapper, a NVRAM blob, a
-screenshot with a texture in it) fails that rule without anyone having to
-predict it, where a keyword list would produce false positives on our own
-prose and still miss the actual risk.
-
-Exit status is 1 on any finding, so `make check` and a pre-commit hook can use
-it directly.
+Every kind of contraband anyone has worried about here fails that rule without
+anyone having to predict it, where a keyword list would produce false positives
+on our own prose and still miss the actual risk. Exit status is 1 on any
+finding, so `make check` and a pre-commit hook can use it directly.
 """
 
 import argparse
@@ -36,8 +31,8 @@ from pathlib import Path
 # on a repository that is perfectly clean.
 SKIP_DIRS = {'build', 'generated', '__pycache__', '.git', 'chd', 'run', 'data'}
 
-# The one binary this repository is allowed to contain. It is project-authored
-# (tools/make-icon.py) and it has to be binary to be an icon.
+# The one binary this repository is allowed to contain. It is project-authored,
+# generated from coordinates, and it has to be binary to be an icon.
 BINARY_ALLOWLIST = {'res/vcthunder.ico'}
 
 # Belt over the text rule: these never belong here whatever their content.

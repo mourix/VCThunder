@@ -389,6 +389,25 @@ void shim_exit(int code, const char *reason)
     ExitProcess((UINT)code);
 }
 
+/* shim_run()'s own three exits: the dry run, the game returning, and startup
+ * giving up. All three tear down the same four things in the same order, and
+ * written out three times one of them would eventually be missed.
+ *
+ * NOT the same sequence as shim_exit() above, deliberately: that one is reached
+ * from any thread while the game is live, so it flushes NVRAM and stops the
+ * profiler and does NOT unmap an image other threads may still be inside.
+ * These three own the process.
+ */
+static __attribute__((noreturn)) void host_exit(int code)
+{
+    audio_shutdown();
+    diego_shutdown();
+    game_unmap();
+    patch_shutdown();
+    log_close();
+    ExitProcess((UINT)code);
+}
+
 /* Resolve the command-line title to its runtime profile, data directory, and
  * image. Title selection is intentionally not read from configuration. */
 static int select_title(void)
@@ -484,6 +503,11 @@ __declspec(dllexport) int shim_run(void)
     }
 
     chdir_to_own_folder();
+    /* AFTER the chdir and before every reader, the launcher included: the
+     * shipped ini is a resource in this binary and a pack that has none gets
+     * one written here. It never overwrites, so this is a no-op on every run
+     * but the first. config_seed_ini(). */
+    config_seed_ini("vcthunder.ini");
     if (argc == 1) {
         launcher_result_t selected = launcher_run("vcthunder.ini");
 
@@ -532,7 +556,7 @@ __declspec(dllexport) int shim_run(void)
     diego_preload("vcthunder.ini");
     /* WASAPI is COM and pulls in its endpoint stack lazily; open the device now
      * or not at all. No device selects the title's safe silent fallback. */
-    if (g_cfg.audio && !audio_preload(g_cfg.dcs_ms, g_cfg.audio_volume,
+    if (g_cfg.audio && !audio_preload(g_cfg.dcs_us, g_cfg.audio_volume,
                                       g_cfg.audio_routing, g_cfg.audio_balance))
         LOGW("audio: no output device; raw hardware stays stubbed and the "
              "game uses its safe silent path");
@@ -556,13 +580,12 @@ __declspec(dllexport) int shim_run(void)
      * game reports its own failures on, and it is the first thing you want
      * already installed when one happens. */
     log_install_game_printf();
-    /* The arcade link, and it is one choice with two halves. With no ether0,
-     * enabled-but-uninitialised fails _gamenet_ModuleInit and drops the
-     * machine into the operator menu, so a title that would enable the link
-     * has to be held standalone. With one, that override is exactly what
-     * would prevent the link, so it is not installed. Whether the link then
-     * runs, and which unit this cabinet is, remain the game's own operator
-     * settings. */
+    /* The arcade link, one choice with two halves. With no ether0,
+     * enabled-but-uninitialised fails _gamenet_ModuleInit and drops the machine
+     * into the operator menu, so a title that would enable the link has to be
+     * held standalone. With one, that override is exactly what would prevent
+     * the link, so it is not installed. Whether the link runs, and which unit
+     * this is, stay the game's own operator settings. */
     if (!net_link_install())
         net_link_disable();
 
@@ -592,16 +615,15 @@ __declspec(dllexport) int shim_run(void)
      * game runs, because _GameInit consults it on the way to the first frame. */
     audio_install_passthrough();
 
-    if (!r2_cache_install())
+    if (!r2_name_install())
         goto fail;
 
-    /* Start host input only after DATA/.bss exists. The poller calls the
-     * game's own decoder, whose state lives in that unpacked region.
+    /* Start host input only after DATA/.bss exists: the poller calls the
+     * game's own decoder, whose state lives in that region.
      *
      * Fatal only for a title whose board we DO emulate. For one we do not, the
-     * game still boots and runs its attract sequence, which is exactly what is
-     * needed to work the board out: refusing to start would remove the only
-     * way to observe it. */
+     * game still boots and runs its attract sequence, which is what is needed
+     * to work the board out. */
     if (G->io_receive) {
         if (!diego_install(g_cfg.dip_switches, g_cfg.io_ms))
             goto fail;
@@ -632,30 +654,14 @@ __declspec(dllexport) int shim_run(void)
         LOGI("  __imp__ slots      : %d", G->imp_count);
         LOGI("  direct win32       : %d", G->w32_count);
         LOGI("  hardware boundaries: %d", G->hw_count);
-        audio_shutdown();
-        diego_shutdown();
-        game_unmap();
-        patch_shutdown();
-        log_close();
-        ExitProcess(0);
+        host_exit(0);
     }
 
     glide_watchdog_arm();
     game_run();
-
-    audio_shutdown();
-    diego_shutdown();
-    game_unmap();
-    patch_shutdown();
-    log_close();
-    ExitProcess(0);
+    host_exit(0);
 
 fail:
     LOGE("startup failed");
-    audio_shutdown();
-    diego_shutdown();
-    game_unmap();
-    patch_shutdown();
-    log_close();
-    ExitProcess(1);
+    host_exit(1);
 }

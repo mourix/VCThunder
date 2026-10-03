@@ -3,7 +3,7 @@
 ## Layout
 
 **A clone of this repository needs nothing beside it.** Everything the build writes goes
-inside the clone -- the run directory included -- and every input except your own game CHDs
+inside the clone, the run directory included, and every input except your own game CHDs
 is either here already or fetched by `make deps`:
 
 ```
@@ -54,7 +54,7 @@ emulation.
 trusting a table, so it needs a decoder. **It does not need `capstone`**: `scripts/x86len.py`
 is a length-only x86-32 decoder covering exactly what `scripts/glide2_pushes.py` reads, and the
 generator uses it whenever capstone is not importable. Plain `python3` with no packages is
-enough to build from a fresh clone -- which matters because **MSYS2 has no capstone for any
+enough to build from a fresh clone, which matters because **MSYS2 has no capstone for any
 32-bit environment**, so in a MINGW32 shell `pacman` cannot help.
 
 capstone is still the oracle where it exists:
@@ -68,7 +68,7 @@ capstone is still the oracle where it exists:
 whole CODE segment with each decoder and reports every disagreement. It reports zero on both
 supported builds, and the generator emits byte-identical profiles either way.
 
-To use capstone under MSYS2, install it into a 64-bit environment -- the tooling Python is
+To use capstone under MSYS2, install it into a 64-bit environment; the tooling Python is
 unrelated to the 32-bit target and does **not** have to match the compiler:
 
 ```sh
@@ -113,7 +113,6 @@ make renderer   # just build/vcglide.dll, the Glide 2.x provider
 make tools      # build/glide-replay.exe, the capture replay / golden-frame harness
 make check      # the local CI: scans, link check, build, tests, generated/ vs the dumps
 make check-full # the same, ignoring the stamps on the two checks that cache
-make regress    # replay real captures against a control renderer; needs captures
 make defs       # regenerate generated/ from ALL titles
 make pack       # deliver the binaries into run/vcthunder/
 make pack-ini   # overwrite the run directory's ini with the shipped defaults
@@ -122,22 +121,18 @@ make clean      # objects, the three binaries, and staged SDL3.dll only
 ```
 
 `make check` is the one to reach for. Underneath, each check is also a target of its own, in the
-order `check` runs them: `ini-doc-test`, `config-test`, `round-trip-test`, `emitter-test`,
-`widescreen-test`, `net-link-test` and `conformance`. `make conformance` on its own builds only
-the renderer and the replay harness, so it is the one check that runs on a clone with no dumps
-at all. A failing check prints what to do about it: accepting a legitimately changed picture is
+order `check` runs them: `ini-doc-test`, `launcher-model-test`, `config-test`,
+`round-trip-test`, `emitter-test`, `widescreen-test`, `net-link-test`, `rumble-test`,
+`button-test` and `conformance`. `make conformance` on its own builds only the renderer and the
+replay harness, so it is the one check that runs on a clone with no dumps at all. A failing
+check prints what to do about it: accepting a legitimately changed picture is
 `make conformance-frames`, looking at the PNGs it writes, then `make conformance-accept`.
 
-Two of the checks read inputs that cannot change between runs -- four CHDs against their own
-checksums, and `generated/` against the two dumps. Each records a key when it passes and
-re-reads only when something it depends on has moved, reporting `NOT RE-READ` rather than a pass
-when it skips. **`make check-full` ignores both**, and `make clean` removes the stamps.
+Two of the checks read inputs that cannot change between runs: every CHD the ingest finds,
+against its own checksums, and `generated/` against the two dumps. Each records a key when it
+passes and re-reads only when something it depends on has moved, reporting `NOT RE-READ` rather
+than a pass when it skips. **`make check-full` ignores both**, and `make clean` removes the stamps.
 
-**`make regress` is the renderer's real-capture A/B** and is not part of `make check`: it builds
-a control renderer from a git revision, replays whole captures of both titles through both
-backends and compares per-frame hashes. The captures it needs are recordings of the games
-themselves, so they cannot live in this repository -- `tests/regress-captures.def` names them and
-**on a clone this reports that it did not run**.
 
 `make deps` downloads `SDL3-devel-3.4.10-mingw.tar.gz` from SDL's official GitHub release and
 requires SHA-256 `39dd2ac3…22639a8`. No SDL source or binary is vendored into this repository.
@@ -153,19 +148,19 @@ registered one.
 
 **The release version is `src/resource.h`**, three macros and no other definition. `windres`
 and the compiler both read that file, so the DLL's Windows file properties, the log's first
-line (`VCThunder 0.1: ...`) and the settings launcher's title bar cannot disagree. It is a
+line (`VCThunder 0.2: ...`) and the settings launcher's title bar cannot disagree. It is a
 version, not a build stamp: it moves when a release does and never because a build ran.
 
 `make` twice on unchanged source produces byte-identical binaries, and so does a rebuild from
 `make clean`: every link carries `-Wl,--no-insert-timestamp` and nothing compiles in
 `__DATE__`/`__TIME__`. `make` prints each binary's SHA-256 as it links it. Note that `make` can
 hit clock skew under WSL and silently not rebuild; if a hash looks wrong, force it with
-`touch src/*.c renderer/*/*.c && make`. **Not `make -B`** -- it forces `generated/`'s rule, whose
+`touch src/*.c renderer/*/*.c && make`. **Not `make -B`**, it forces `generated/`'s rule, whose
 recipe is a refusal, and the build stops there.
 
 Deleting a source is the case make cannot see for itself, since the object lists are
 `$(wildcard)`s. `build/obj/.sources` is the source list as a file, both DLLs depend on it, and it
-is rewritten only when the list changes -- so a deletion relinks and the orphaned objects are
+is rewritten only when the list changes, so a deletion relinks and the orphaned objects are
 swept in the same step.
 
 ## From a MAME CHD to a running game
@@ -196,7 +191,7 @@ It reads the CHD itself, reads every FAT partition inside it, and merges them in
 so `C:\HYDRO.EXE` and `D:\SAMAZAA0.CSH` both land in the same directory, which is why one flat
 directory per title is the correct shape. It then hashes what it extracted against the
 registered build, and **a mismatch is reported as an unsupported build, not as a corrupt
-download** -- the README's *Supported builds* says what to do with one.
+download**; the README's *Supported builds* says what to do with one.
 
 `chd/` is gitignored and the contraband scanner skips it. `make check` runs `chd.py --check` on
 every CHD the ingest can find, and reports SKIPPED when there is none.
@@ -241,8 +236,20 @@ run/vcthunder/  VCThunder.exe  VCThunder.dll  vcglide.dll  SDL3.dll
 ships that it does not have. Your tuning, your dumps and your NVRAM live there, so do not
 delete it.
 
-The game dumps are not staged by `make pack`. They are hundreds of megabytes and they are
-Midway's; supply your own lawful copy.
+**A RELEASE ZIP CARRIES NO `vcthunder.ini`.** The shipped file is a resource inside
+`VCThunder.dll` (`res/vcthunder.rc`, `IDR_DEFAULT_INI`) and the host writes it out when the pack
+has none, so an update extracted over somebody's folder cannot replace the one file that holds
+their `[devices]` table, their axis section and every binding. `$(RES)` depends on
+`vcthunder.ini`: editing the shipped file rebuilds the resource, and a build that skipped it
+would hand out the previous one. Deleting the file and starting VCThunder again is the whole of
+"give me the shipped defaults back", for a user and for a test pack alike.
+
+**`make pack` copies your game data into the pack**: each title in the clone's `data/` that
+`run/vcthunder/data/` does not have yet, while the ini's `data_dir` is the default `data`. The
+pack then stands alone, and moving or deleting the clone does not break it. That costs the
+data's size a second time (1.4 GB for both titles); `make pack LINK_DATA=1` on the first pack
+points `data_dir` at the clone's `data/` instead. The data is your own lawful copy and never
+leaves your machine.
 
 ## Smoke test
 
@@ -258,7 +265,7 @@ cd run/vcthunder
 This is the fastest regression test there is: it exercises the loader, the Win32 binding, the
 stubs, the Glide binding into the provider, the profile and `__pl_unpackrom` end to end. Anything
 that changes the reported counts is a regression. The line that means the run reached the end is
-`--dry-run: image mapped, unpacked and patched` -- the profile's `glide N __imp__ N` line prints
+`--dry-run: image mapped, unpacked and patched`; the profile's `glide N __imp__ N` line prints
 before anything is mapped, and prints just as happily when startup then fails.
 
 The title is the command-line word and there is no other source for it: `VCThunder.exe` with no

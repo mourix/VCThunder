@@ -153,6 +153,13 @@ static int doc_key_value(const char *line, char *key, size_t key_size,
     return 1;
 }
 
+int ini_doc_line_key(const char *line, char *out, size_t out_size)
+{
+    char value[INI_VALUE_CAP];
+
+    return doc_key_value(line, out, out_size, value, sizeof value);
+}
+
 int ini_doc_get(const ini_doc_t *doc, const char *section, const char *key,
                    char *out, size_t out_size)
 {
@@ -178,6 +185,57 @@ int ini_doc_get(const ini_doc_t *doc, const char *section, const char *key,
     return have;
 }
 
+/* The n-th DISTINCT key of a section, in file order, so a caller can read a
+ * table whose key names it cannot know in advance, [devices], where the key
+ * IS the label. Returns 0 when there is no n-th key.
+ *
+ * Distinct, and last-wins is ini_doc_get()'s job: a key assigned twice is one
+ * key here and the caller reads its value the way everything else does. */
+int ini_doc_key_index(const ini_doc_t *doc, const char *section,
+                      unsigned index, char *out, size_t out_size)
+{
+    char current[96] = "";
+    size_t i;
+    unsigned seen = 0;
+
+    for (i = 0; i < doc->count; i++) {
+        char name[96], k[96], value[INI_VALUE_CAP];
+        char scan[96] = "";
+        size_t j;
+        int duplicate = 0;
+
+        if (ini_doc_section(doc->line[i], name, sizeof name)) {
+            snprintf(current, sizeof current, "%s", name);
+            continue;
+        }
+        if (_stricmp(current, section) ||
+            !doc_key_value(doc->line[i], k, sizeof k, value, sizeof value))
+            continue;
+        /* Has this key already been counted? A second walk rather than a set:
+         * a [devices] table is a handful of lines and a table big enough for
+         * this to cost anything is a table that has other problems. */
+        for (j = 0; j < i && !duplicate; j++) {
+            char earlier_name[96], ek[96], ev[INI_VALUE_CAP];
+            if (ini_doc_section(doc->line[j], earlier_name,
+                                sizeof earlier_name)) {
+                snprintf(scan, sizeof scan, "%s", earlier_name);
+                continue;
+            }
+            if (!_stricmp(scan, section) &&
+                doc_key_value(doc->line[j], ek, sizeof ek, ev, sizeof ev) &&
+                !_stricmp(ek, k))
+                duplicate = 1;
+        }
+        if (duplicate)
+            continue;
+        if (seen++ == index) {
+            snprintf(out, out_size, "%s", k);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static size_t line_eol(const char *line)
 {
     size_t n = strlen(line);
@@ -186,11 +244,47 @@ static size_t line_eol(const char *line)
     return n;
 }
 
+/* Give a line a trailing newline if it has none, so a line appended after it
+ * starts on its own. Appending at the end of the document is the ORDINARY case;
+ * the target section being the file's last makes `section_end ==
+ * doc->count`, so a file whose final line is unterminated would otherwise
+ * produce `key = valuenewkey = value`. */
+static int doc_terminate_line(ini_doc_t *doc, size_t at)
+{
+    const char *line = doc->line[at];
+    size_t len = strlen(line), nl = strlen(doc->newline);
+    char *fixed;
+
+    if (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        return 1;
+    fixed = (char *)malloc(len + nl + 1);
+    if (!fixed)
+        return 0;
+    memcpy(fixed, line, len);
+    memcpy(fixed + len, doc->newline, nl + 1);
+    free(doc->line[at]);
+    doc->line[at] = fixed;
+    return 1;
+}
+
+/* The line written must read back as the value given, and keeps the user's
+ * spacing where there is any. Two cases have none to keep, and get one space:
+ *
+ *   an empty value (`dinput_name     =`), which would otherwise be written
+ *   flush against the `=`;
+ *
+ *   a comment with no gap before it (`key=; note`), which would otherwise be
+ *   read back as part of the value.
+ *
+ * Trailing blanks with no comment after them belong to the old value and are
+ * dropped; in front of a comment they are the user's gap and are kept. */
 static char *replace_value(const char *line, const char *value)
 {
     const char *eq = strchr(line, '=');
-    const char *start, *suffix, *p;
+    const char *start, *suffix, *tail, *p;
     size_t prefix, end = line_eol(line), line_size = strlen(line), n;
+    size_t value_size, lead, trail;
+    char last;
     char *out;
 
     if (!eq)
@@ -204,15 +298,34 @@ static char *replace_value(const char *line, const char *value)
         suffix = p;
     while (suffix > start && (suffix[-1] == ' ' || suffix[-1] == '\t'))
         suffix--;
+    tail = p && (size_t)(p - line) < end ? suffix : line + end;
     prefix = (size_t)(start - line);
-    n = prefix + strlen(value) + line_size - (size_t)(suffix - line) + 1;
+    value_size = strlen(value);
+    /* ONLY WHEN THE OLD VALUE WAS EMPTY (start == suffix) AND no space was
+     * skipped above, so there is nothing in the prefix to inherit. A compact
+     * `foo=bar` that a user wrote that way is a style to keep, not one to
+     * correct; the test fixture carries one for exactly that reason. And an
+     * empty value being WRITTEN leaves the line empty rather than gaining a
+     * trailing space nobody asked for. */
+    lead = value_size && start == suffix && start == eq + 1 ? 1 : 0;
+    last = value_size ? value[value_size - 1] : lead ? ' ' :
+           prefix ? line[prefix - 1] : '=';
+    trail = (size_t)(suffix - line) < end &&
+            (*suffix == ';' || *suffix == '#') &&
+            last != ' ' && last != '\t' ? 1 : 0;
+    n = prefix + lead + value_size + trail +
+        line_size - (size_t)(tail - line) + 1;
     out = (char *)malloc(n);
     if (!out)
         return NULL;
     memcpy(out, line, prefix);
-    memcpy(out + prefix, value, strlen(value));
-    memcpy(out + prefix + strlen(value), suffix,
-           line_size - (size_t)(suffix - line));
+    if (lead)
+        out[prefix] = ' ';
+    memcpy(out + prefix + lead, value, value_size);
+    if (trail)
+        out[prefix + lead + value_size] = ' ';
+    memcpy(out + prefix + lead + value_size + trail, tail,
+           line_size - (size_t)(tail - line));
     out[n - 1] = '\0';
     return out;
 }
@@ -220,8 +333,12 @@ static char *replace_value(const char *line, const char *value)
 int ini_doc_set(ini_doc_t *doc, const char *section, const char *key,
                    const char *value)
 {
-    char current[96] = "";
+    char current[96] = "", given[INI_VALUE_CAP];
     size_t i, last = (size_t)-1, section_end = (size_t)-1;
+
+    /* Every reader trims the blanks around a value, so none are written. */
+    snprintf(given, sizeof given, "%s", value ? value : "");
+    value = ini_trim(given);
 
     for (i = 0; i < doc->count; i++) {
         char name[96], k[96], old[INI_VALUE_CAP];
@@ -238,6 +355,17 @@ int ini_doc_set(ini_doc_t *doc, const char *section, const char *key,
                 last = i;
         }
     }
+    /* OUR SECTION'S HEADER WAS THE FILE'S LAST LINE: the header branch only
+     * records `section_end` on meeting a FOLLOWING header and the key branch
+     * never ran, so the append path below wrote a SECOND `[section]` header.
+     *
+     * That splits the two readers. ini_doc_get() is last-wins, so the launcher
+     * showed the new value; the host reads through GetPrivateProfileStringA,
+     * which stops at the FIRST header, so every key the launcher wrote took its
+     * compiled default in the game. */
+    if (section_end == (size_t)-1 && !_stricmp(current, section))
+        section_end = doc->count;
+
     if (last != (size_t)-1) {
         char *changed = replace_value(doc->line[last], value);
         if (!changed)
@@ -250,6 +378,9 @@ int ini_doc_set(ini_doc_t *doc, const char *section, const char *key,
         char text[1024];
         char *added;
         if (section_end != (size_t)-1) {
+            if (section_end == doc->count && doc->count &&
+                !doc_terminate_line(doc, doc->count - 1))
+                return 0;
             snprintf(text, sizeof text, "%s = %s%s", key, value, doc->newline);
             added = _strdup(text);
             return added && doc_insert(doc, section_end, added);

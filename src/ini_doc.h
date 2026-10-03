@@ -1,22 +1,11 @@
 /* ini_doc.h -- vcthunder.ini as a document, not as a set of values.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * The launcher is the only thing here that WRITES the user's ini, and the file
- * it writes is a file a person has been editing by hand: comments, ordering,
- * blank lines, and the CRLF or LF the file already had. So it does not parse
- * the ini into values and print them back out -- that would silently rewrite
- * everything a user had put there. It holds the file as its own lines and
- * changes one line at a time.
- *
- * That is why this is a THIRD reader of one file and not a duplicate of the
- * other two. What it does not carry is the value grammar: a comment delimiter,
- * a boolean, whitespace, are src/ini.h's and shared with config.c, io_config.c
- * and dinput.c.
- *
- * It is separate from launcher.c because it is the half with no Win32 window
- * in it and the only half under test: tests/ini_doc_test.c builds THIS file
- * and nothing else, so a passing test means the document model round-trips,
- * rather than meaning a GUI translation unit compiled.
+ * The launcher is the only thing that WRITES the user's ini, and the file it
+ * writes is one a person edits by hand: comments, ordering, blank lines, and
+ * whichever line ending it already had. So it holds the file as its own lines
+ * and changes one line at a time rather than parsing and printing back. The
+ * value grammar is src/ini.h's, shared with the other three readers.
  */
 #ifndef VCT_INI_DOC_H
 #define VCT_INI_DOC_H
@@ -48,11 +37,18 @@ void ini_doc_free(ini_doc_t *doc);
 int  ini_doc_get(const ini_doc_t *doc, const char *section, const char *key,
                  char *out, size_t out_size);
 
-/* Rewrite the value in place, keeping the line's spacing and its trailing
- * comment. A key that is not in the file is inserted at the end of its
- * section; a section that is not in the file is appended. */
+/* Rewrite the value in place, keeping the line's spacing and trailing comment.
+ * A key not in the file is inserted at the end of its section; a section not in
+ * the file is appended. ini_doc_get() on the result answers exactly `value`,
+ * less surrounding blanks; see replace_value(). */
 int  ini_doc_set(ini_doc_t *doc, const char *section, const char *key,
                  const char *value);
+
+/* The n-th DISTINCT key of a section, in file order. The document model's one
+ * enumeration, and it exists for [devices], whose KEYS are the data: a label
+ * is chosen by the user and cannot be looked up by name. */
+int  ini_doc_key_index(const ini_doc_t *doc, const char *section,
+                       unsigned index, char *out, size_t out_size);
 
 /* COMMENT the key out rather than deleting the line: what the user wrote
  * stays visible, and stops being read. */
@@ -65,5 +61,12 @@ int  ini_doc_save(ini_doc_t *doc, char *why, size_t why_size);
 /* Is this line a [section] header, and which? Exposed because the launcher
  * scans the document for title-scoped sections it does not itself manage. */
 int  ini_doc_section(const char *line, char *out, size_t out_size);
+
+/* ...and is it a `key = value` assignment, and which key? Blank lines and
+ * comments are 0. Exposed for the same scan: a key this build does not know
+ * is silently ignored by every reader of this file (an unknown key HAS to be,
+ * since the binding maps live in the same file), so the launcher is the only
+ * place that can say a line does nothing. */
+int  ini_doc_line_key(const char *line, char *out, size_t out_size);
 
 #endif

@@ -1,23 +1,11 @@
 /* config_test.c -- what the host does with a vcthunder.ini a person wrote.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * src/config.c is 505 lines of pure string logic and the most user-facing code
- * in the host: an alias table, per-title section precedence, range and choice
- * validation, and the promise in docs/configuration.md §6 that "the parser
- * takes any key it knows, wherever it finds it". Its failure mode is not a
- * crash -- it is a setting that reads as applied and is not, which is the
- * single thing a user cannot debug from the outside.
- *
- * tests/settings_round_trip_test.c already asserts that every LEGAL value
- * survives launcher -> file -> host. This is the other half, and the harder
- * one: what happens to a value that is wrong, misplaced, misspelled, commented
- * out, or written twice.
- *
- * THE LOG LINE IS THE PRODUCT. When config.c rejects a value it keeps the
- * previous layer's and files a note, and that note is the only thing the user
- * ever sees. So the assertions here are on the message and not merely on the
- * count: a warning that does not name the key, the value it refused and the
- * value it kept is a warning that costs a support round.
+ * src/config.c is pure string logic and the most user-facing code in the host,
+ * and its failure mode is not a crash: it is a setting that reads as applied
+ * and is not, which is the one thing a user cannot debug from the outside. So
+ * this drives values that are wrong, misplaced, misspelled, commented out or
+ * written twice, where tests/settings_round_trip_test.c drives the legal ones.
  */
 #include "../src/ini.c"
 #include "../src/settings.c"
@@ -32,7 +20,7 @@
 /* config_parse_argv() prints its usage text on a refusal, which is correct and
  * is thirty lines. Two cases below provoke it deliberately, and `make check`
  * should not carry sixty lines of expected output that a reader has to learn
- * to ignore -- that is how a real line stops being noticed. So stderr is
+ * to ignore; that is how a real line stops being noticed. So stderr is
  * pointed at the null device for exactly those calls, by descriptor rather
  * than by freopen(), because a freopen'd stderr cannot be given back. */
 static int s_saved_stderr = -1;
@@ -193,9 +181,9 @@ static void test_invalid_keeps_the_previous_value(void)
     load_text(&c, "[graphics]\nrender_scale = fast\n");
     check(c.render_scale == 1, "and a word where a number goes is refused");
 
-    /* strtoul accepts a leading '-' and wraps it, so "-1" used to arrive as
-     * 4294967295 and land inside almost any range. src/ini.c refuses the sign
-     * before parsing; this is that fix, asserted where a user would meet it. */
+    /* strtoul accepts a leading '-' and wraps it, so "-1" arrives as
+     * 4294967295 and lands inside almost any range. src/ini.c refuses the sign
+     * before parsing; this asserts that where a user would meet it. */
     load_text(&c, "[graphics]\nrender_scale = -5\n");
     check(c.render_scale == 1, "a negative unsigned is refused, not wrapped");
 
@@ -347,7 +335,7 @@ static void test_per_title_sections(void)
      * says the scopes cannot collapse into one, because [digital] and
      * [gamepad] use the same key names for different things. So a key written
      * there is in no section at all: the "any key wherever it is found"
-     * fallback still applies it -- a user who wrote it meant it -- and it is
+     * fallback still applies it, a user who wrote it meant it, and it is
      * reported, because the next key they write that way might be a `coin1`
      * that could have meant either of two things. */
     write_ini("[hydro]\nrender_scale = 6\n");
@@ -374,6 +362,49 @@ static void test_per_title_sections(void)
     config_report_notes();
     check(strcmp(c.log_file, "shared.log") == 0,
           "and a per-title log_file is deliberately ignored");
+}
+
+
+/* A DEVICE PROFILE IS NOT THIS PARSER'S, AND THE OLD WARNING WAS WORSE THAN
+ * SILENCE. Before Phase 3, [analog.tmx] reached setting_lookup(), which
+ * resolves a key by NAME from any section, found dinput_throttle_axis in
+ * [analog], and filed it as STRANDED, so the host told the user, in the
+ * strongest words it has, to move a line whose whole purpose is to be where it
+ * is. Nothing was ever wrongly applied (these keys are STORE_ELSEWHERE); the
+ * entire defect was in what the host said about them. */
+static void test_device_profile_is_not_this_parsers(void)
+{
+    shim_config_t c;
+
+    load_text(&c, "[devices]\ntmx = dinput:Thrustmaster TMX\n"
+              "[analog.tmx]\ndinput_throttle_axis = rz\n");
+    check(log_count == 0,
+          "a device profile is skipped in silence, not reported as stranded");
+    check(!logged_says("Move the line"),
+          "and the user is NOT told to destroy it");
+
+    /* Both passes, because [hydro.analog.tmx] IS owned by hydro and the title
+     * pass would otherwise take it. */
+    write_ini("[hydro.analog.tmx]\ndinput_brake_axis = y\n");
+    log_count = 0;
+    config_defaults(&c);
+    config_load_shared(&c, s_path);
+    config_load_title(&c, s_path, "hydro");
+    config_report_notes();
+    check(log_count == 0, "a title-scoped device profile is skipped by BOTH "
+          "passes");
+
+    /* The skip is by SHAPE, and the shape has to stay narrow: [hydro.digital]
+     * must not read as a profile of [hydro] named "digital", or every binding
+     * section in the file would stop being parsed. */
+    load_text(&c, "[graphics]\ndinput_deadzone_percent = 12\n");
+    check_says("is NOT read there",
+               "a genuinely stranded key is still reported");
+
+    /* And a key that IS this parser's still arrives from a plain section. */
+    load_text(&c, "[devices]\ntmx = dinput:x\n[graphics]\nrender_scale = 4\n");
+    check(c.render_scale == 4,
+          "and [devices] does not disturb the section that follows it");
 }
 
 /* ---- the notes themselves ---------------------------------------------- */
@@ -471,6 +502,11 @@ static void test_argv(void)
     }
 }
 
+/* THE LOG LINE IS THE PRODUCT. When config.c rejects a value it keeps the
+ * previous layer's and files a note, and that note is the only thing the user
+ * ever sees. So the assertions are on the message and not merely on the count:
+ * a warning that does not name the key, the value it refused and the value it
+ * kept is a warning that costs a support round. */
 int main(void)
 {
     char root[MAX_PATH], folder[MAX_PATH];
@@ -493,6 +529,7 @@ int main(void)
     test_unknown_key_is_silent();
     test_comments_and_whitespace();
     test_per_title_sections();
+    test_device_profile_is_not_this_parsers();
     test_notes_are_consumed();
     test_note_overflow_is_announced();
     test_resolve_graphics();

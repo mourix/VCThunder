@@ -111,6 +111,38 @@ static inline int fog_factor(float oow)
            (((int)vgl.fog_table[next] - (int)vgl.fog_table[idx]) * frac >> 8);
 }
 
+/* A per-channel blend weight. Most factors are one value in all three
+ * channels; SRC_COLOR and DST_COLOR are not, so the unit is a triple. */
+typedef struct { int r, g, b; } rgb3_t;
+
+/* ONE GLIDE BLEND FACTOR, resolved against the source and destination this
+ * pixel actually has. The source side and the destination side read the SAME
+ * table, the factor enum does not care which of them is asking, so there is
+ * one of these and not two. Written out twice, the two sides drift, and a
+ * factor wrong on one side only is a blend that is right in most of a frame.
+ *
+ * DST_ALPHA is 255 and ONE_MINUS_DST_ALPHA is 0 because the destination surface
+ * carries no alpha: see pack888 on why it is full colour. */
+static inline rgb3_t blend_factor(int mode, int sr, int sg, int sb, int sa,
+                                  int dr, int dg, int db)
+{
+    rgb3_t f;
+
+    switch (mode) {
+    case VGL_BLEND_ZERO:                f.r = f.g = f.b = 0; break;
+    case VGL_BLEND_SRC_ALPHA:           f.r = f.g = f.b = sa; break;
+    case VGL_BLEND_SRC_COLOR:           f.r = sr; f.g = sg; f.b = sb; break;
+    case VGL_BLEND_DST_ALPHA:           f.r = f.g = f.b = 255; break;
+    case VGL_BLEND_ONE_MINUS_SRC_ALPHA: f.r = f.g = f.b = 255 - sa; break;
+    case VGL_BLEND_ONE_MINUS_DST_ALPHA: f.r = f.g = f.b = 0; break;
+    case VGL_BLEND_DST_COLOR:           f.r = dr; f.g = dg; f.b = db; break;
+    case VGL_BLEND_ONE_MINUS_DST_COLOR: f.r = 255 - dr; f.g = 255 - dg;
+                                        f.b = 255 - db; break;
+    default:                            f.r = f.g = f.b = 255; break;
+    }
+    return f;
+}
+
 /* factor/255 of a SIGNED delta. vgl_mul8 takes non-negative operands, and a
  * fog delta is a difference of two colours. */
 static inline int lerp8(int fac, int delta)
@@ -293,30 +325,6 @@ static void plane_make(plane_t *p, float a0, float a1, float a2,
     p->dy = (d2 * ex1 - d1 * ex2) * inv_area;
 }
 
-/* Does the current state read a texture at all? A frame of Hydro's HUD is
- * hundreds of untextured triangles and paying for two bilinear fetches on each
- * of them is pure loss. */
-static int state_needs_texture(int *need_tmu1)
-{
-    int t0_uses_other;
-
-    *need_tmu1 = 0;
-    if (vgl.cc.other != VGL_OTHER_TEXTURE &&
-        vgl.ac.other != VGL_OTHER_TEXTURE &&
-        (vgl.cc.factor & 7) != VGL_FAC_TEXTURE_ALPHA &&
-        (vgl.cc.factor & 7) != VGL_FAC_TEXTURE_RGB &&
-        (vgl.ac.factor & 7) != VGL_FAC_TEXTURE_ALPHA &&
-        !vgl.itrgb_lighting)
-        return 0;
-
-    /* TMU1 is only read when TMU0's own combine refers to `other`, which is
-     * where TMU1's result arrives. */
-    t0_uses_other = vgl.tmu[0].c_func >= VGL_CF_SCALE_OTHER &&
-                    vgl.tmu[0].c_func <= VGL_CF_SCALE_OTHER_MINUS_LOCAL_ADD_LOCAL_ALPHA;
-    *need_tmu1 = t0_uses_other && vgl.tmu[1].valid;
-    return 1;
-}
-
 /* ---- the span loop ------------------------------------------------------ */
 
 static void raster_span(const setup_t *su, const pipe_t *pp, vgl_stats_t *st,
@@ -438,8 +446,8 @@ static void raster_span(const setup_t *su, const pipe_t *pp, vgl_stats_t *st,
                     /* Magnified past the sharpest level the chain holds. The
                      * answer is that level outright, and WHICH UNIT carries it
                      * is a parity question: this weight is 0 for the unit
-                     * holding the EVEN half and 255 for the ODD one, so frac()
-                     * -- which answers 0 at both ends -- is right only when
+                     * holding the EVEN half and 255 for the ODD one, so frac(),
+                     * which answers 0 at both ends, is right only when
                      * that end's level is even. Unclamped, frac() of a
                      * negative LOD is a sawtooth instead, and fades a blurrier
                      * level in and out as the camera closes. */
@@ -610,33 +618,14 @@ static void raster_span(const setup_t *su, const pipe_t *pp, vgl_stats_t *st,
                 uint32_t d = *cp;
                 int dr = (int)((d >> 16) & 0xff),
                     dg = (int)((d >> 8) & 0xff), db = (int)(d & 0xff);
-                int sf_r, sf_g, sf_b, df_r, df_g, df_b;
+                rgb3_t sf = blend_factor(pp->blend_src, src_r, src_g, src_b,
+                                         src_a, dr, dg, db);
+                rgb3_t df = blend_factor(pp->blend_dst, src_r, src_g, src_b,
+                                         src_a, dr, dg, db);
 
-                switch (pp->blend_src) {
-                case VGL_BLEND_ZERO:      sf_r = sf_g = sf_b = 0; break;
-                case VGL_BLEND_SRC_ALPHA: sf_r = sf_g = sf_b = src_a; break;
-                case VGL_BLEND_SRC_COLOR: sf_r = src_r; sf_g = src_g; sf_b = src_b; break;
-                case VGL_BLEND_DST_ALPHA: sf_r = sf_g = sf_b = 255; break;
-                case VGL_BLEND_ONE_MINUS_SRC_ALPHA: sf_r = sf_g = sf_b = 255 - src_a; break;
-                case VGL_BLEND_ONE_MINUS_DST_ALPHA: sf_r = sf_g = sf_b = 0; break;
-                case VGL_BLEND_DST_COLOR: sf_r = dr; sf_g = dg; sf_b = db; break;
-                case VGL_BLEND_ONE_MINUS_DST_COLOR: sf_r = 255 - dr; sf_g = 255 - dg; sf_b = 255 - db; break;
-                default:                  sf_r = sf_g = sf_b = 255; break;
-                }
-                switch (pp->blend_dst) {
-                case VGL_BLEND_ZERO:      df_r = df_g = df_b = 0; break;
-                case VGL_BLEND_SRC_ALPHA: df_r = df_g = df_b = src_a; break;
-                case VGL_BLEND_SRC_COLOR: df_r = src_r; df_g = src_g; df_b = src_b; break;
-                case VGL_BLEND_DST_ALPHA: df_r = df_g = df_b = 255; break;
-                case VGL_BLEND_ONE_MINUS_SRC_ALPHA: df_r = df_g = df_b = 255 - src_a; break;
-                case VGL_BLEND_ONE_MINUS_DST_ALPHA: df_r = df_g = df_b = 0; break;
-                case VGL_BLEND_DST_COLOR: df_r = dr; df_g = dg; df_b = db; break;
-                case VGL_BLEND_ONE_MINUS_DST_COLOR: df_r = 255 - dr; df_g = 255 - dg; df_b = 255 - db; break;
-                default:                  df_r = df_g = df_b = 255; break;
-                }
-                out_r = vgl_mul8(src_r, sf_r) + vgl_mul8(dr, df_r);
-                out_g = vgl_mul8(src_g, sf_g) + vgl_mul8(dg, df_g);
-                out_b = vgl_mul8(src_b, sf_b) + vgl_mul8(db, df_b);
+                out_r = vgl_mul8(src_r, sf.r) + vgl_mul8(dr, df.r);
+                out_g = vgl_mul8(src_g, sf.g) + vgl_mul8(dg, df.g);
+                out_b = vgl_mul8(src_b, sf.b) + vgl_mul8(db, df.b);
             }
 
             if (pp->write_color)
@@ -665,6 +654,7 @@ typedef struct {
     const pipe_t  *pipe;
     float x[3], y[3];
     int   clip_x0, clip_x1;
+    int   lower_left;                   /* ties resolve in device y */
 } trijob_t;
 
 /* The workers' counters, and they live HERE rather than in the job because a
@@ -713,7 +703,11 @@ static void tri_rows(void *ctx, int worker, int y0, int y1)
             int a = e, b = (e + 1) % 3;
             float ya = j->y[a], yb = j->y[b], t, cx;
 
-            if ((sy < ya && sy < yb) || (sy >= ya && sy >= yb))
+            /* Glide: a centre exactly on a horizontal edge is inside for the
+             * edge with the LOWER device y. Rows are stored top-down, so under
+             * a lower-left origin that is the larger storage y. */
+            if (j->lower_left ? ((sy <= ya && sy <= yb) || (sy > ya && sy > yb))
+                              : ((sy < ya && sy < yb) || (sy >= ya && sy >= yb)))
                 continue;
             t = (sy - ya) / (yb - ya);
             cx = j->x[a] + (j->x[b] - j->x[a]) * t;
@@ -778,7 +772,7 @@ static void cpu_draw_triangle(const float *va, const float *vb, const float *vc)
     MK(IS0, 9); MK(IT0, 10); MK(IS1, 12); MK(IT1, 13);
 #undef MK
 
-    su.need_tex = state_needs_texture(&su.need_tmu1);
+    su.need_tex = vgl_needs_texture(&su.need_tmu1);
     su.stw_shared = (v[0][9] == v[0][12] && v[0][10] == v[0][13] &&
                      v[1][9] == v[1][12] && v[1][10] == v[1][13] &&
                      v[2][9] == v[2][12] && v[2][10] == v[2][13]);
@@ -801,6 +795,7 @@ static void cpu_draw_triangle(const float *va, const float *vb, const float *vc)
     job.su = &su; job.pipe = &pipe;
     for (i = 0; i < 3; i++) { job.x[i] = x[i]; job.y[i] = y[i]; }
     job.clip_x0 = vgl.clip_x0; job.clip_x1 = vgl.clip_x1;
+    job.lower_left = vgl.origin_lower_left;
 
     /* Parallelize tall triangles by independent row ranges. */
     if (ymax - ymin >= VGL_PAR_MIN_ROWS && vgl_par_workers() > 1)
@@ -851,13 +846,8 @@ void vgl_draw_vertex_list(int planar, int count, const float *verts)
  * than the hardware's line rasteriser, and it says so. */
 void vgl_draw_line(const float *a, const float *b)
 {
-    static int announced;
-
-    if (!announced) {
-        announced = 1;
-        vgl_log(0, "raster: grDrawLine used; no capture of either game "
-                   "contains one; lines are drawn as thin quads");
-    }
+    VGL_LOG_ONCE("raster: grDrawLine used; no capture of either game "
+                 "contains one; lines are drawn as thin quads");
     if (a && b) {
         float q[3][15];
         memcpy(q[0], a, sizeof q[0]);

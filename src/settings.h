@@ -3,23 +3,8 @@
  *
  * There is ONE table of settings, in settings.def, and it is the only place a
  * key's section, default, type, range or choices is written down. NOTHING ELSE
- * MAY CARRY A SECOND COPY OF ANY COLUMN. A range or a choice set spelled in
- * more than one place agrees by inspection, which is to say it does not have to
- * agree at all: nothing holds the copies to each other, and each is plausible
- * where it stands.
- *
- * The table has two consumers and they read different columns:
- *
- *   config.c    the STORE half; where the value lands in shim_config_t, how
- *               to parse it, what range or choice set it must satisfy. It also
- *               builds config_defaults() by feeding each entry's `fallback`
- *               through the same parser the ini goes through, so a default
- *               that cannot be spelled in the file cannot exist.
- *   launcher.c  the SHOW half: page, label, control type, help, warning.
- *
- * tools/check-launcher-settings.py reads settings.def directly and holds the
- * table to the shipped ini: every shipped key is one visible entry and every
- * visible entry is a shipped key.
+ * MAY CARRY A SECOND COPY OF ANY COLUMN: copies agree by inspection, which is
+ * to say they do not have to agree at all.
  */
 #ifndef VCT_SETTINGS_H
 #define VCT_SETTINGS_H
@@ -34,8 +19,10 @@ enum {
     PAGE_HOME,
     PAGE_GRAPHICS,
     PAGE_AUDIO,
-    PAGE_BINDINGS,
-    PAGE_DEVICES,
+    /* ONE Controls page, not three. Cutting it by MECHANISM (Bindings,
+     * Devices & Axes, Force Feedback) means setting one wheel up visits all
+     * three, and the device combo on two of them is a mode nothing declares. */
+    PAGE_CONTROLS,
     PAGE_FFB,
     PAGE_SYSTEM,
     PAGE_LINK,
@@ -68,18 +55,33 @@ enum {
     SF_SAVE_FILE = 1 << 3,
     SF_AXIS      = 1 << 4,
     SF_HEX       = 1 << 5,
-    SF_HIDDEN    = 1 << 6       /* parsed, never shown, never shipped */
+    SF_HIDDEN    = 1 << 6,      /* parsed, never shown, never shipped */
+    /* BEHIND THE PAGE'S `Advanced` DISCLOSURE: shown only when the user opens
+     * it, and reachable in one click from the page the key belongs to. A
+     * control that cannot apply must not be offered, and hiding must never make
+     * a key unreachable. */
+    SF_ADVANCED  = 1 << 7,
+    /* SHOWN, AND DELIBERATELY NOT IN THE SHIPPED INI, the third category
+     * tools/check-launcher-settings.py needs. The key is editable, documented
+     * and read, its default is this table's, and vcthunder.ini stays a file
+     * about the handful of things an owner actually sets. The launcher writes
+     * the line the moment its value changes. */
+    SF_UNSHIPPED = 1 << 8,
+    /* An SF_AXIS row whose value may name another controller, `twcs:z`
+     * (vct_axis_choice_ok()). DirectInput's three roles only: the XInput and
+     * WinMM readers take one device. */
+    SF_AXIS_REF  = 1 << 9
 };
 
 /* How config.c stores this key, which is a different question from how the
  * launcher shows it: `aspect`, `log_level` and `video_mode` are all one combo
  * box and land in a char[], an enum and a signed int respectively. */
 typedef enum {
-    /* Not config.c's key at all. diego.c, dinput.c and the launcher read the
+    /* Not config.c's key at all: diego.c, dinput.c and the launcher read the
      * [analog], [ffb] and binding sections straight from the file through
-     * their own precedence rule (ini_read_scoped), so the loader must leave them
-     * alone, but the launcher still edits them and the ini still ships them,
-     * which is why they are in this table. */
+     * ini_read_scoped(), so the loader leaves them alone, but the launcher
+     * edits them and the ini ships them, which is why they are in this
+     * table. */
     VCT_STORE_NONE = 0,
     VCT_STORE_STR,          /* char[field_size]                               */
     VCT_STORE_ENUM,         /* char[field_size], and it must be in `choices`   */
@@ -90,6 +92,13 @@ typedef enum {
     VCT_STORE_MODE          /* int; "auto"/"cabinet"/empty is -1              */
 } vct_store_t;
 
+/* Two consumers read different columns. config.c takes the STORE half: where
+ * the value lands in shim_config_t, how to parse it, what it must satisfy. It
+ * also builds config_defaults() by feeding each `fallback` through the same
+ * parser the ini goes through, so a default that cannot be spelled in the file
+ * cannot exist. launcher.c takes the SHOW half: page, label, control type, help
+ * and warning. tools/check-launcher-settings.py holds the table to the shipped
+ * ini. */
 typedef struct {
     const char *section, *key;
 
@@ -162,5 +171,9 @@ extern const setting_desc_t vct_ui_setting[VCT_UI_SETTING_COUNT];
  * launcher validates a choice before writing it and config.c validates the
  * same choice after reading it, and one spelling rule serves both. */
 int vct_choice_contains(const char *choices, const char *value);
+
+/* An SF_AXIS value: one of `choices`, optionally after a [devices] label
+ * (`twcs:z`), in ini_parse_axis_ref()'s grammar. */
+int vct_axis_choice_ok(const char *choices, const char *value);
 
 #endif /* VCT_SETTINGS_H */

@@ -306,6 +306,24 @@ static uint64_t fnv1a(const void *p, size_t n)
 }
 
 static FILE *s_hash;
+static FILE *s_depth_locks;
+
+/* What a read-only depth lock handed the caller: the buffer the game decides
+ * from (Hydro's lens flare reads one word of it). One record per lock: frame,
+ * width, height as uint32, then the rows as the provider laid them out. */
+static void dump_depth_lock(unsigned frame, const unsigned char *ptr,
+                            unsigned stride)
+{
+    uint32_t hdr[3];
+    unsigned y;
+
+    if (!s_depth_locks || !ptr || !s_surface_w || !s_surface_h)
+        return;
+    hdr[0] = frame; hdr[1] = s_surface_w; hdr[2] = s_surface_h;
+    fwrite(hdr, sizeof hdr, 1, s_depth_locks);
+    for (y = 0; y < s_surface_h; y++)
+        fwrite(ptr + (size_t)y * stride, 2, s_surface_w, s_depth_locks);
+}
 
 static void dump_frame(const char *dir, unsigned frame)
 {
@@ -340,6 +358,9 @@ int main(int argc, char **argv)
 {
     /* Omit frame readback and PNG encoding unless output is requested. */
     const char *cap = NULL, *provider = NULL, *out = NULL, *hash_path = NULL;
+    const char *ftimes_path = NULL;
+    FILE *ftimes = NULL;
+    LARGE_INTEGER tframe;
     unsigned max_frames = 0, from_frame = 0, frame = 0, records = 0, calls = 0, i;
     unsigned at_frame = 0, at_draw = 0, draw_in_frame = 0;
     int list_only = 0, present = 0, no_fog = 0, point_filter = 0;
@@ -372,6 +393,18 @@ int main(int argc, char **argv)
          * to run over the whole capture. See the header. */
         else if (strcmp(argv[i], "--hash") == 0 && i + 1 < (unsigned)argc)
             hash_path = argv[++i];
+        /* One line per frame: the cost of THAT frame, so a capture can be
+         * read as a profile rather than as one average. A mean over 1,800
+         * frames cannot say which scene is expensive, which is the question
+         * a user asks when only parts of a track drop frames. It costs one
+         * QueryPerformanceCounter per swap and is safe in a timing run. */
+        else if (strcmp(argv[i], "--frame-times") == 0 && i + 1 < (unsigned)argc)
+            ftimes_path = argv[++i];
+        else if (strcmp(argv[i], "--depth-locks") == 0 && i + 1 < (unsigned)argc) {
+            s_depth_locks = fopen(argv[++i], "wb");
+            if (!s_depth_locks)
+                rep("replay: cannot write %s; no depth locks\n", argv[i]);
+        }
         else if (strcmp(argv[i], "--report") == 0 && i + 1 < (unsigned)argc)
             s_report = fopen(argv[++i], "w");
         else if (strcmp(argv[i], "--present") == 0)
@@ -398,6 +431,8 @@ int main(int argc, char **argv)
             "                                 [--frames N] [--from N] [--report FILE]\n"
             "                                 [--at-frame F --at-draw D] [--out DIR]\n"
             "                                 [--hash FILE] (per-frame hash, all frames)\n"
+            "                                 [--frame-times FILE] (ms and draws per frame)\n"
+            "                                 [--depth-locks FILE] (each read-only depth lock, raw)\n"
             "                                 [--present]   (show it; NOT a timing run)\n"
             "                                 [--no-fog]    (diagnostic call-stream override)\n"
             "                                 [--point-filter] (diagnostic override)\n"
@@ -415,6 +450,13 @@ int main(int argc, char **argv)
             s_hash = fopen(hash_path, "w");
             if (!s_hash)
                 rep("replay: cannot write %s; no hashes\n", hash_path);
+        }
+        if (ftimes_path) {
+            ftimes = fopen(ftimes_path, "w");
+            if (!ftimes)
+                rep("replay: cannot write %s; no frame times\n", ftimes_path);
+            else
+                fprintf(ftimes, "frame\tms\tdraws\n");
         }
     }
 
@@ -533,6 +575,16 @@ int main(int argc, char **argv)
 
         if (is_control) {
             if (args[0] == VGLC_FRAME) {
+                if (ftimes) {
+                    LARGE_INTEGER now;
+                    QueryPerformanceCounter(&now);
+                    if (frame && qpf.QuadPart)
+                        fprintf(ftimes, "%u\t%.3f\t%u\n", frame,
+                                1000.0 * (double)(now.QuadPart -
+                                    tframe.QuadPart) / (double)qpf.QuadPart,
+                                draw_in_frame);
+                    tframe = now;
+                }
                 if (frame && !list_only)
                     pump();
                 frame = args[1];
@@ -627,6 +679,8 @@ int main(int argc, char **argv)
                     *(const uint32_t *)(info + GR_LFBINFO_PTR) : NULL;
                 s_lfb_stride = ret ? *(const uint32_t *)
                     (info + GR_LFBINFO_STRIDE) : 0;
+                if (args[0] == GR_LFB_READ_ONLY && args[1] == GR_BUFFER_AUXBUFFER)
+                    dump_depth_lock(frame, s_lfb_ptr, s_lfb_stride);
             } else if (s_entry[r.idx].payload == PL_LFBUNLOCK) {
                 s_lfb_ptr = NULL;
             }
@@ -664,6 +718,8 @@ corrupt:
     stream_error = 1;
 done:
     QueryPerformanceCounter(&t1);
+    if (ftimes)
+        fclose(ftimes);
     rep("\nreplayed %u records, %u calls, %u frames\n",
            records, calls, frame);
     {

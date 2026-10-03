@@ -1,30 +1,12 @@
 /* patch_emit_test.c -- the code emitter, over bytes and then over a CPU.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * src/patch.c writes x86 at runtime, into an image that is about to be
- * overwritten by a 1999 game, and the failure mode of a wrong byte is a process
- * that vanishes with no fault and no log. The only other thing that exercises
- * it is a live run, which reports a wrong emitter as "the game did not
- * start".
- *
- * The emitter is a pure function over bytes and needs no game to test. Two
- * things about it are worth asserting rather than reading:
- *
- *   THE BOUNDS ARE A REFUSAL, NOT A REPORT. Every write is checked BEFORE it
- *   lands, because a check that fires once the buffer is already overrun is
- *   the very bug it exists to prevent. So the thing to prove is not that
- *   overflow is noticed: it is that the byte after the buffer is still what it
- *   was, and that a 4-byte immediate with 3 bytes left writes NOTHING rather
- *   than three quarters of itself.
- *
- *   A rel32 IS RESOLVED AGAINST WHERE THE BYTES WILL RUN, never against the
- *   scratch they are being written into. Several stubs are built in a local
- *   buffer and copied into the pool afterwards; emit_t carries that distinction
- *   in the type, and this is where it is checked.
- *
- * And then the part no byte comparison can reach: the emitted code is put in
- * the executable pool and CALLED. patch_emit_sqrt() and thunk_count_only() are
- * the two smallest things patch.c builds, and both are complete programs.
+ * src/patch.c writes x86 at runtime, into an image a 1999 game is about to
+ * overwrite, and the failure mode of a wrong byte is a process that vanishes
+ * with no fault and no log. The emitter is a pure function over bytes, so it is
+ * asserted here rather than left to a live run that would report it as "the
+ * game did not start"; then the emitted code is put in the executable pool and
+ * CALLED.
  */
 #include "../src/patch.c"
 
@@ -70,7 +52,7 @@ static void check(int condition, const char *message)
 /* ---- bounds ------------------------------------------------------------ */
 
 /* The buffer is written with a guard byte past its end. Nothing the emitter
- * does may change it -- which is a different and stronger claim than "overflow
+ * does may change it, which is a different and stronger claim than "overflow
  * was set". */
 #define GUARD 0x5A
 
@@ -96,7 +78,7 @@ static void test_bounds_refuse_before_the_write(void)
     check(buf[8] == GUARD, "and the guard byte is untouched");
 
     /* A 4-byte immediate with 3 bytes left: all or nothing. A partial write
-     * here is the worst case in this file -- it produces a stub that
+     * here is the worst case in this file, it produces a stub that
      * disassembles correctly up to the point where it does not. */
     memset(buf, 0, sizeof buf);
     buf[8] = GUARD;
@@ -255,7 +237,7 @@ static void test_lfence_is_configured(void)
 /* ---- every primitive refuses address 0 --------------------------------- */
 static void test_refuse_null(void)
 {
-    /* An absent anchor IS 0 -- 38 of Offroad's are -- so these are reached in
+    /* An absent anchor IS 0, 38 of Offroad's are, so these are reached in
      * ordinary operation by an installer that forgot to game_require(). They
      * must name the caller and return, not fault on the null page. */
     log_reset();
@@ -330,6 +312,20 @@ static void test_pool_exhaustion(void)
     patch_shutdown();
 }
 
+/* TWO PROPERTIES ARE THE POINT.
+ *
+ *   THE BOUNDS ARE A REFUSAL, NOT A REPORT. Every write is checked BEFORE it
+ *   lands, because a check that fires once the buffer is already overrun is
+ *   the bug it exists to prevent. So what is proved is that the byte after the
+ *   buffer is still what it was, and that a 4-byte immediate with 3 bytes left
+ *   writes NOTHING rather than three quarters of itself.
+ *
+ *   A rel32 IS RESOLVED AGAINST WHERE THE BYTES WILL RUN, never against the
+ *   scratch they are written into. Several stubs are built in a local buffer
+ *   and copied into the pool afterwards; emit_t carries that in the type.
+ *
+ * patch_emit_sqrt() and thunk_count_only() are the two smallest things patch.c
+ * builds, and both are complete programs. */
 int main(void)
 {
     test_bounds_refuse_before_the_write();

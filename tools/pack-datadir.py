@@ -2,25 +2,22 @@
 # SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
 """pack-datadir.py -- point a freshly seeded pack at data the user already has.
 
-`make pack` stages a run directory at run/vcthunder/. When someone has just
-ingested their CHDs into the repository's own data/, that directory holds
-several gigabytes, and copying it into the pack would duplicate all of it for
-no reason. The pack's ini has a `data_dir` key; setting it is the whole job.
-
-Two things here are deliberate and were both learned by getting them wrong:
-
-  * the replacement is NOT a regex replacement. A Windows path is full of
-    backslashes and `re.sub` reads those as escapes in the replacement string:
-    "C:\\claude\\..." raises `bad escape \\c`.
-  * the file is written only after the new text exists. The first version
-    opened it for writing and THEN built the replacement, so the exception
-    above left a zero-byte ini behind.
+`make pack` copies the ingested data/ into the pack by default, so the pack
+stands alone. `make pack LINK_DATA=1` on the first pack runs this instead: the
+data stays where the ingest wrote it and the pack's ini points at it, which
+saves its 1.4 GB but breaks the pack if the clone moves. The ini has a
+`data_dir` key; setting it is the whole job.
 """
 
 import os
 import sys
 
 
+# TWO THINGS HERE ARE DELIBERATE. The replacement is NOT a regex replacement: a
+# Windows path is full of backslashes and re.sub reads those as escapes in the
+# replacement string, so "C:\\data\\..." raises `bad escape \\d`. And the file
+# is written only after the new text exists, or that exception leaves a
+# zero-byte ini behind.
 def main():
     if len(sys.argv) != 3:
         raise SystemExit("usage: pack-datadir.py <pack.ini> <data-dir>")

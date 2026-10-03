@@ -59,7 +59,7 @@ Every address VCThunder patches is an offset into one exact executable. This hos
 
 ## State
 
-**V0.1**, the first public beta release.
+**V0.2**, the second public beta release.
 
 **Both titles playable**: gameplay, controls, audio, NVRAM, windowing, force feedback, and I/O, at a locked 30 fps.
 

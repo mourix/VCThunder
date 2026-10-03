@@ -2,26 +2,11 @@
 """glide2_pushes.py -- argument sizes where call-site cleanup is not observable.
 
 Both games have Glide 2.53 compiled in, so every `_gr*` is an ordinary function
-inside the image and every call to it is a direct `call` with its arguments
-pushed in front of it. Where the compiler emitted `add esp, N` after a call,
-that immediate is the argument size and `gen-gamedefs.observed_argbytes` reads
-it. Where it folded several calls' cleanup into one, or omitted it because the
-block ends in a jump, this module supplies the answer instead, by counting the
-pushes that belong to the call -- from the user's own dump, and from nothing
-else.
-
-VALIDATION IS THE POINT, AND IT IS NOT OPTIONAL. Scored against the cleanup
-immediate over every entry where both are available (55 in Hydro, 49 in
-Offroad), the summary statistics are NOT exact: every failure is a walk that
-absorbed or lost a neighbouring call's pushes, and every one occurs where the
-cleanup immediate already has the answer. Hence the rule this module
-implements:
-
-    the pushes decide ONLY where the histogram is UNANIMOUS.
-
-Across both titles all 27 entries with no observable cleanup are unanimous, so
-nothing is left to a statistic. A future title that is not gets `None` here and
-is reported as unsized rather than guessed at.
+inside the image and every call to it pushes its arguments in front of it. Where
+the compiler emitted `add esp, N`, that immediate is the argument size and
+gen-gamedefs.observed_argbytes reads it. Where it folded several calls' cleanup
+into one, or omitted it because the block ends in a jump, this counts the pushes
+that belong to the call instead, from the user's own dump and nothing else.
 """
 
 import x86len
@@ -29,8 +14,8 @@ import x86len
 # capstone IS THE ORACLE, BUT IT IS NOT A REQUIREMENT. x86len.py is a
 # length-only decoder written against it and validated on both dumps; its
 # docstring carries that record. It exists because there is no capstone for an
-# MSYS2 MINGW32 shell -- no pacman package in mingw32 or clang32, so pip has to
-# build the C library from source -- and `make defs` is not skippable. Where
+# MSYS2 MINGW32 shell, no pacman package in mingw32 or clang32, so pip has to
+# build the C library from source, and `make defs` is not skippable. Where
 # capstone is importable it is used, so the audited decoder is what runs
 # wherever it can.
 try:
@@ -123,6 +108,14 @@ def _pushes_before(insns, i):
 _SWEEP_CACHE = {}
 
 
+# THE PUSHES DECIDE ONLY WHERE THE HISTOGRAM IS UNANIMOUS, and that rule is not
+# optional. Scored against the cleanup immediate over every entry where both are
+# available (55 in Hydro, 49 in Offroad) the summary statistics are NOT exact:
+# every failure is a walk that absorbed or lost a neighbouring call's pushes,
+# and every one occurs where the cleanup immediate already has the answer.
+# Across both titles all 27 entries with no observable cleanup are unanimous, so
+# nothing is left to a statistic; a future title that is not gets None here and
+# is reported as unsized rather than guessed at.
 def push_argbytes(t, targets):
     """{name: argbytes} for names whose push histogram is unanimous.
 

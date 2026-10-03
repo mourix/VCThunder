@@ -109,6 +109,17 @@ int  diag_in_game(uint32_t addr);
 /* A validated frame-pointer walk; returns how many links it recovered. */
 unsigned diag_return_chain(uint32_t ebp, uint32_t *out, unsigned max);
 
+/* The `cap` largest values of a counter array, descending, for a per-interval
+ * report. `n` is how many are held so far and the return is the new count, so
+ * one call per counter is the whole loop. A zero value is never inserted. */
+typedef struct {
+    unsigned idx;
+    uint64_t value;
+} diag_top_t;
+
+unsigned diag_top_insert(diag_top_t *top, unsigned n, unsigned cap,
+                         unsigned idx, uint64_t value);
+
 /* The RAW counter, not the shim's synthetic timebase: this measures the host
  * core, and timebase.c deliberately lies about the host core to the game.
  *
@@ -268,13 +279,13 @@ void *thunk_cdecl_to_stdcall(const void *target, int argbytes, const char *name,
                              glide_first_fn on_first, uint32_t cookie,
                              uint32_t *seen_flag);
 
-/* Cache immutable R2 archive directory lookups. */
-int  r2_cache_install(void);
+/* Observe the asset names the game resolves out of its R2 archive. The
+ * detours answer no lookup themselves; see src/r2_name.c. */
+int  r2_name_install(void);
 
 /* The most recent asset name the game resolved: the only thing in the
  * process that can put a NAME on a texture upload. See texstate.c. */
 const char *r2_last_lookup(void);
-void r2_cache_report(void);
 
 /* Cycles for the Glide entry points texstate.c claims away from the thunk. */
 void texstate_report_cycles(uint64_t frames);
@@ -454,7 +465,10 @@ typedef struct {
     int      present;
     float    steer;      /* -1 full left .. +1 full right         */
     float    drive;      /* -1 full brake .. +1 full throttle     */
-    unsigned buttons;    /* bit 0 == button 1; the first 32 only  */
+    /* bit 0 == button 1, per open device: row 0 is the default device, the
+      * rest are the extra slots. io.h owns the accessors and constants;
+      * io_reading_width_check holds these literal widths to them. */
+    uint32_t buttons[8][4];
     int left, right, up, down;   /* POV hat 0, as digital overrides */
 } di_reading_t;
 
@@ -465,8 +479,24 @@ typedef struct {
  * keyboard are all still there. */
 int  di_preload(const char *ini);
 int  di_present(void);
+/* Did the opened device publish force-feedback effects? The host's only
+ * wheel/pad signal; see the note at its definition. */
+int  di_publishes_ffb(void);
 const char *di_device_name(void);
 int  di_sample(di_reading_t *out);
+
+/* ---- the slots ----------------------------------------------------------
+ *
+ * Slot 0 is the default device, which owns the motor. The rest are the
+ * controllers a [devices] table named, read-only, in the table's order, for
+ * their buttons and any axis role that names them.
+ *
+ * Which slot a [devices] label ended up in, or -1 when it opened nothing. */
+int  di_slot_for_label(const char *label);
+/* How many slots are open, 0 when there is no DirectInput device at all. */
+unsigned di_slot_count(void);
+/* The product name of one slot, or "" for a slot that is not open. */
+const char *di_slot_name(unsigned slot);
 
 /* Command the wheel's motor. -1..+1, the cabinet's own DAC value rescaled;
  * 0 is no force, not "release the wheel". Cheap to call at the board's poll
@@ -489,10 +519,17 @@ typedef enum {
     INPUT_PROBE_WINMM
 } input_probe_backend_t;
 
+/* ini.h's INI_MATCH_CAP, spelled here because ini.h includes this file. */
+#define INPUT_PROBE_ID_CAP (MAX_PATH + 96)
+
 typedef struct {
     input_probe_backend_t backend;
     unsigned backend_index;
     char name[MAX_PATH];
+    /* DirectInput only: the device ID and the name it starts with, built as
+     * dinput.c builds them. */
+    char id[INPUT_PROBE_ID_CAP];
+    char id_name[MAX_PATH];
     unsigned axis_count;
     unsigned button_count;
     int force_feedback;
@@ -502,15 +539,35 @@ typedef struct {
     float axis[INPUT_PROBE_MAX_AXES];
     const char *axis_name[INPUT_PROBE_MAX_AXES];
     unsigned axis_count;
-    uint32_t buttons;
+    /* The same 128 the cabinet path carries, for the same reason: the launcher
+     * must be able to show, and bind, a button the game can then read. */
+    uint32_t buttons[4];
     int pov;                    /* -1 centred, otherwise hundredths of degrees */
 } input_probe_state_t;
 
+/* THE SELECTED DEVICE'S AXES, independent of any poll. The launcher lays its
+ * rows out from this and fills them from input_probe_poll(), whose axis[] is
+ * in exactly this order, one list, read twice, rather than two walks of one
+ * rule. `label` is the DRIVER's name for the axis ("Throttle", "Wheel axis")
+ * and is NULL where the backend publishes none, which is every WinMM device:
+ * JOYCAPS carries ranges and capability bits and not one name. */
+unsigned input_probe_axis_count(void);
+const char *input_probe_axis_name(unsigned index);
+const char *input_probe_axis_label(unsigned index);
+/* Any device's axes, by its index in the list, in that device's own names. A
+ * DirectInput device reports none until it has been opened. */
+unsigned input_probe_device_axis_count(unsigned device);
+const char *input_probe_device_axis_name(unsigned device, unsigned index);
+const char *input_probe_device_axis_label(unsigned device, unsigned index);
 int input_probe_start(HWND owner);
 unsigned input_probe_count(void);
 const input_probe_device_t *input_probe_device(unsigned index);
 int input_probe_select(unsigned index);
 int input_probe_poll(input_probe_state_t *state);
+/* One controller by index, selected or not, so a binding or an axis can be
+ * captured from whatever the user moves. Buttons, hat and axes, each axis
+ * under that device's own name. */
+int input_probe_poll_device(unsigned index, input_probe_state_t *state);
 /* Run a short, bounded motor/rumble pulse on the selected launcher device.
  * DirectInput is made exclusive only for the duration of the test and is
  * returned to non-exclusive foreground polling before gameplay starts. */
@@ -524,7 +581,7 @@ void input_probe_stop(void);
  * COM and loads its endpoint stack lazily. Returns 0 if there is no usable
  * device; Offroad then uses a host-corrected silent path whose cookies retire
  * immediately instead of remaining "playing" forever. */
-int  audio_preload(unsigned dcs_ms, unsigned volume_percent,
+int  audio_preload(unsigned dcs_us, unsigned volume_percent,
                    const char *routing, unsigned balance);
 int  audio_ready(void);
 
@@ -680,12 +737,11 @@ typedef struct {
     unsigned speed_percent;/* virtual game-clock rate; 100 = real time  */
     unsigned dip_switches;/* cabinet DIP byte reported by the I/O board  */
     unsigned io_ms;       /* I/O board poll period                       */
-    char io_backend[16];  /* only `sim` is implemented; `serial` is M6's    */
-    char io_port[32];     /* the serial port M6 will reach a real board on  */
+    char io_backend[16];  /* only `sim` is implemented; `serial` is not yet */
+    char io_port[32];     /* the serial port a real board will be on        */
     int  input_background;/* sample cabinet keys even when console is foreground */
     int  lfb_shadow;      /* cached shadow for the software 2D blitter */
     int  sse_ftz;         /* FTZ+DAZ on the render thread; measured inert   */
-    int  r2_cache;        /* hash-index HT.R2 directory lookups        */
     unsigned window_scale;/* integer host-window scale; 0 = largest that fits */
     unsigned render_scale;/* wrapper's internal render multiplier; 1 = native */
     int  fullscreen;      /* start borderless-fullscreen; Alt+Enter toggles   */
@@ -722,7 +778,7 @@ typedef struct {
     int  win32_counting;  /* count calls through the 123 ETS->Win32 entries   */
     int  audio;           /* enable the WASAPI mixer behind the YMF boundary */
     unsigned audio_volume;/* host-side output gain, percent                   */
-    unsigned dcs_ms;      /* DCS driver tick; the cabinet's audio IRQ was ~5.4 */
+    unsigned dcs_us;      /* DCS driver tick in us; the cabinet's was 5400 */
     char audio_routing[16];/* mix | cabinet | front; see audio.c            */
     unsigned audio_balance;/* front..seat bus balance, 0..100; 50 = both full */
     unsigned profile_ms;  /* diagnostic sampling period, 0 = off */
@@ -764,6 +820,12 @@ typedef struct {
 extern shim_config_t g_cfg;
 
 void config_defaults(shim_config_t *c);
+
+/* Write the shipped ini out of this binary's own resources when the pack has
+ * none. Call once, after chdir_to_own_folder() and before any reader. It
+ * NEVER overwrites, so a pack whose file was replaced by a newer build's zip
+ * cannot exist: the zip does not carry one. Nonzero when a file was created. */
+int  config_seed_ini(const char *path);
 
 /* Load one file in two passes: shared sections, then selected-title sections.
  * Command-line values have final precedence. A missing file preserves defaults. */

@@ -2,12 +2,10 @@
 """glide2_abi.py -- a tripwire: Glide 2 argument sizes, asserted and not consulted.
 
 This table covers the entries whose call-site ``add esp, N`` cleanup is folded
-or absent. It SUPPLIES no value: ``scripts/glide2_pushes.py`` derives those
-sizes from the games' own push sequences, and ``gen-gamedefs.py`` asserts the
+or absent, and it SUPPLIES no value: ``scripts/glide2_pushes.py`` derives those
+sizes from the games' own push sequences and ``gen-gamedefs.py`` asserts the
 result against every row below, reporting a conflict rather than preferring
-either. The two agree on all 16 rows in Hydro and all 13 present in Offroad.
-
-Keep it. A silent disagreement between two derivations is exactly the class of
+either. A silent disagreement between two derivations is exactly the class of
 error that looks like a result, and a table that is only ever compared against
 costs nothing to carry.
 """

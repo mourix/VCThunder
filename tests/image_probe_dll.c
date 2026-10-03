@@ -5,15 +5,9 @@
  * ask two things that cannot be asked of the host itself: do TLS callbacks and
  * __thread storage still work for a module loaded before the mapping, on a
  * thread created after it, and does delay-load resolution still work when its
- * first call happens after the mapping. (VCThunder.exe must not have a TLS
- * directory at all, and VCThunder.dll has no delay-loaded import to fire.)
- *
- * Nothing ships this: `make probe-dll` builds it, `make pack` does not deliver
- * it, and the probe reports both cases as NOT RUN when it is absent. The
- * delay-load path is mingw's own (`__delayLoadHelper2`, reached through a
- * tail-merge thunk), and its failure hook is installed here so a failure is
- * reported instead of jumping to NULL.
- * /
+ * first call happens after the mapping. Nothing ships this: `make probe-dll`
+ * builds it, `make pack` does not deliver it, and the probe reports both cases
+ * as NOT RUN when it is absent.
  */
 #include <windows.h>
 #include <delayimp.h>

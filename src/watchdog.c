@@ -2,12 +2,10 @@
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * A separate thread watching the frame heartbeat. On a timeout it samples the
- * render thread and walks its validated EBP chain, which is how a spin, a
- * block and a modal loop inside DefWindowProc are told apart: they look
- * identical from the outside and need completely different fixes.
- *
- * Self-contained: it owns its thread and reads one timestamp. See
- * src/glide_int.h for the seam.
+ * render thread and walks its validated EBP chain, which is how a spin, a block
+ * and a modal loop inside DefWindowProc are told apart: they look identical
+ * from the outside and need completely different fixes. Self-contained: it
+ * owns its thread and reads one timestamp; src/glide_int.h is the seam.
  */
 #include "vcthunder.h"
 #include "glide_int.h"

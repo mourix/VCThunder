@@ -2,64 +2,17 @@
 # SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
 """chd.py -- read a MAME CHD v5 without MAME.
 
-WHY THIS EXISTS
-    `tools/ingest-chd.py` is the front door, and until now it opened only for
-    someone who already had `chdman`. That is a 100 MB MAME download to run one
-    command once, and it costs the user disk as well: chdman writes the WHOLE
-    uncompressed disk before anything is read out of it -- 3.2 GB for Hydro and
-    6.4 GB for Offroad -- and the ingest then copies ~1 GB of files out and
-    deletes the rest.
+A 124-byte big-endian header names four compressors, the hunk size and the unit
+size, and carries a SHA-1 of the uncompressed image; a compressed map then says,
+per hunk, which codec it used, where its payload is, how long it is, and a
+CRC-16 of the DECODED hunk. So this decodes only the hunks the wanted files
+occupy: no chdman download, no whole-disk scratch image, no PATH, and nothing
+but the Python standard library. A CHD older than v5 or one with a parent raises
+ChdUnsupported and ingest-chd.py falls back to chdman with the reason printed.
 
-    This reads the CHD directly, decoding only the hunks the files actually
-    occupy. No download, no scratch image, no PATH, and nothing to install:
-    everything here is the Python standard library, which the build already
-    requires. It is the same move `scripts/x86len.py` made for capstone.
-
-    `chdman` remains the fallback, not the front door: a CHD older than v5, or
-    one with a parent, raises ChdUnsupported and ingest-chd.py falls back to it
-    with the reason printed.
-
-WHAT A v5 CHD IS, IN THE ORDER THIS FILE READS IT
-    A 124-byte big-endian header names four compressors, the hunk size (4096
-    here) and the unit size (512), and carries a SHA-1 of the uncompressed
-    image. A compressed MAP then says, per hunk, which of those four codecs it
-    used, where its payload is, how long it is, and a CRC-16 OF THE DECODED
-    HUNK. That last field is what makes this file checkable: every hunk carries
-    its own oracle, so a decoder bug cannot pass silently, and `--verify`
-    decodes an entire image and reports both the per-hunk CRCs and the image
-    SHA-1 against the header's.
-
-    Measured against the user's own two CHDs, 2026-08-22: all 788,256 hunks of
-    Hydro and all 1,574,370 of Offroad decode with a matching CRC-16, and both
-    images' SHA-1 matches the header -- 30 s and 1m42s on sixteen cores. The
-    codec histogram is
-    identical to `chdman info -v`'s, category by category, which is how the map
-    decoder was checked before any hunk was.
-
-THE THREE THINGS THAT ARE EASY TO GET WRONG
-    1. `mapbytes` in the map header counts the payload AFTER those 16 bytes.
-       Reading the header and then starting the bitstream 16 bytes further in
-       still decodes a plausible-looking tree, and then fails on a length.
-    2. The map's CRC-16 seed is 0xFFFF, not 0. A zero seed produces a mismatch
-       that looks like a map bug and is not one.
-    3. A COMPRESSION_SELF entry's 48-bit field is a HUNK NUMBER, not a byte or
-       unit offset. Scaling it by unitbytes gives a reader that decodes 9% of
-       an image correctly and mis-assembles the rest -- and the 9% is the part
-       that carries the CRCs, so a spot check of the codecs will not see it.
-
-HOW IT WAS DERIVED, AND WHY THAT IS RECORDABLE
-    From the container's own structure, black box. No MAME or libchdr source
-    was read; `chdman info -v` was RUN and its output compared, which is the
-    same standing this project gives 86Box. Every layer here carries its own
-    oracle -- a per-hunk CRC-16 of the DECODED hunk, and the image's SHA-1 --
-    so a wrong decoder cannot pass, and the three corrections listed above were
-    each found as a failing checksum rather than avoided by transcription --
-    which is the evidence, because a transcription does not make those
-    mistakes. The project's sourcing record carries the validation run.
-
-NO GAME MATERIAL IS IN THIS FILE. It is a container reader written from the
-format's own structure, and it reads the user's own lawful dump on the user's
-own disk.
+Written from the container's own structure, black box: no MAME or libchdr source
+was read. `chdman info -v` was RUN and its output compared, which is the standing
+this project gives any comparator. NO GAME MATERIAL IS IN THIS FILE.
 """
 
 import collections
@@ -88,7 +41,7 @@ class ChdUnsupported(ChdError):
 #
 # Two bytes at a time. A 16-bit register that consumes 16 bits per step depends
 # only on `crc ^ word`, so one 65,536-entry table replaces two lookups and two
-# shifts per pair -- 2,048 iterations for a hunk instead of 4,096 x 4 ops. That
+# shifts per pair, 2,048 iterations for a hunk instead of 4,096 x 4 ops. That
 # matters: this runs on every decoded hunk, and the byte-at-a-time version cost
 # more than decompressing the hunk did.
 
@@ -128,7 +81,7 @@ class BitReader:
     Reading past the end is not an error and must not be one here: the huffman
     trees are written without padding, so the last symbol of a hunk can
     legitimately need bits the encoder never wrote. Established the same way as
-    everything else in this file -- a reader that faults there stops on the
+    everything else in this file; a reader that faults there stops on the
     final symbol of hunks whose CRC-16 is otherwise reachable.
     """
 
@@ -344,7 +297,7 @@ def huff_decompress(raw, outlen):
 #
 # CHD's `flac` codec is a bare stream of FLAC frames: one leading byte, 'L' or
 # 'B', says whether the 16-bit samples are little- or big-endian, and the rest
-# has no STREAMINFO and no metadata blocks at all -- a decoder handing these to
+# has no STREAMINFO and no metadata blocks at all, a decoder handing these to
 # a general FLAC library has to synthesise a header for it first. So this needs
 # the frame layer of the published FLAC format only, and it is used on a
 # DISK IMAGE: the "samples" are the user's file data reinterpreted as two
@@ -560,7 +513,7 @@ _KIND = {_NONE: "Uncompressed", _SELF: "Copy from self", _PARENT: "From parent"}
 #
 # The four codecs are the whole cost of a read: 86% of an ingest is CPU inside
 # huff_decompress and flac_decompress, and 14% is reading the payloads. Hunks
-# are independent, so this is embarrassingly parallel -- which is what makes a
+# are independent, so this is embarrassingly parallel, which is what makes a
 # pure-Python reader practical rather than merely correct. On a 16-thread part
 # it turned Offroad's ingest from 5m20s into 45 s, and Hydro's from 70 s into
 # 11 s, which is level with chdman on the same machine.
@@ -599,6 +552,18 @@ def default_jobs():
     return max(1, min(os.cpu_count() or 1, 32))
 
 
+# THREE THINGS IN THE MAP ARE EASY TO GET WRONG, and each was found as a
+# failing checksum rather than avoided by transcription:
+#
+#   1. `mapbytes` in the map header counts the payload AFTER those 16 bytes.
+#      Starting the bitstream 16 bytes further in still decodes a
+#      plausible-looking tree, and then fails on a length.
+#   2. The map's CRC-16 seed is 0xFFFF, not 0. A zero seed produces a mismatch
+#      that looks like a map bug and is not one.
+#   3. A COMPRESSION_SELF entry's 48-bit field is a HUNK NUMBER, not a byte or
+#      unit offset. Scaling it by unitbytes decodes 9% of an image correctly
+#      and mis-assembles the rest, and the 9% is the part that carries the
+#      CRCs, so a spot check of the codecs will not see it.
 class Chd:
     """A CHD v5, open for reading, hunk by hunk."""
 
@@ -650,7 +615,7 @@ class Chd:
         self.jobs = default_jobs() if jobs is None else max(1, int(jobs))
         self._pool = None
 
-    # -- map --------------------------------------------------------------
+    # map ----------------------------------------------------------------
 
     def _read_map(self):
         n = self.hunkcount
@@ -749,7 +714,7 @@ class Chd:
             raw[o + 10:o + 12] = int(self.crcs[h]).to_bytes(2, "big")
         return crc16(bytes(raw)), self.mapcrc
 
-    # -- hunks -------------------------------------------------------------
+    # hunks -------------------------------------------------------------
 
     def hunk(self, h):
         """One hunk's bytes, decoded and CRC-checked."""
@@ -817,7 +782,7 @@ class Chd:
         """Move a hunk to the young end. THE CACHE MUST BE AN LRU AND NOT A
         QUEUE. A disk image is mostly one hunk of zeroes with a million "copy
         from self" entries pointing at it, and each of those caches the alias as
-        well -- so under a plain insertion-order queue the single most valuable
+        well, so under a plain insertion-order queue the single most valuable
         entry in the cache is evicted by the very references that want it, and
         then decoded again, and again. Measured on Offroad, where 1,117,652 of
         the 1,198,835 self-references point at one hunk: this line is the
@@ -836,7 +801,7 @@ class Chd:
             for k in list(cache)[:self._cache_max // 8]:
                 del cache[k]
 
-    # -- decoding in parallel ----------------------------------------------
+    # decoding in parallel ----------------------------------------------
 
     def _get_pool(self):
         """The worker pool, made on first use and never on a serial run."""
@@ -901,7 +866,7 @@ class Chd:
         for h, data in zip(todo, self.decode_stream(todo)):
             self._store(h, data)
 
-    # -- metadata ----------------------------------------------------------
+    # metadata ----------------------------------------------------------
 
     def metadata(self):
         """Every metadata entry as (tag, index, bytes). The disk geometry lives
@@ -1064,11 +1029,19 @@ def info(path):
 
 
 def verify(path, jobs=None):
+    """Decode a whole image and check every hunk's CRC-16 and the image SHA-1.
+
+    Every layer here carries its own oracle, so a decoder bug cannot pass
+    silently. Measured over both of the maintainer's CHDs: all 788,256 hunks of
+    Hydro and all 1,574,370 of Offroad decode with a matching CRC-16, both
+    images' SHA-1 match the header, and the codec histogram is identical to
+    `chdman info -v`'s category by category.
+    """
     """Decode EVERY hunk and check the two things the file says about itself:
     each hunk's CRC-16 (inside Chd.hunk) and the SHA-1 of the whole image.
 
-    This is the cross-check that needs no MAME. It is also slow -- it decodes
-    the entire disk rather than the ~1 GB of files an ingest touches -- and it
+    This is the cross-check that needs no MAME. It is also slow, it decodes
+    the entire disk rather than the ~1 GB of files an ingest touches, and it
     is the reason to trust the fast path that does not."""
     # A whole-image pass walks every "copy from self" reference there is, and
     # the ones a small cache drops have to be decoded again. 64 MB of hunks is

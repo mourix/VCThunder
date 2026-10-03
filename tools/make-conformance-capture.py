@@ -2,30 +2,12 @@
 # SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
 """make-conformance-capture.py -- a synthetic .vglc stream for the rasteriser.
 
-WHY THIS EXISTS
----------------
-The renderer's strongest instrument ("replay a capture and prove the change
-moved no pixel") cannot run inside `make check` on a real capture: every
-capture of a title is game material, and `tools/scan-contraband.py` correctly
-refuses to let any into this repository.
-
-This generator has no game in it. The scene below is authored here, from the
-published Glide semantics and this project's own measurements, so the capture
-it writes is project-authored text expanded into a binary at build time. That
-makes the whole loop (generate, replay, compare hashes) something a check
-target can run on a clone with no dumps.
-
-WHAT IT DOES *NOT* REPLACE
---------------------------
-An 86Box oracle diff. This says "the renderer draws what it drew before"; it
-cannot say "the renderer draws what a Voodoo2 drew". Those are different
-questions and only the second one needs a comparator. Nor is it a substitute
-for the game captures: a synthetic scene covers the paths someone thought of,
-and Offroad's 408 palette downloads in 60 frames are still the thing that found
-a texture-cache bug 1,600 identical Hydro frames called perfect.
-
-The golden hashes are per-toolchain: they are this renderer's own output, and a
-different compiler may legitimately differ in the last bit.
+The renderer's strongest instrument, replay a capture and prove the change moved
+no pixel, cannot run inside `make check` on a real capture: every capture of a
+title is game material and tools/scan-contraband.py correctly refuses to let one
+into this repository. The scene below has no game in it. It is authored here
+from the published Glide semantics and this project's own measurements, so the
+whole loop (generate, replay, compare hashes) runs on a clone with no dumps.
 """
 
 from __future__ import annotations
@@ -395,9 +377,38 @@ def build(cap: Capture):
     cap.call("grLfbUnlock", 1, 1)
     cap.call("grBufferSwap", 1)
 
+    # --- frame 7: the tie rule under a LOWER-LEFT origin -------------------
+    #
+    # Both games open lower-left. Glide's filling rule puts a pixel centre
+    # that lies exactly on a horizontal edge inside for the edge with the
+    # LOWER y and outside for the higher, in the origin the game chose. A
+    # full-screen quad from 0.5 to size + 0.5 therefore covers every row from
+    # the bottom of the screen up, and the clip, exclusive at its max, keeps
+    # only the top row out. Applied after the flip to top-down storage, the
+    # rule would drop the bottom row instead.
+    cap.frame()
+    cap.call("grSstOrigin", 1)                           # GR_ORIGIN_LOWER_LEFT
+    cap.call("grClipWindow", 0, 0, W - 1, H - 1)
+    cap.call("grBufferClear", 0x00000000, 0xFF, 0xFFFF)
+    cap.call("grColorCombine", 1, 0, 0, 0, 0)            # LOCAL, iterated
+    cap.call("grAlphaBlendFunction", 4, 0, 4, 0)
+    quad(cap,
+         vertex(0.5, 0.5, 255, 255, 255, 255, 1.0),
+         vertex(W + 0.5, 0.5, 255, 255, 255, 255, 1.0),
+         vertex(W + 0.5, H + 0.5, 255, 255, 255, 255, 1.0),
+         vertex(0.5, H + 0.5, 255, 255, 255, 255, 1.0))
+    cap.call("grBufferSwap", 1)
+
     cap.call("grGlideShutdown")
 
 
+# WHAT THIS DOES NOT REPLACE: an 86Box oracle diff. It says "the renderer draws
+# what it drew before"; it cannot say "the renderer draws what a Voodoo2 drew".
+# Nor does it replace the game captures: a synthetic scene covers the paths
+# somebody thought of, and Offroad's 408 palette downloads in 60 frames are
+# still the thing that found a texture-cache bug 1,600 identical Hydro frames
+# called perfect. The golden hashes are per-toolchain, because they are this
+# renderer's own output and another compiler may differ in the last bit.
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("out", type=Path)

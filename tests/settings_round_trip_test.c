@@ -1,36 +1,18 @@
 /* settings_round_trip_test.c -- what the launcher writes is what the host reads.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * One ini, three readers (src/ini.h says why they stay three). Two other
- * checks hold pieces of that arrangement still: tools/check-launcher-settings.py
- * holds settings.def against the shipped file, and tests/ini_doc_test.c holds
- * the document model to its own round trip. Neither crosses the gap between
- * them -- that a value the LAUNCHER writes is a value the HOST reads back to
- * the same thing -- and that gap is where three parsers drift. It is widest at
- * the keys config.c does not own: [analog], [ffb] and the binding sections go
- * through the third reader, which no other check touches.
- *
- * So this drives the whole of settings.def through the real path:
- *
- *   ini_doc_set + ini_doc_save   the launcher's Apply, byte for byte
- *   config_load_shared           the host's own pass, for the keys it stores
- *   ini_read_scoped              the [analog]/[ffb]/bindings reader, for the rest
- *
- * and asserts the value that comes back. Every entry, every choice in its
- * choice set, both ends of every numeric range, and every spelling of a
- * boolean -- because settings.def is the table, not a sample of it, and this
- * project's standing rule is that finding one instance of a class means
- * auditing the class.
- *
- * NOT covered, deliberately: whether a key belongs in the section it is in
- * (check-launcher-settings.py), and what the host does with a value it cannot
- * parse (tests/config_test.c). This one asks a single question and a value
- * that fails to parse would answer it by accident.
+ * One ini, three readers, and the gap between them is where three parsers
+ * drift: a value the LAUNCHER writes must be a value the HOST reads back to the
+ * same thing. It is widest at the keys config.c does not own, because [analog],
+ * [ffb] and the binding sections go through a reader no other check touches.
+ * So this drives the whole of settings.def through the real path and asserts
+ * what comes back.
  */
 #include "../src/ini_doc.c"
 #include "../src/ini.c"
 #include "../src/settings.c"
 #include "../src/config.c"
+#include "../src/di_role.c"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,7 +23,7 @@
  * config.c reports a value it rejected through the log, and resolves widescreen
  * against the aspect. Both are somebody else's translation unit; here they are
  * the smallest thing that lets the parser run. Nothing in this file provokes a
- * note -- every value it writes is one settings.def says is legal -- so a line
+ * note, every value it writes is one settings.def says is legal, so a line
  * arriving here at all is a finding, and it is printed. */
 static int notes_logged;
 
@@ -116,6 +98,15 @@ static unsigned candidates(const setting_desc_t *d,
             size_t len = end ? (size_t)(end - p) : strlen(p);
             snprintf(one, sizeof one, "%.*s", (int)len, p);
             add(one, list, &n);
+            /* And every choice on another controller, `twcs:z`, where the
+             * row takes one (SF_AXIS_REF). */
+            if (d->flags & SF_AXIS_REF) {
+                snprintf(one, sizeof one, "twcs:%.*s", (int)len, p);
+                add(one, list, &n);
+            }
+            /* And a role on an XInput pad slot, in its names. */
+            if ((d->flags & SF_AXIS_REF) && !strcmp(one, "twcs:none"))
+                add("twcs:rt", list, &n);
             if (!end)
                 break;
             p = end + 1;
@@ -142,8 +133,8 @@ static unsigned candidates(const setting_desc_t *d,
         break;
     }
 
-    /* A free-text field has no choice set and often no default either --
-     * `dinput_name` is a product-name substring and ships empty -- so the table
+    /* A free-text field has no choice set and often no default either;
+     * `dinput_name` is a product-name substring and ships empty, so the table
      * on its own leaves nothing to try. One awkward string covers all of them,
      * and it is awkward on purpose: a space, a backslash, and a '#' that is NOT
      * preceded by whitespace and so is part of the value rather than the start
@@ -217,7 +208,7 @@ static int launcher_writes(const char *path, const char *section,
 }
 
 /* Every entry the launcher shows, which is exactly the set it writes back on
- * Apply -- vct_ui_setting, not vct_setting: a developer switch is never in the
+ * Apply, vct_ui_setting, not vct_setting: a developer switch is never in the
  * file the launcher saves, so round-tripping one would test a path the product
  * does not have. */
 static void test_every_ui_setting(const char *path)
@@ -236,6 +227,13 @@ static void test_every_ui_setting(const char *path)
         for (j = 0; j < n; j++) {
             const char *v = list[j];
 
+            /* The launcher's own gate first: validate_settings() greys Play
+             * on a value it refuses, so a legal value it refuses is a value
+             * nobody can use. */
+            if (d->type == ST_ENUM &&
+                !((d->flags & SF_AXIS_REF) ? vct_axis_choice_ok(d->choices, v)
+                                           : vct_choice_contains(d->choices, v)))
+                fail(d, v, "the launcher's validation refuses it");
             if (!launcher_writes(path, d->section, d->key, v)) {
                 fail(d, v, "the launcher refused to write it");
                 continue;
@@ -250,6 +248,22 @@ static void test_every_ui_setting(const char *path)
                 ini_read_scoped(path, d->section, d->key, "", got, sizeof got);
                 if (strcmp(got, v) != 0)
                     fail(d, v, "ini_read_scoped read back something else");
+                /* An axis role is read by di_role.c's grammar: the label
+                 * and the axis must both come back. */
+                if (d->flags & SF_AXIS_REF) {
+                    char label[INI_LABEL_CAP], axis[32], want[32];
+                    const char *colon = strchr(v, ':');
+                    di_axis_t a;
+
+                    snprintf(want, sizeof want, "%s", colon ? colon + 1 : v);
+                    if (!ini_parse_axis_ref(got, label, sizeof label, axis,
+                                            sizeof axis) ||
+                        !(di_axis_parse(axis, 0, &a) ||
+                          di_axis_parse(axis, 1, &a)) ||
+                        strcmp(label, colon ? "twcs" : "") ||
+                        strcmp(di_axis_name(a), want))
+                        fail(d, v, "di_role.c reads it as another axis");
+                }
             } else {
                 shim_config_t c;
                 config_defaults(&c);
@@ -355,6 +369,20 @@ static void test_per_title_pass(const char *path)
     }
 }
 
+/* THE PATH IS THE REAL ONE, AND ALL THREE READERS ARE IN IT:
+ *
+ *   ini_doc_set + ini_doc_save   the launcher's Apply, byte for byte
+ *   config_load_shared           the host's own pass, for the keys it stores
+ *   ini_read_scoped              the [analog]/[ffb]/bindings reader
+ *
+ * Every entry, every choice in its choice set, both ends of every numeric
+ * range and every spelling of a boolean, because settings.def is the table and
+ * not a sample of it.
+ *
+ * NOT covered, deliberately: whether a key belongs in the section it is in
+ * (tools/check-launcher-settings.py), and what the host does with a value it
+ * cannot parse (tests/config_test.c). This asks a single question, and a value
+ * that fails to parse would answer it by accident. */
 int main(void)
 {
     char root[MAX_PATH], folder[MAX_PATH], path[MAX_PATH];

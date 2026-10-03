@@ -1,53 +1,13 @@
 # SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
 """x86len.py -- a length-only x86-32 decoder, so that capstone is optional.
 
-WHY THIS EXISTS. `make defs` is the one step a person building this from their
-own dump cannot skip, and until now it needed Python's `capstone`. That is a
-native extension, and on the host this project most wants to be easy -- an
-MSYS2 MINGW32 shell, which is how you build here without WSL -- there is no way
-to install it: the mingw32 and clang32 repositories carry no capstone package
-at all, not the binding and not the C library, so pacman cannot help and pip
-falls back to building capstone from source. This module removes the
-dependency. capstone is still used when it is importable, and is still the
-oracle this was written against; see glide2_pushes.py.
-
-WHAT IT DECODES. Only what the push sweep reads: an instruction's LENGTH, and
-which of eight classes it falls into. It does not name registers, it does not
-name the instruction, and it has no opinion about anything the walk-back in
-glide2_pushes._pushes_before() does not test. Unknown encodings return None,
-which the sweep handles exactly as it already handles capstone stopping:
-resynchronise one byte later. A 1 MB CODE segment with jump tables and string
-data in it does that thousands of times either way.
-
-THE CLASS IS THE PRINTED MNEMONIC, NOT THE OPCODE. The walk-back matches on
-capstone's mnemonic string, so this has to reproduce capstone's *naming*, which
-is not the same thing as reproducing x86. Four cases cost a round each:
-`f0 2b 20` is `lock sub` and so is not a `sub`; `f2 79` is `bnd jns` and so
-does not start with `j`; `f3 c2` is `repz ret` and so is not a `ret`, while
-`f3 7d` is a plain `jge` because F3 means nothing before a Jcc; and `9a` is
-`lcall`, not `call`. An `add`/`sub` against esp also counts in every encoding,
-not just the immediate forms -- capstone prints `sub esp, eax` for `2b e0` and
-the walk-back reads that as a stack adjustment.
-
-VALIDATION (2026-08-22, both titles, whole CODE segment).
-
-  * Instruction-by-instruction against capstone 5.0.7 at every offset both
-    decoders reached: Hydro 334,142 shared offsets, Offroad 360,642, and
-    ZERO disagreements in either length or class.
-  * capstone reaches ~0.1% more offsets than this does (it decodes SSE forms
-    this skips), so the two resynchronise differently inside data. That shows
-    up once: Hydro's `_grSstSelect` histogram is {4: 4} under capstone and
-    {4: 3, 0: 1} here, one extra call site picked up out of a jump table.
-    It splits the histogram, so this module returns nothing for that name --
-    the conservative direction, and the direction the module is built to fail
-    in. Its argument size is observable from the cleanup immediate anyway.
-  * The only thing that actually has to hold, and does: `gen-gamedefs.py`
-    emits BYTE-IDENTICAL profile sources for both titles with either decoder.
-    Hydro 94b9d7fb40f5be1f..., Offroad e549d9aef55b5a79... (sha256 of the
-    emitted source, both decoders).
-
-Re-run all of it with `python3 scripts/x86len.py --verify`, which needs
-capstone and is what `make check` runs when capstone is present.
+`make defs` is the one step a person building from their own dump cannot skip,
+and capstone is a native extension the MSYS2 mingw32 and clang32 repositories
+carry no package for at all. This decodes only what the push sweep reads: an
+instruction's LENGTH and which of eight classes it falls into, reproducing
+capstone's printed MNEMONIC rather than x86 itself. An unknown encoding returns
+None, which the sweep resynchronises past exactly as it does when capstone
+stops. capstone is still used when it is importable and is still the oracle.
 """
 
 PUSH, BRANCH, CALL, RET, LEAVE, ADDESP, SUBESP, OTHER = (
@@ -311,6 +271,22 @@ def decode(data, off, image_base):
 # Not a unit test with hand-written cases: the corpus is the two dumps, and the
 # oracle is capstone. It reports and exits non-zero on any disagreement.
 def _verify():
+    """Cross-check every offset against capstone, and report what it finds.
+
+    What `make check` runs when capstone is present. Measured over both
+    titles' whole CODE segments: 334,142 shared offsets on Hydro and 360,642
+    on Offroad, with ZERO disagreements in either length or class.
+
+    capstone reaches ~0.1% more offsets than this does (it decodes SSE forms
+    this skips), so the two resynchronise differently inside data. That shows
+    up once: Hydro's `_grSstSelect` histogram is {4: 4} under capstone and
+    {4: 3, 0: 1} here, one extra call site picked up out of a jump table. It
+    splits the histogram, so this module returns nothing for that name, which
+    is the conservative direction and the one it is built to fail in.
+
+    The thing that actually has to hold, and does: gen-gamedefs.py emits
+    BYTE-IDENTICAL profile sources for both titles with either decoder.
+    """
     import os
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
