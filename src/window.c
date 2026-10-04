@@ -132,6 +132,18 @@ static void adopt(HWND hwnd)
     hook_window(hwnd);
 }
 
+/* The classic console host reports its window as this process's, and at its
+ * default size it outsizes a scale-1 game window. */
+static int is_console_window(HWND hwnd)
+{
+    char cls[32];
+
+    if (hwnd == GetConsoleWindow())
+        return 1;
+    return GetClassNameA(hwnd, cls, sizeof cls) &&
+           strcmp(cls, "ConsoleWindowClass") == 0;
+}
+
 static BOOL CALLBACK find_process_window(HWND hwnd, LPARAM opaque)
 {
     window_search_t *s = (window_search_t *)opaque;
@@ -140,7 +152,8 @@ static BOOL CALLBACK find_process_window(HWND hwnd, LPARAM opaque)
     LONG area;
 
     GetWindowThreadProcessId(hwnd, &pid);
-    if (pid != s->pid || !IsWindowVisible(hwnd) || !GetClientRect(hwnd, &r))
+    if (pid != s->pid || !IsWindowVisible(hwnd) || is_console_window(hwnd) ||
+        !GetClientRect(hwnd, &r))
         return TRUE;
     area = (r.right - r.left) * (r.bottom - r.top);
     if (area > s->area) {
