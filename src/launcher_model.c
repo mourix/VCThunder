@@ -160,6 +160,74 @@ static int setting_is_device_scoped(unsigned i)
            k_settings[i].key[n] == '_';
 }
 
+/* ---- one controller per cabinet ------------------------------------------
+ *
+ * The host reads [<title>.analog] before [analog] (ini_read_scoped(), and the
+ * five steps of ini_read_device_scoped()), so the two cabinets can be driven by
+ * different controllers. A key that CHOOSES, which controller drives and which
+ * of its axes steers, accelerates and brakes, is the cabinet's once the file
+ * splits them; every fact about a controller (invert, deadzone, range, pedal
+ * mode) stays shared, or one wheel would need calibrating once per game.
+ *
+ * Split is what the file says: any choice key in a [<title>.analog...]
+ * section. While split, s_value[] holds ONE cabinet's choices, s_view_title's,
+ * and the other cabinet's live in s_doc until Apply writes them. */
+static int s_split;
+static int s_view_title;                /* 0 hydro, 1 offroad               */
+/* Lines changed in s_doc that Apply has not written yet: the outgoing
+ * cabinet's choices on a switch, and what split or join rewrote. */
+static int s_doc_pending;
+static const char *const k_title_id[2] = { "hydro", "offroad" };
+typedef struct {
+    char section[96];
+    char key[96];
+} doc_key_ref_t;
+#define TITLE_CHOICE_MAX 64
+static unsigned title_choice_lines(doc_key_ref_t *out, unsigned max);
+
+/* The four keys that choose WHICH controller. The host reads them through
+ * ini_read_scoped() only, [<title>.analog] then [analog]: never from a
+ * controller's own section, which cannot say which controller it is. */
+static int key_is_selector(const char *key)
+{
+    static const char *const k_selector[] = {
+        "provider", "dinput_name", "xinput_device", "winmm_device" };
+    size_t k;
+
+    for (k = 0; k < sizeof k_selector / sizeof k_selector[0]; k++)
+        if (!_stricmp(key, k_selector[k]))
+            return 1;
+    return 0;
+}
+
+static int key_is_title_choice(const char *key)
+{
+    static const char *const k_role[] = {
+        "_steering_axis", "_throttle_axis", "_brake_axis" };
+    size_t n = strlen(key), k;
+
+    if (key_is_selector(key))
+        return 1;
+    for (k = 0; k < sizeof k_role / sizeof k_role[0]; k++) {
+        size_t m = strlen(k_role[k]);
+        if (n > m && !_stricmp(key + n - m, k_role[k]))
+            return 1;
+    }
+    return 0;
+}
+
+static int setting_is_title_choice(unsigned i)
+{
+    return !_stricmp(k_settings[i].section, "analog") &&
+           key_is_title_choice(k_settings[i].key);
+}
+
+/* The cabinet whose choices s_value[] holds, or -1 when both share them. */
+static int scope_title(void)
+{
+    return s_split ? s_view_title : -1;
+}
+
 static int setting_resolve(unsigned i, char *out, size_t out_size);
 static model_attached_fn s_attached;
 /* XInput's user indices, 0..3: an `xinput:` line names one by number. */
@@ -243,8 +311,8 @@ static int role_fact_label(unsigned k, char *out, size_t out_size)
     return 1;
 }
 
-/* The section this key is READ FROM FIRST and WRITTEN TO. */
-const char *setting_section(unsigned i)
+/* The section this key is read from first and written to, cabinets aside. */
+static const char *base_section(unsigned i)
 {
     static char scoped[64];
     char label[INI_LABEL_CAP];
@@ -257,6 +325,22 @@ const char *setting_section(unsigned i)
     if (!setting_is_device_scoped(i))
         return k_settings[i].section;
     snprintf(scoped, sizeof scoped, "%s.%s", k_settings[i].section, s_profile);
+    return scoped;
+}
+
+/* The section this key is READ FROM FIRST and WRITTEN TO. A choice made per
+ * cabinet goes under the cabinet's prefix, [hydro.analog.tmx] and never
+ * [hydro.analog] for an axis: the device's own section beats the title's, so
+ * an axis written to [hydro.analog] would lose to [analog.tmx] in silence. */
+const char *setting_section(unsigned i)
+{
+    static char scoped[96];
+    const char *base = base_section(i);
+    int t = scope_title();
+
+    if (t < 0 || !setting_is_title_choice(i))
+        return base;
+    snprintf(scoped, sizeof scoped, "%s.%s", k_title_id[t], base);
     return scoped;
 }
 
@@ -314,19 +398,44 @@ int model_sync_role_facts(void (*moved)(const char *section, const char *key))
  * one, the launcher's half of ini_read_device_scoped(), over the document
  * model. 0 when neither has it; the caller supplies the table's default.
  *
- * No title scope here: the launcher edits the shared sections and shows the
- * per-title binding pages separately, so this is the device axis only. */
+ * A choice made per cabinet walks the host's whole order: [<title>.analog.L],
+ * [analog.L], [<title>.analog], [analog]. Every other key is shared, so the
+ * title steps are not consulted for it, here or when it is written. */
+static int setting_resolve_as(unsigned i, int t, char *out, size_t out_size)
+{
+    const char *canon = k_settings[i].section, *key = k_settings[i].key;
+    char base[96], scoped[128];
+
+    /* A TITLE STEP WITH AN EMPTY VALUE IS NO ANSWER: ini_read_scoped() and
+     * ini_read_device_scoped() fall through it, so this does too, or the page
+     * would show "none" while the game reads the shared value. */
+    snprintf(base, sizeof base, "%s", base_section(i));
+    if (t >= 0) {
+        snprintf(scoped, sizeof scoped, "%s.%s", k_title_id[t], base);
+        if (ini_doc_get(&s_doc, scoped, key, out, out_size) && out[0])
+            return 1;
+    }
+    if (ini_doc_get(&s_doc, base, key, out, out_size))
+        return 1;
+    if (!_stricmp(base, canon))
+        return 0;
+    if (t >= 0) {
+        snprintf(scoped, sizeof scoped, "%s.%s", k_title_id[t], canon);
+        if (ini_doc_get(&s_doc, scoped, key, out, out_size) && out[0])
+            return 1;
+    }
+    return ini_doc_get(&s_doc, canon, key, out, out_size);
+}
+
+/* As the shown cabinet reads it when the key is one of its choices, else the
+ * shared answer. setting_resolve_as() with the OTHER cabinet is right only for
+ * a key whose section does not depend on the shown cabinet's controller: a
+ * selector, never an axis. */
 static int setting_resolve(unsigned i, char *out, size_t out_size)
 {
-    const char *section = setting_section(i);
+    int t = setting_is_title_choice(i) ? scope_title() : -1;
 
-    if (ini_doc_get(&s_doc, section, k_settings[i].key, out, out_size))
-        return 1;
-    if (_stricmp(section, k_settings[i].section) &&
-        ini_doc_get(&s_doc, k_settings[i].section, k_settings[i].key,
-                    out, out_size))
-        return 1;
-    return 0;
+    return setting_resolve_as(i, t, out, out_size);
 }
 
 /* The attached controllers, from whoever can enumerate them (the launcher's
@@ -429,6 +538,163 @@ static unsigned action_halves(unsigned title, unsigned action,
     return n;
 }
 
+/* ---- a binding row as slots ---------------------------------------------- */
+
+/* One half's list onto the end of `out`; `n` counts past `max`. */
+static unsigned items_append(const char *list, int pad, binding_item_t *out,
+                             unsigned max, unsigned n)
+{
+    char item[MODEL_BINDING_CAP];
+    unsigned e;
+
+    for (e = 0; ini_list_item(list, e, item, sizeof item); e++) {
+        if (!item[0] || !_stricmp(item, pad ? "0" : "NONE"))
+            continue;
+        if (n < max) {
+            out[n].pad = pad;
+            snprintf(out[n].value, sizeof out[n].value, "%s", item);
+        }
+        n++;
+    }
+    return n;
+}
+
+unsigned model_binding_items(int title, unsigned action, binding_item_t *out,
+                             unsigned max)
+{
+    binding_half_t half[2];
+    char pad_text[16];
+    unsigned h, n = 0;
+    unsigned halves = action_halves((unsigned)title, action, half, pad_text,
+                                    sizeof pad_text);
+
+    for (h = 0; h < halves; h++)
+        n = items_append(half[h].value, !strcmp(half[h].section, "gamepad"),
+                         out, max, n);
+    return n;
+}
+
+unsigned model_binding_default_items(int title, unsigned action,
+                                     binding_item_t *out, unsigned max)
+{
+    char inherited[MODEL_BINDING_CAP];
+    unsigned n = 0;
+    int pad;
+
+    for (pad = 0; pad < 2; pad++)
+        if (model_binding_default(title, action, pad, inherited,
+                                  sizeof inherited))
+            n = items_append(inherited, pad, out, max, n);
+    return n;
+}
+
+int model_binding_set_items(int title, unsigned action,
+                            const binding_item_t *items, unsigned n)
+{
+    binding_half_t half[2];
+    char pad_text[16], text[2][MODEL_BINDING_CAP];
+    unsigned h, i, placed = 0;
+    unsigned halves = action_halves((unsigned)title, action, half, pad_text,
+                                    sizeof pad_text);
+
+    for (h = 0; h < halves; h++) {
+        int pad = !strcmp(half[h].section, "gamepad");
+        size_t at = 0;
+
+        text[h][0] = '\0';
+        for (i = 0; i < n; i++) {
+            int w;
+
+            if (items[i].pad != pad)
+                continue;
+            w = snprintf(text[h] + at, sizeof text[h] - at, "%s%s",
+                         at ? ", " : "", items[i].value);
+            if (w < 0 || (size_t)w >= sizeof text[h] - at)
+                return 0;
+            at += (size_t)w;
+            placed++;
+        }
+        if (!at)
+            snprintf(text[h], sizeof text[h], "%s", pad ? "0" : "NONE");
+    }
+    if (placed != n)
+        return 0;               /* an input for a half this action lacks */
+    for (h = 0; h < halves; h++)
+        snprintf(half[h].value, half[h].value_sz, "%s", text[h]);
+    return 1;
+}
+
+int model_binding_default(int title, unsigned action, int pad, char *out,
+                          size_t out_size)
+{
+    binding_half_t half[2];
+    char pad_text[16];
+    unsigned h, halves = action_halves((unsigned)title, action, half,
+                                       pad_text, sizeof pad_text);
+
+    for (h = 0; h < halves; h++) {
+        if (!strcmp(half[h].section, "gamepad") != !!pad)
+            continue;
+        if (!ini_doc_get(&s_doc, half[h].section, k_actions[action].key, out,
+                         out_size))
+            snprintf(out, out_size, "%s", half[h].fallback);
+        return 1;
+    }
+    out[0] = '\0';
+    return 0;
+}
+
+/* Item by item and ignoring case, so `LCTRL,SPACE` is `lctrl, space`. */
+static int binding_lists_equal(const char *a, const char *b)
+{
+    char x[MODEL_BINDING_CAP], y[MODEL_BINDING_CAP];
+    unsigned i;
+
+    for (i = 0;; i++) {
+        int has_x = ini_list_item(a, i, x, sizeof x);
+        int has_y = ini_list_item(b, i, y, sizeof y);
+
+        if (has_x != has_y)
+            return 0;
+        if (!has_x)
+            return 1;
+        if (_stricmp(x, y))
+            return 0;
+    }
+}
+
+int model_binding_is_default(int title, unsigned action)
+{
+    binding_half_t half[2];
+    char pad_text[16], inherited[MODEL_BINDING_CAP];
+    unsigned h, halves = action_halves((unsigned)title, action, half,
+                                       pad_text, sizeof pad_text);
+
+    for (h = 0; h < halves; h++) {
+        model_binding_default(title, action,
+                              !strcmp(half[h].section, "gamepad"), inherited,
+                              sizeof inherited);
+        if (!binding_lists_equal(half[h].value, inherited))
+            return 0;
+    }
+    return 1;
+}
+
+/* save_bindings_to_doc() then removes the title's line, because the value is
+ * the inherited one: the file goes back to saying nothing about the row. */
+void model_binding_restore(int title, unsigned action)
+{
+    binding_half_t half[2];
+    char pad_text[16];
+    unsigned h, halves = action_halves((unsigned)title, action, half,
+                                       pad_text, sizeof pad_text);
+
+    for (h = 0; h < halves; h++)
+        model_binding_default(title, action,
+                              !strcmp(half[h].section, "gamepad"),
+                              half[h].value, half[h].value_sz);
+}
+
 /* Re-resolve the keys belonging to the configured device, now that it is known
  * which device that is. THE TWO-READ SHAPE IS dinput.c's, for the same reason:
  * the device's own section cannot be read until the keys choosing the device
@@ -450,18 +716,30 @@ void reload_device_settings(void)
 /* WHAT THE DOCUMENT SAYS, INTO THE MODEL. The caller flushes anything it
  * measured from the old document first, see launcher.c's load_settings(),
  * whose only other line is the caption-height cache. */
+static void bezel_load_state(void);
+
 void model_load(void)
 {
     unsigned i, title, action;
 
     s_profile[0] = '\0';
     s_device_entry_pending = 0;
+    s_doc_pending = 0;
+    bezel_load_state();
+    s_split = title_choice_lines(NULL, 0) > 0;
     memset(s_fact_section, 0, sizeof s_fact_section);
     for (i = 0; i < SETTING_COUNT; i++) {
-        int unused;
+        int unused, found;
 
-        if (!ini_doc_get(&s_doc, k_settings[i].section, k_settings[i].key,
-                         s_value[i], sizeof s_value[i]))
+        /* A cabinet's own choice is read through its title first; with no
+         * device known yet that is [<title>.analog], then [analog]. */
+        if (s_split && setting_is_title_choice(i))
+            found = setting_resolve(i, s_value[i], sizeof s_value[i]);
+        else
+            found = ini_doc_get(&s_doc, k_settings[i].section,
+                                k_settings[i].key, s_value[i],
+                                sizeof s_value[i]);
+        if (!found)
             snprintf(s_value[i], sizeof s_value[i], "%s",
                      k_settings[i].fallback);
         /* A checkbox cannot show "neither", so a misspelled boolean arrives
@@ -474,7 +752,7 @@ void model_load(void)
                      k_settings[i].fallback);
     }
     for (title = 0; title < 2; title++) {
-        const char *id = title ? "offroad" : "hydro";
+        const char *id = k_title_id[title];
         char section[64], shared[64], pad_text[16];
         for (action = 0; action < ACTION_COUNT; action++) {
             const char *key = k_actions[action].key;
@@ -496,9 +774,10 @@ void model_load(void)
         }
     }
     /* NOW the device is known; provider and dinput_name are in the model,
-     * so the keys that belong to it are read again from its own section. */
+     * so the keys that belong to it are read again from its own section, and
+     * a cabinet's axes from its own [<title>.analog...] even with no device. */
     resolve_profile();
-    if (s_profile[0])
+    if (s_profile[0] || s_split)
         reload_device_settings();
     model_sync_role_facts(NULL);
 }
@@ -570,16 +849,348 @@ static int ini_key_is_on_a_page(const char *key)
  * there was one. A bare [hydro] is a title scope with no section. */
 static const char *plain_title_section(const char *section, int *scoped)
 {
+    unsigned t;
+
     *scoped = 0;
-    if (is_title_section(section, "hydro")) {
-        *scoped = 1;
-        return section[5] == '.' ? section + 6 : "";
-    }
-    if (is_title_section(section, "offroad")) {
-        *scoped = 1;
-        return section[7] == '.' ? section + 8 : "";
+    for (t = 0; t < 2; t++) {
+        size_t n = strlen(k_title_id[t]);
+
+        if (is_title_section(section, k_title_id[t])) {
+            *scoped = 1;
+            return section[n] == '.' ? section + n + 1 : "";
+        }
     }
     return section;
+}
+
+/* ---- one controller per cabinet: the document half ---------------------- */
+
+/* The choice keys in [<title>.analog] and [<title>.analog.<label>] sections,
+ * each (section, key) once, up to `max` of them into `out` (may be NULL).
+ * Returns how many lines carry one. A commented-out line is not a key. */
+static unsigned title_choice_lines(doc_key_ref_t *out, unsigned max)
+{
+    char current[96] = "";
+    unsigned n = 0, kept = 0, k;
+    size_t i;
+
+    for (i = 0; i < s_doc.count; i++) {
+        char name[96], key[96], value[INI_VALUE_CAP];
+        const char *plain;
+        int scoped;
+
+        if (ini_doc_section(s_doc.line[i], name, sizeof name)) {
+            snprintf(current, sizeof current, "%s", name);
+            continue;
+        }
+        if (!ini_doc_line_key(s_doc.line[i], key, sizeof key))
+            continue;
+        plain = plain_title_section(current, &scoped);
+        if (!scoped || !key_is_title_choice(key))
+            continue;
+        /* A selector counts only where the host reads one, [<title>.analog];
+         * an axis there or under a controller's label. */
+        if (_stricmp(plain, "analog") &&
+            (_strnicmp(plain, "analog.", 7) || key_is_selector(key)))
+            continue;
+        /* An empty value is read as absent by the host, so it is no choice. */
+        if (!ini_doc_get(&s_doc, current, key, value, sizeof value) ||
+            !value[0])
+            continue;
+        n++;
+        if (!out)
+            continue;
+        for (k = 0; k < kept; k++)
+            if (!_stricmp(out[k].section, current) &&
+                !_stricmp(out[k].key, key))
+                break;
+        if (k == kept && kept < max) {
+            snprintf(out[kept].section, sizeof out[0].section, "%s", current);
+            snprintf(out[kept].key, sizeof out[0].key, "%s", key);
+            kept++;
+        }
+    }
+    return n;
+}
+
+/* A device-choosing key as cabinet `t` reads it: [<title>.analog], [analog],
+ * the default. */
+static void title_selector_value(int t, const char *key, char *out,
+                                 size_t out_size)
+{
+    int i = setting_find("analog", key);
+
+    if (i < 0)
+        out[0] = '\0';
+    else if (!setting_resolve_as((unsigned)i, t, out, out_size))
+        snprintf(out, out_size, "%s", k_settings[i].fallback);
+}
+
+static int commit_settings(int *changed);
+
+/* The shown cabinet's choices, out of the document: the keys that choose the
+ * device first, because which device it is decides where its axes are read. */
+static void reload_title_choices(void)
+{
+    unsigned i;
+
+    for (i = 0; i < SETTING_COUNT; i++)
+        if (setting_is_title_choice(i) && !setting_is_device_key(i) &&
+            !setting_resolve(i, s_value[i], sizeof s_value[i]))
+            snprintf(s_value[i], sizeof s_value[i], "%s",
+                     k_settings[i].fallback);
+    resolve_profile();
+    reload_device_settings();
+}
+
+const char *model_title_id(int title)
+{
+    return k_title_id[title ? 1 : 0];
+}
+
+int model_title_raw(int title, const char *section, const char *key,
+                    char *out, size_t out_size)
+{
+    char scoped[128];
+
+    snprintf(scoped, sizeof scoped, "%s.%s", k_title_id[title ? 1 : 0], section);
+    if (ini_doc_get(&s_doc, scoped, key, out, out_size) && out[0])
+        return 1;
+    return ini_doc_get(&s_doc, section, key, out, out_size);
+}
+
+/* ---- bezel art, per cabinet ---------------------------------------------- */
+
+typedef struct {
+    int  enabled;
+    char file[MAX_PATH];    /* the ini's path, or bezels/<title>.png       */
+    char pick[MAX_PATH];    /* chosen and not yet applied; copied on Apply */
+} bezel_state_t;
+static bezel_state_t s_bezel[2];
+static int s_bezel_copies;
+
+int model_bezel_copied(void)
+{
+    return s_bezel_copies;
+}
+
+static int bezel_value_is_off(const char *value)
+{
+    return !value[0] || !_stricmp(value, "off");
+}
+
+void model_bezel_destination(int title, char *out, size_t out_size)
+{
+    const char *slash = strrchr(s_doc.path, '\\'), *fwd = strrchr(s_doc.path, '/');
+    int dir;
+
+    if (fwd > slash)
+        slash = fwd;
+    dir = slash ? (int)(slash - s_doc.path) + 1 : 0;
+    snprintf(out, out_size, "%.*sbezels\\%s.png", dir, s_doc.path,
+             k_title_id[title ? 1 : 0]);
+}
+
+/* What the file says, as the game reads it: the cabinet's line, else the
+ * shared one, else off. A row left off still names bezels\<title>.png when
+ * that file is there, so turning it back on needs no new choice. */
+static void bezel_load_state(void)
+{
+    char value[INI_VALUE_CAP], dest[MAX_PATH];
+    int t;
+
+    for (t = 0; t < 2; t++) {
+        memset(&s_bezel[t], 0, sizeof s_bezel[t]);
+        if (model_title_raw(t, "graphics", "bezel", value, sizeof value) &&
+            !bezel_value_is_off(value)) {
+            s_bezel[t].enabled = 1;
+            snprintf(s_bezel[t].file, sizeof s_bezel[t].file, "%s", value);
+            continue;
+        }
+        model_bezel_destination(t, dest, sizeof dest);
+        if (GetFileAttributesA(dest) != INVALID_FILE_ATTRIBUTES)
+            snprintf(s_bezel[t].file, sizeof s_bezel[t].file, "bezels/%s.png",
+                     k_title_id[t]);
+    }
+}
+
+int model_bezel_get(int title, char *path, size_t path_size)
+{
+    const bezel_state_t *b = &s_bezel[title ? 1 : 0];
+
+    snprintf(path, path_size, "%s", b->pick[0] ? b->pick : b->file);
+    return b->enabled && path[0];
+}
+
+void model_bezel_set_enabled(int title, int on)
+{
+    s_bezel[title ? 1 : 0].enabled = on != 0;
+}
+
+void model_bezel_choose(int title, const char *source)
+{
+    bezel_state_t *b = &s_bezel[title ? 1 : 0];
+
+    snprintf(b->pick, sizeof b->pick, "%s", source);
+    b->enabled = 1;
+}
+
+/* APPLY'S HALF. A chosen file is copied first, so a copy that fails writes
+ * no line naming a file that is not there; then each cabinet's line is
+ * written only when what it says changes. Absent and `off` are one answer.
+ * Returns 1, 0 for no memory, -1 for a copy that failed (`why` says). */
+static int commit_bezels(int *changed, char *why, size_t why_size)
+{
+    char want[MAX_PATH], have[INI_VALUE_CAP], dest[MAX_PATH], dir[MAX_PATH];
+    char a[MAX_PATH], b[MAX_PATH], scoped[64];
+    int t;
+
+    for (t = 0; t < 2; t++) {
+        bezel_state_t *s = &s_bezel[t];
+
+        if (s->enabled && s->pick[0]) {
+            model_bezel_destination(t, dest, sizeof dest);
+            snprintf(dir, sizeof dir, "%s", dest);
+            *strrchr(dir, '\\') = '\0';
+            CreateDirectoryA(dir, NULL);
+            ini_resolve_path(s->pick, a, sizeof a);
+            ini_resolve_path(dest, b, sizeof b);
+            if (_stricmp(a, b)) {
+                if (!CopyFileA(a, b, FALSE)) {
+                    snprintf(why, why_size, "Could not copy %s to %s (Windows "
+                             "error %lu). Nothing was saved.", a, b,
+                             GetLastError());
+                    return -1;
+                }
+                s_bezel_copies++;
+            }
+            snprintf(s->file, sizeof s->file, "bezels/%s.png", k_title_id[t]);
+            s->pick[0] = '\0';
+        }
+        snprintf(want, sizeof want, "%s",
+                 s->enabled && s->file[0] ? s->file : "off");
+        if (!model_title_raw(t, "graphics", "bezel", have, sizeof have) ||
+            bezel_value_is_off(have))
+            snprintf(have, sizeof have, "off");
+        if (!_stricmp(want, have))
+            continue;
+        snprintf(scoped, sizeof scoped, "%s.graphics", k_title_id[t]);
+        if (!ini_doc_set(&s_doc, scoped, "bezel", want))
+            return 0;
+        (*changed)++;
+    }
+    return 1;
+}
+
+int model_controls_split(void)
+{
+    return s_split;
+}
+
+int model_controls_title(void)
+{
+    return s_view_title;
+}
+
+int model_setting_per_cabinet(unsigned i)
+{
+    return i < SETTING_COUNT && setting_is_title_choice(i);
+}
+
+/* Show cabinet `title`'s choices. The shown cabinet's go into the document
+ * first, so nothing typed is lost on the way past, and Apply writes both. */
+int model_controls_show(int title)
+{
+    int n = 0;
+
+    title = title ? 1 : 0;
+    if (!s_split || title == s_view_title) {
+        s_view_title = title;
+        return 1;
+    }
+    if (!commit_settings(&n))
+        return 0;
+    s_doc_pending += n;
+    s_view_title = title;
+    reload_title_choices();
+    return 1;
+}
+
+/* Give each cabinet its own choice, starting from the one both share now.
+ * Whatever the page holds is committed as the shared choice first, so the
+ * cabinet not shown starts from it too; then both [<title>.analog] get the
+ * provider, which is what makes the file read as split on the next open (a
+ * cabinet with nothing of its own would read as shared). */
+int model_controls_split_on(void)
+{
+    int n = 0, i = setting_find("analog", "provider");
+    unsigned t, k;
+
+    if (s_split)
+        return 1;
+    if (i < 0 || !commit_settings(&n))
+        return 0;
+    s_doc_pending += n;
+    /* THE SELECTORS MOVE, they are not copied: a cabinet that clears its
+     * `dinput_name` must fall through to the default, and with a copy left in
+     * [analog] the host would fall through to that instead. */
+    for (k = 0; k < SETTING_COUNT; k++) {
+        char shared[INI_VALUE_CAP];
+        const char *value;
+
+        if (_stricmp(k_settings[k].section, "analog") ||
+            !key_is_selector(k_settings[k].key))
+            continue;
+        if (ini_doc_get(&s_doc, "analog", k_settings[k].key, shared,
+                        sizeof shared) && shared[0])
+            value = shared;
+        else if ((int)k == i)
+            value = s_value[i];         /* the marker that says "split" */
+        else
+            continue;
+        for (t = 0; t < 2; t++) {
+            char section[64];
+
+            snprintf(section, sizeof section, "%s.analog", k_title_id[t]);
+            if (!ini_doc_set(&s_doc, section, k_settings[k].key, value))
+                return 0;
+            s_doc_pending++;
+        }
+        if (ini_doc_get(&s_doc, "analog", k_settings[k].key, shared,
+                        sizeof shared) &&
+            !ini_doc_remove(&s_doc, "analog", k_settings[k].key))
+            return 0;
+    }
+    s_split = 1;
+    return 1;
+}
+
+/* One controller for both again: the shown cabinet's. Every choice either
+ * cabinet made for itself is commented out, and the next commit writes the
+ * shown one's to the shared sections, comparing against what they say. */
+int model_controls_join(void)
+{
+    doc_key_ref_t ref[TITLE_CHOICE_MAX];
+    unsigned k, left, before = UINT_MAX;
+
+    if (!s_split)
+        return 1;
+    /* More pairs than fit are taken a round at a time. A round that comments
+     * out nothing stops it, rather than spinning on a line it cannot reach. */
+    for (;;) {
+        memset(ref, 0, sizeof ref);
+        left = title_choice_lines(ref, TITLE_CHOICE_MAX);
+        if (!left || left >= before)
+            break;
+        before = left;
+        for (k = 0; k < TITLE_CHOICE_MAX && ref[k].key[0]; k++) {
+            if (!ini_doc_remove(&s_doc, ref[k].section, ref[k].key))
+                return 0;
+            s_doc_pending++;
+        }
+    }
+    s_split = 0;
+    return 1;
 }
 
 /* WHICH OF TWO LINES WINS DEPENDS ON WHO READS THE KEY, NOT ON THE SECTION.
@@ -734,13 +1345,23 @@ void scan_ini_problems(void)
         }
         /* A per-title override of something this window shows is said by the
          * row; one of anything else has no other place to appear. The binding
-         * sections are per-title BY DESIGN and are not overrides at all. */
+         * sections are per-title BY DESIGN and are not overrides at all, and
+         * so is `bezel`: each cabinet its own art, set in the file only
+         * (configuration.md §3.2). */
         if (scoped && _stricmp(plain, "digital") && _stricmp(plain, "gamepad") &&
-            !ini_key_is_on_a_page(key)) {
+            _stricmp(key, "bezel") && !ini_key_is_on_a_page(key)) {
             snprintf(text, sizeof text,
                      "[%s] %s is set for one cabinet only. This window edits "
                      "the settings both cabinets share, so it cannot show you "
                      "that line.", current, key);
+            add_ini_problem(text);
+        } else if (!_strnicmp(plain, "analog.", 7) && key_is_selector(key)) {
+            /* A key that CHOOSES a controller is read from [analog] and
+             * [<title>.analog] only; under a controller's label it is dead. */
+            snprintf(text, sizeof text,
+                     "[%s] %s chooses a controller, which is read only from "
+                     "[analog] or [hydro.analog] / [offroad.analog]. Nothing "
+                     "reads that line.", current, key);
             add_ini_problem(text);
         }
     }
@@ -840,6 +1461,95 @@ static int pad_binding_valid(const char *value)
  * value can have been in the file before this window opened; is left with a
  * dead button and nothing to read. PAGE_HOME means "no page of its own", which
  * is what a binding is: those live on Controls. */
+/* One value against its row's rules; `who` goes in front of the reason, for
+ * a cabinet's own value that the page is not showing. */
+static int setting_value_valid(unsigned i, const char *v, const char *who,
+                               char *why, size_t why_size)
+{
+    const setting_desc_t *d = &k_settings[i];
+
+    if ((d->flags & SF_REQUIRED) && !*v) {
+        snprintf(why, why_size, "%s%s cannot be empty.", who, d->label);
+        return 0;
+    }
+    if (d->type == ST_ENUM &&
+        !((d->flags & SF_AXIS_REF) ? vct_axis_choice_ok(d->choices, v)
+                               : vct_choice_contains(d->choices, v))) {
+        snprintf(why, why_size, "%s%s is not a supported value.", who,
+                 d->label);
+        return 0;
+    }
+    if ((d->type == ST_UINT || d->type == ST_AUTO_UINT ||
+         d->type == ST_MHZ_UINT) &&
+        !parse_unsigned_setting(d, v)) {
+        if (d->type == ST_MHZ_UINT)
+            snprintf(why, why_size, "%s%s must be 1..4000.", who, d->label);
+        else
+            snprintf(why, why_size, "%s%s must be %s%lu..%lu.", who, d->label,
+                     d->type == ST_AUTO_UINT ? "automatic or " : "",
+                     d->minimum, d->maximum);
+        return 0;
+    }
+    return 1;
+}
+
+/* WHILE EACH GAME HAS ITS OWN CONTROLLER, the page holds one cabinet's values
+ * and the document the other's, put there when the tab changed. Those are
+ * checked here, or a value typed on one tab would skip validation by being
+ * left behind on it. */
+static int validate_hidden_cabinet(char *why, size_t why_size)
+{
+    doc_key_ref_t ref[TITLE_CHOICE_MAX];
+    int other = !s_view_title;
+    size_t n = strlen(k_title_id[other]);
+    char who[32], value[INI_VALUE_CAP];
+    unsigned k;
+
+    if (!s_split)
+        return 1;
+    memset(ref, 0, sizeof ref);
+    title_choice_lines(ref, TITLE_CHOICE_MAX);
+    snprintf(who, sizeof who, "%s: ",
+             other ? "Offroad Thunder" : "Hydro Thunder");
+    for (k = 0; k < TITLE_CHOICE_MAX && ref[k].key[0]; k++) {
+        int i = setting_find("analog", ref[k].key);
+
+        if (i < 0 || _strnicmp(ref[k].section, k_title_id[other], n) ||
+            ref[k].section[n] != '.' ||
+            !ini_doc_get(&s_doc, ref[k].section, ref[k].key, value,
+                         sizeof value))
+            continue;
+        if (!setting_value_valid((unsigned)i, value, who, why, why_size))
+            return 0;
+    }
+    return 1;
+}
+
+/* A cabinet that clears a controller choice falls through to the shared one,
+ * so it cannot mean "none" while [analog] still names one: the host has no
+ * way to read an empty title line as an answer. */
+static int validate_empty_choice(char *why, size_t why_size)
+{
+    char shared[INI_VALUE_CAP];
+    unsigned i;
+
+    if (!s_split)
+        return 1;
+    for (i = 0; i < SETTING_COUNT; i++) {
+        if (s_value[i][0] || !setting_is_title_choice(i) ||
+            !key_is_selector(k_settings[i].key) ||
+            !ini_doc_get(&s_doc, "analog", k_settings[i].key, shared,
+                         sizeof shared) || !shared[0])
+            continue;
+        snprintf(why, why_size, "%s: %s cannot be left empty while [analog] "
+                 "says %s for both games. Pick a controller instead.",
+                 s_view_title ? "Offroad Thunder" : "Hydro Thunder",
+                 k_settings[i].label, shared);
+        return 0;
+    }
+    return 1;
+}
+
 int validate_settings(char *why, size_t why_size, int *page)
 {
     unsigned i, title, action;
@@ -847,36 +1557,17 @@ int validate_settings(char *why, size_t why_size, int *page)
     if (page)
         *page = PAGE_HOME;
 
-    for (i = 0; i < SETTING_COUNT; i++) {
-        const setting_desc_t *d = &k_settings[i];
-        const char *v = s_value[i];
-        if ((d->flags & SF_REQUIRED) && !*v) {
-            snprintf(why, why_size, "%s cannot be empty.", d->label);
+    for (i = 0; i < SETTING_COUNT; i++)
+        if (!setting_value_valid(i, s_value[i], "", why, why_size)) {
             if (page)
-                *page = d->page;
+                *page = k_settings[i].page;
             return 0;
         }
-        if (d->type == ST_ENUM &&
-            !((d->flags & SF_AXIS_REF) ? vct_axis_choice_ok(d->choices, v)
-                                   : vct_choice_contains(d->choices, v))) {
-            snprintf(why, why_size, "%s is not a supported value.", d->label);
-            if (page)
-                *page = d->page;
-            return 0;
-        }
-        if ((d->type == ST_UINT || d->type == ST_AUTO_UINT ||
-             d->type == ST_MHZ_UINT) &&
-            !parse_unsigned_setting(d, v)) {
-            if (d->type == ST_MHZ_UINT)
-                snprintf(why, why_size, "%s must be 1..4000.", d->label);
-            else
-                snprintf(why, why_size, "%s must be %s%lu..%lu.", d->label,
-                         d->type == ST_AUTO_UINT ? "automatic or " : "",
-                         d->minimum, d->maximum);
-            if (page)
-                *page = d->page;
-            return 0;
-        }
+    if (!validate_hidden_cabinet(why, why_size) ||
+        !validate_empty_choice(why, why_size)) {
+        if (page)
+            *page = PAGE_CONTROLS;
+        return 0;
     }
     for (title = 0; title < 2; title++)
         for (action = 0; action < ACTION_COUNT; action++) {
@@ -926,7 +1617,7 @@ static int save_bindings_to_doc(int *changed)
     char section[64], shared[64], pad_text[16];
 
     for (title = 0; title < 2; title++) {
-        const char *id = title ? "offroad" : "hydro";
+        const char *id = k_title_id[title];
         for (action = 0; action < ACTION_COUNT; action++) {
             const char *key = k_actions[action].key;
             binding_half_t half[2];
@@ -947,9 +1638,11 @@ static int save_bindings_to_doc(int *changed)
                  * test and not after it, because a line that spells out what
                  * the title would have inherited anyway is still the user's
                  * line and still unchanged. */
-                if (present && !strcmp(have, half[h].value))
+                if (present && binding_lists_equal(have, half[h].value))
                     continue;
-                if (!_stricmp(shared, half[h].value)) {
+                /* The same comparison model_binding_is_default() makes, or
+                 * Reset reads "already default" while Apply writes a line. */
+                if (binding_lists_equal(shared, half[h].value)) {
                     if (!present)
                         continue;
                     if (!ini_doc_remove(&s_doc, section, key))
@@ -964,61 +1657,6 @@ static int save_bindings_to_doc(int *changed)
     return 1;
 }
 
-/* ---- the known-good copy ------------------------------------------------
- *
- * A FULL INI WITH THE USER'S WHEEL MAP INTACT, AND A ONE-CLICK RESTORE. This
- * window writes a configuration a user hand-tunes, so there has to be something
- * to go back to on the day it writes the wrong one.
- *
- * IT IS NEVER WRITTEN AUTOMATICALLY, except once when there is none at all.
- * That seed is the file as this launcher first opened it, the last state this
- * window cannot have damaged. After that only the button writes it, and that is
- * the point: a copy Apply refreshed would be a copy of the mistake, which is a
- * recovery file that recovers the thing it was made to undo.
- */
-void known_good_path(char *out, size_t out_size)
-{
-    /* %.*s, for ini_doc_save()'s reason: doc.path is itself MAX_PATH, and a
-     * truncation that dropped the suffix would name the REAL file, so
-     * "saving a known-good copy" would overwrite the settings with
-     * themselves and "reverting" would be a no-op that reported success. */
-    snprintf(out, out_size, "%.*s.good",
-             (int)(out_size - sizeof ".good"), s_doc.path);
-}
-
-/* One sentence for the page: whether there is a copy, and when it was made. */
-void known_good_state(char *out, size_t out_size)
-{
-    WIN32_FILE_ATTRIBUTE_DATA info;
-    FILETIME local;
-    SYSTEMTIME when;
-    char path[MAX_PATH];
-
-    known_good_path(path, sizeof path);
-    if (!GetFileAttributesExA(path, GetFileExInfoStandard, &info)) {
-        snprintf(out, out_size, "There is no known-good copy yet.");
-        return;
-    }
-    if (FileTimeToLocalFileTime(&info.ftLastWriteTime, &local) &&
-        FileTimeToSystemTime(&local, &when))
-        snprintf(out, out_size,
-                 "The known-good copy was saved %04u-%02u-%02u %02u:%02u.",
-                 when.wYear, when.wMonth, when.wDay, when.wHour, when.wMinute);
-    else
-        snprintf(out, out_size, "A known-good copy exists.");
-}
-
-void seed_known_good(void)
-{
-    char path[MAX_PATH];
-
-    known_good_path(path, sizeof path);
-    /* A first run has no ini yet and there is nothing good about an absent
-     * file. FALSE for fail-if-exists is inverted here ON PURPOSE: TRUE means
-     * "do not overwrite", which is the entire contract of this function. */
-    if (GetFileAttributesA(s_doc.path) != INVALID_FILE_ATTRIBUTES)
-        CopyFileA(s_doc.path, path, TRUE);
-}
 const char *model_profile(void)
 {
     return s_profile;
@@ -1129,9 +1767,9 @@ int model_device_match(const char *provider, const ini_device_id_t *dev,
                        char *out, size_t out_size)
 {
     char match[2][INI_MATCH_CAP], value[INI_MATCH_CAP + 16];
-    char named[INI_MATCH_CAP + 16];
-    const char *extra = NULL;
-    int before[INI_DEVICES_MAX], before_extra;
+    char named[INI_MATCH_CAP + 16], other_named[INI_MATCH_CAP + 16];
+    const char *extra = NULL, *other = NULL;
+    int before[INI_DEVICES_MAX], before_extra, before_other = -1;
     unsigned k, nmatch = 0, i;
 
     if (which >= count)
@@ -1150,7 +1788,19 @@ int model_device_match(const char *provider, const ini_device_id_t *dev,
                  model_value("analog", "dinput_name"));
         extra = named;
     }
+    /* ...nor the one the cabinet not shown opens. */
+    if (as_line && !_stricmp(provider, "dinput") && s_split) {
+        char name[INI_MATCH_CAP];
+
+        title_selector_value(!s_view_title, "dinput_name", name, sizeof name);
+        if (name[0]) {
+            snprintf(other_named, sizeof other_named, "dinput:%s", name);
+            other = other_named;
+        }
+    }
     table_load();
+    if (other)
+        before_other = table_resolve(NULL, other, provider, dev, count);
     before_extra = table_resolve(NULL, extra, provider, dev, count);
     memcpy(before, s_table.at, s_table.n * sizeof before[0]);
     for (k = 0; k < nmatch; k++) {
@@ -1165,6 +1815,10 @@ int model_device_match(const char *provider, const ini_device_id_t *dev,
             for (i = 0; i < s_table.n && got == (int)which; i++)
                 if (s_table.at[i] != before[i])
                     got = -1;
+            if (got == (int)which && other &&
+                table_resolve(value, other, provider, dev, count) !=
+                    before_other)
+                got = -1;
         } else {
             got = table_resolve(NULL, value, provider, dev, count);
         }
@@ -1230,6 +1884,7 @@ const char *model_problem(unsigned i)
 
 int model_open(const char *ini_path)
 {
+    s_split = s_view_title = 0;
     return ini_doc_load(&s_doc, ini_path);
 }
 
@@ -1265,11 +1920,13 @@ int model_unsafe_video_mode(void)
            !strcmp(s_value[i], "2");
 }
 
-int model_save(char *why, size_t why_size, int *changed)
+/* The settings rows into the document, not to disk. Shared by Apply and by
+ * showing the other cabinet's controller, which has to put the shown one's
+ * somewhere first. */
+static int commit_settings(int *changed)
 {
     unsigned i;
 
-    *changed = 0;
     model_sync_role_facts(NULL);
     /* R4: NEVER WRITE A KEY THE USER DID NOT TOUCH.
      *
@@ -1286,6 +1943,20 @@ int model_save(char *why, size_t why_size, int *changed)
         char have[INI_VALUE_CAP];
         const char *section = setting_section(i);
 
+        /* AN EMPTY CHOICE FOR ONE CABINET IS NOT WRITTEN: the host reads an
+         * empty title line as absent and falls through. Taking the line out
+         * says the same thing honestly, and validate_settings() refuses the
+         * case where what it falls through to is not empty too. */
+        if (!s_value[i][0] && scope_title() >= 0 &&
+            setting_is_title_choice(i)) {
+            if (ini_doc_get(&s_doc, section, k_settings[i].key,
+                            have, sizeof have)) {
+                if (!ini_doc_remove(&s_doc, section, k_settings[i].key))
+                    return 0;
+                (*changed)++;
+            }
+            continue;
+        }
         if (ini_doc_get(&s_doc, section, k_settings[i].key,
                         have, sizeof have)) {
             if (!strcmp(have, s_value[i]))
@@ -1306,14 +1977,30 @@ int model_save(char *why, size_t why_size, int *changed)
             if (!strcmp(s_value[i], resolved))
                 continue;
         }
-        if (!ini_doc_set(&s_doc, section, k_settings[i].key, s_value[i])) {
-            snprintf(why, why_size,
-                     "Not enough memory to update vcthunder.ini.");
-            return MODEL_SAVE_NO_MEMORY;
-        }
+        if (!ini_doc_set(&s_doc, section, k_settings[i].key, s_value[i]))
+            return 0;
         (*changed)++;
     }
-    *changed += s_device_entry_pending;
+    return 1;
+}
+
+int model_save(char *why, size_t why_size, int *changed)
+{
+    *changed = 0;
+    if (!commit_settings(changed)) {
+        snprintf(why, why_size,
+                 "Not enough memory to update vcthunder.ini.");
+        return MODEL_SAVE_NO_MEMORY;
+    }
+    *changed += s_device_entry_pending + s_doc_pending;
+    s_bezel_copies = 0;
+    switch (commit_bezels(changed, why, why_size)) {
+    case 0:
+        snprintf(why, why_size, "Not enough memory to update vcthunder.ini.");
+        return MODEL_SAVE_NO_MEMORY;
+    case -1:
+        return MODEL_SAVE_FAILED;
+    }
     if (!save_bindings_to_doc(changed)) {
         snprintf(why, why_size,
                  "Not enough memory to update title bindings.");
@@ -1328,48 +2015,50 @@ int model_save(char *why, size_t why_size, int *changed)
     if (!ini_doc_save(&s_doc, why, why_size))
         return MODEL_SAVE_FAILED;
     s_device_entry_pending = 0;
+    s_doc_pending = 0;
     return MODEL_SAVE_OK;
 }
 
-/* ---- the known-good copy, the half that touches files -------------------- */
+/* ---- restoring the defaults ---------------------------------------------- */
 
-int model_known_good_exists(void)
+int model_defaults_restore(const void *data, unsigned long size,
+                           char *why, size_t why_size)
 {
-    char path[MAX_PATH];
+    char ini[MAX_PATH], bak[MAX_PATH], tmp[MAX_PATH];
+    HANDLE file;
+    DWORD wrote;
+    int ok;
 
-    known_good_path(path, sizeof path);
-    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
-}
-
-int model_known_good_write(char *why, size_t why_size)
-{
-    char path[MAX_PATH];
-
-    known_good_path(path, sizeof path);
-    if (CopyFileA(s_doc.path, path, FALSE))
-        return 1;
-    snprintf(why, why_size, "Could not write %s (Windows error %lu).",
-             path, GetLastError());
-    return 0;
-}
-
-int model_known_good_restore(char *why, size_t why_size)
-{
-    char path[MAX_PATH], bak[MAX_PATH], ini[MAX_PATH];
-
-    known_good_path(path, sizeof path);
     snprintf(ini, sizeof ini, "%s", s_doc.path);
-    snprintf(bak, sizeof bak, "%.*s.bak",
-             (int)(sizeof bak - sizeof ".bak"), ini);
+    /* NOT .bak: every Apply that writes replaces .bak with the file it is
+     * about to overwrite, so the first Apply after a restore would put the
+     * defaults there and the user's own file would be gone. */
+    snprintf(bak, sizeof bak, "%.*s" MODEL_RESTORE_SUFFIX,
+             (int)(sizeof bak - sizeof MODEL_RESTORE_SUFFIX), ini);
+    snprintf(tmp, sizeof tmp, "%.*s.new",
+             (int)(sizeof tmp - sizeof ".new"), ini);
     if (GetFileAttributesA(ini) != INVALID_FILE_ATTRIBUTES &&
         !CopyFileA(ini, bak, FALSE)) {
         snprintf(why, why_size, "Could not back up %s (Windows error %lu). "
                  "Nothing was changed.", ini, GetLastError());
         return 0;
     }
-    if (!CopyFileA(path, ini, FALSE)) {
+    /* Whole or not at all: a half-written ini is every key past the cut
+     * silently at its default. */
+    file = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) {
+        snprintf(why, why_size, "Could not write %s (Windows error %lu). "
+                 "Nothing was changed.", tmp, GetLastError());
+        return 0;
+    }
+    ok = WriteFile(file, data, (DWORD)size, &wrote, NULL) && wrote == size;
+    CloseHandle(file);
+    if (!ok || !MoveFileExA(tmp, ini, MOVEFILE_REPLACE_EXISTING |
+                                      MOVEFILE_WRITE_THROUGH)) {
         snprintf(why, why_size, "Could not replace %s (Windows error %lu). "
                  "Nothing was changed.", ini, GetLastError());
+        DeleteFileA(tmp);
         return 0;
     }
     return 1;

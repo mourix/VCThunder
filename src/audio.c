@@ -148,13 +148,18 @@ static float    s_user_gain = 1.0f;   /* [audio] volume, host-side only        *
 
 /* Route the cabinet's front-speaker and seat-woofer buses to the selected host
  * output while preserving each title's gain law. */
-typedef enum { ROUTE_MIX = 0, ROUTE_CABINET, ROUTE_FRONT } av_route_t;
+typedef enum { ROUTE_MIX = 0, ROUTE_CABINET } av_route_t;
 static av_route_t s_route = ROUTE_MIX;
 
 /* Apply an attenuate-only balance between front and seat buses. A value of 50
- * preserves unity gain for both buses. */
+ * preserves unity gain for both buses.
+ *
+ * mix keeps the two bus gains at constant power: -3 dB at 50, where both are
+ * at unity, rising to unity at either end, where one bus plays alone. So 0
+ * plays the front bus alone on both speakers at its own level. */
 static float s_bal_front = 1.0f;
 static float s_bal_seat  = 1.0f;
+static float s_mix_gain  = 0.70710678f;
 
 static void balance_set(unsigned percent)
 {
@@ -162,6 +167,8 @@ static void balance_set(unsigned percent)
         percent = 100u;
     s_bal_front = percent <= 50u ? 1.0f : (float)(100u - percent) / 50.0f;
     s_bal_seat  = percent >= 50u ? 1.0f : (float)percent / 50.0f;
+    s_mix_gain  = 1.0f / sqrtf(s_bal_front * s_bal_front +
+                               s_bal_seat * s_bal_seat);
 }
 
 void audio_route_buses(float front, float seat, float *left, float *right)
@@ -174,14 +181,12 @@ void audio_route_buses(float front, float seat, float *left, float *right)
         *left = front;
         *right = seat;
         break;
-    case ROUTE_FRONT:
-        *left = *right = front;
-        break;
     default:
-        /* Both buses to both speakers. -3 dB so a constant-power Hydro voice
-         * centred across both buses sums back to unity. The same linear final
-         * routing applies to Offroad's independently programmed bus gains. */
-        *left = *right = (front + seat) * 0.70710678f;
+        /* Both buses to both speakers. At balance 50 the gain is -3 dB, so a
+         * constant-power Hydro voice centred across both buses sums back to
+         * unity. The same linear final routing applies to Offroad's
+         * independently programmed bus gains. */
+        *left = *right = (front + seat) * s_mix_gain;
         break;
     }
 }
@@ -190,13 +195,11 @@ static const char *route_description(void)
 {
     static char text[96];
 
-    snprintf(text, sizeof text, "%s, balance front %.2f / seat %.2f",
+    snprintf(text, sizeof text, "%s, balance front %.2f / seat %.2f, mix %.2f",
              s_route == ROUTE_CABINET
                  ? "cabinet (front bus left, seat woofer right)"
-                 : s_route == ROUTE_FRONT
-                 ? "front (seat-woofer bus dropped)"
                  : "mix (both cabinet buses to both speakers)",
-             s_bal_front, s_bal_seat);
+             s_bal_front, s_bal_seat, s_mix_gain);
     return text;
 }
 
@@ -555,9 +558,38 @@ static int voice_ok(uint32_t v)
     return 0;
 }
 
+/* A diagnostic that re-runs game code and then restores the game's memory
+ * (the draw replay) must not let that code reach the speakers: a voice it
+ * started would outlive the game's own record of it and loop for ever. Only
+ * the thread doing the replay is held; the DCS thread's commands pass. Both
+ * titles' voice entries ask audio_held(): Hydro's DSP commands here, Offroad's
+ * Audiolib table in audio_offroad.c. */
+static volatile DWORD s_hold_tid;
+
+void audio_hold_this_thread(int on)
+{
+    s_hold_tid = on ? GetCurrentThreadId() : 0;
+}
+
+static volatile LONG s_held_cmds;
+
+unsigned audio_held_commands(void) { return (unsigned)InterlockedExchange(&s_held_cmds, 0); }
+
+int audio_held(void)
+{
+    if (s_hold_tid && s_hold_tid == GetCurrentThreadId()) {
+        InterlockedIncrement(&s_held_cmds);
+        return 1;
+    }
+    return 0;
+}
+#define AV_HELD() audio_held()
+
 static void __cdecl av_Play(uint32_t voice, const int16_t *pcm, uint32_t rate,
                             uint32_t bytes, uint32_t loop_default)
 {
+    if (AV_HELD())
+        return;
     av_voice_t *v;
     int loop = 0, i;
 
@@ -606,6 +638,8 @@ static void __cdecl av_Play(uint32_t voice, const int16_t *pcm, uint32_t rate,
 
 static void __cdecl av_Stop(uint32_t voice)
 {
+    if (AV_HELD())
+        return;
     if (!voice_ok(voice))
         return;
     EnterCriticalSection(&s_voice_cs);
@@ -617,6 +651,8 @@ static void __cdecl av_Stop(uint32_t voice)
 
 static void __cdecl av_ChangePitch(uint32_t voice, int32_t pitch)
 {
+    if (AV_HELD())
+        return;
     if (!voice_ok(voice))
         return;
     if (pitch < 0)   pitch = 0;
@@ -627,6 +663,8 @@ static void __cdecl av_ChangePitch(uint32_t voice, int32_t pitch)
 
 static void __cdecl av_ChangeVolume(uint32_t voice, int32_t vol)
 {
+    if (AV_HELD())
+        return;
     if (!voice_ok(voice))
         return;
     if (vol < 0)   vol = 0;
@@ -643,6 +681,8 @@ static void __cdecl av_ChangeVolume(uint32_t voice, int32_t vol)
  * stereo: an operator running a mono cabinet would otherwise get a stereo mix. */
 static void __cdecl av_ChangePan(uint32_t voice, int32_t pan)
 {
+    if (AV_HELD())
+        return;
     uint32_t mode = *(volatile uint32_t *)(uintptr_t)G->speaker_mode;
 
     if (!voice_ok(voice))
@@ -658,6 +698,8 @@ static void __cdecl av_ChangePan(uint32_t voice, int32_t pan)
 
 static void __cdecl av_SetMasterVolume(int32_t vol)
 {
+    if (AV_HELD())
+        return;
     if (vol < 0)   vol = 0;
     if (vol > 255) vol = 255;
     s_master = vol;
@@ -669,6 +711,8 @@ static void __cdecl av_SetMasterVolume(int32_t vol)
 static void __cdecl av_SetLeftRightAttenuators(uint32_t left_bits,
                                                uint32_t right_bits)
 {
+    if (AV_HELD())
+        return;
     float l, r;
 
     memcpy(&l, &left_bits,  sizeof l);
@@ -983,6 +1027,19 @@ static void mask_release(av_mask_role_t role)
     LeaveCriticalSection(&s_mask_cs);
 }
 
+int audio_mask_depth(void)
+{
+    return s_cs_ready ? mask_nest_of(mask_role()) : 0;
+}
+
+void audio_mask_unwind(int depth)
+{
+    if (!s_cs_ready)
+        return;
+    while (mask_nest_of(mask_role()) > depth)
+        mask_release(mask_role());
+}
+
 static int __cdecl av_EtsPicEnable(uint32_t irq, uint32_t enable)
 {
     if (irq != AV_IRQ_TOKEN)
@@ -1169,6 +1226,7 @@ static DWORD WINAPI dcs_thread(LPVOID unused)
         /* The ISR runs with the IRQ masked, so take the mask for the whole tick.
          * A game thread wanting to mask now waits until cb() returns, which is
          * exactly what the cabinet's single CPU did to it. */
+        game_side_thread_enter();       /* before the mask: the replay's order */
         mask_acquire(AV_MASK_TICK, 0);
         saved = *depth;
         *depth = 0;
@@ -1202,6 +1260,7 @@ static DWORD WINAPI dcs_thread(LPVOID unused)
                 s_voice[i].pitch_dirty = 0;
         }
         mask_release(AV_MASK_TICK);
+        game_side_thread_leave();
         s_n_ticks++;
     }
 
@@ -1274,8 +1333,6 @@ int audio_preload(unsigned dcs_us, unsigned volume_percent, const char *routing,
 
     if (routing && _stricmp(routing, "cabinet") == 0)
         s_route = ROUTE_CABINET;
-    else if (routing && _stricmp(routing, "front") == 0)
-        s_route = ROUTE_FRONT;
     else
         s_route = ROUTE_MIX;
     balance_set(balance);

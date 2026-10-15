@@ -56,8 +56,11 @@ unsigned ini_uint_or(const char *v, unsigned lo, unsigned hi, unsigned fallback)
  *
  * `path` must be ABSOLUTE. The profile API resolves a bare filename against the
  * WINDOWS directory, so a relative path reads a file that does not exist and
- * every key silently takes its default. ini_resolve_path() is the door. */
-void ini_read_scoped(const char *path, const char *section, const char *key,
+ * every key silently takes its default. ini_resolve_path() is the door.
+ *
+ * Returns 1 when this game's own section answered, so a value a cabinet chose
+ * for itself can say so in the log. */
+int  ini_read_scoped(const char *path, const char *section, const char *key,
                      const char *fallback, char *out, DWORD out_size);
 
 void ini_resolve_path(const char *in, char *out, size_t out_size);

@@ -1,4 +1,4 @@
-/* launcher_capture.c -- the launcher's capture machine: Add, Detect, Set up.
+/* launcher_capture.c -- the launcher's capture machine: slots, Detect, Set up.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * See src/launcher_capture.h for why this is its own translation unit. THE
@@ -39,26 +39,16 @@ static void hold_note(const char *text)
 }
 
 static int s_capture_kind, s_capture_action, s_capture_setting, s_capture_armed;
+/* WHICH OF THE ROW'S SLOTS THE CAPTURE FILLS. One press, one slot: the other
+ * slot is never touched, so a wrong press is undone by pressing that slot
+ * again, and two inputs on one controller are two slots. */
+static int s_capture_slot;
 
 /* The capture's own clock. A mode with no way out is worse than a mode, and
- * `Change` is the control a user presses by accident. */
+ * a slot is the control a user presses by accident. */
 #define CAPTURE_MS 12000u
-/* AN ACTION MAY HOLD FOUR CONTROLLER BUTTONS. This capture takes ONE press:
- * `Change` replaces and `Add` appends, and which you get is which button you
- * clicked. A capture that kept listening for four seconds and added whatever
- * else was pressed is a control with a hidden mode. */
 static DWORD s_capture_deadline;
 static int s_capture_shown;         /* the countdown second last drawn      */
-/* WHAT THE CAPTURE HAS COLLECTED, committed when it ends rather than as it
- * goes: Escape has to be able to leave the binding alone. Empty means that half
- * was not touched, and an untouched half is not written, so adding a
- * controller button to a row keeps its key. */
-static char s_cap_key[64];
-static char s_cap_pad[64];
-/* Which halves the user actually pressed something into. A half nobody touched
- * is not written, so Add on a controller button leaves the row's keys alone
- * and vice versa. */
-static int  s_cap_key_touched, s_cap_pad_touched;
 
 /* Every axis the guard watches, and its controller. A role row listens on
  * every DirectInput controller and XInput pad, so an axis on another device
@@ -162,8 +152,6 @@ static const char *wizard_ask(int step);
 static void wizard_took(int step);
 static void wizard_failed(const char *why);
 static void wizard_stop(const char *why);
-static void cap_so_far(char *out, size_t out_size);
-static void commit_capture(void);
 static void finish_capture(const char *said);
 
 /* THE GUARD HAS TWO CALLERS, AND EACH GETS ITS OWN WORDS. Detect narrates in
@@ -620,35 +608,13 @@ void confirm_axis_detect(void)
     set_status(said);
 }
 
-static int cap_pad_has(const char *ref)
-{
-    char item[64];
-    unsigned i;
-
-    for (i = 0; ini_list_item(s_cap_pad, i, item, sizeof item); i++)
-        if (!_stricmp(item, ref))
-            return 1;
-    return 0;
-}
-
-static unsigned cap_pad_count(void)
-{
-    char item[64];
-    unsigned i = 0;
-
-    while (ini_list_item(s_cap_pad, i, item, sizeof item))
-        i++;
-    return i;
-}
-
-/* ONE CONTROLLER BUTTON INTO THE CAPTURE. The first REPLACES whatever the row
- * had, which is what "Change" means; every one after it is ADDED, up to the
- * four the host reads. Returns 0 when it was refused, with the status line
- * already saying why. */
-static int cap_add_pad(unsigned device, unsigned ordinal)
+/* THE REFERENCE A CONTROLLER BUTTON IS WRITTEN AS. 0 when it was refused,
+ * with the status line already saying why. */
+static int pad_ref_for(unsigned device, unsigned ordinal, char *ref,
+                       size_t ref_size)
 {
     const input_probe_device_t *d = input_probe_device(device);
-    char label[INI_LABEL_CAP], ref[64], said[256];
+    char label[INI_LABEL_CAP];
 
     if (!d)
         return 0;
@@ -658,9 +624,9 @@ static int cap_add_pad(unsigned device, unsigned ordinal)
      * slot, so a bare ordinal is the only form that works there. */
     if ((int)device == launcher_probe_selected() &&
         d->backend != INPUT_PROBE_DINPUT) {
-        snprintf(ref, sizeof ref, "%u", ordinal);
+        snprintf(ref, ref_size, "%u", ordinal);
     } else if (ensure_device_label(d, label, sizeof label)) {
-        snprintf(ref, sizeof ref, "%s:%u", label, ordinal);
+        snprintf(ref, ref_size, "%s:%u", label, ordinal);
     } else if (d->backend != INPUT_PROBE_WINMM) {
         /* A DirectInput controller always gets a line (name or ID); this is
          * a full table or no free label. */
@@ -679,111 +645,135 @@ static int cap_add_pad(unsigned device, unsigned ordinal)
         MessageBeep(MB_ICONWARNING);
         return 0;
     }
-    if (cap_pad_has(ref))
-        return 0;
-    if (cap_pad_count() >= IO_MAX_PAD_REFS) {
-        snprintf(said, sizeof said, "An action can hold %d controller buttons "
-                 "and this one has %d. Wait for the countdown, or press Clear "
-                 "and start again.", IO_MAX_PAD_REFS, IO_MAX_PAD_REFS);
-        set_status(said);
-        MessageBeep(MB_ICONWARNING);
-        return 0;
-    }
-    if (!s_cap_pad[0])
-        snprintf(s_cap_pad, sizeof s_cap_pad, "%s", ref);
-    else
-        snprintf(s_cap_pad + strlen(s_cap_pad),
-                 sizeof s_cap_pad - strlen(s_cap_pad), ", %s", ref);
-    s_cap_pad_touched = 1;
     return 1;
 }
 
-/* THE SAME THREE RULES AS cap_add_pad(), FOR THE KEYBOARD HALF, because since
- * the row lost its `Change` button `Add` has to mean one thing and `[digital]`
- * is a list too. Already-present is a no-op and the ceiling says so. */
-static int cap_add_key(const char *name)
+/* ONE INPUT AS THE HOST READS IT: two names for one key are one key, and a
+ * bare ordinal is the same button as that controller's label and ordinal. */
+static int item_same(const binding_item_t *a, const binding_item_t *b)
 {
-    char item[64], said[192];
-    unsigned i, n = 0;
+    int x;
 
-    for (i = 0; ini_list_item(s_cap_key, i, item, sizeof item); i++) {
-        n++;
-        if (!_stricmp(item, name))
-            return 0;
-    }
-    if (n >= IO_MAX_KEY_REFS) {
-        snprintf(said, sizeof said, "An action can hold %d keys and this one "
-                 "has %d. Press Clear and start again.",
-                 IO_MAX_KEY_REFS, IO_MAX_KEY_REFS);
-        set_status(said);
-        MessageBeep(MB_ICONWARNING);
+    if (a->pad != b->pad)
         return 0;
-    }
-    if (!s_cap_key[0])
-        snprintf(s_cap_key, sizeof s_cap_key, "%s", name);
+    if (a->pad)
+        return pad_refs_same(a->value, b->value);
+    x = io_config_key_code(a->value);
+    return x ? x == io_config_key_code(b->value) : !_stricmp(a->value, b->value);
+}
+
+static const char *item_text(const binding_item_t *item, char *out,
+                             size_t out_size)
+{
+    if (item->pad)
+        pad_binding_text(item->value, out, out_size);
     else
-        snprintf(s_cap_key + strlen(s_cap_key),
-                 sizeof s_cap_key - strlen(s_cap_key), ", %s", name);
-    s_cap_key_touched = 1;
-    return 1;
+        snprintf(out, out_size, "%s", key_display_name(item->value));
+    return out;
 }
 
-/* What the capture has so far, rendered the way the row renders a binding, so
- * the thing on screen while collecting reads like the thing that will be
- * there afterwards. */
-static void cap_so_far(char *out, size_t out_size)
+static const char *action_name(unsigned action)
 {
-    size_t at = 0;
+    const action_desc_t *a = &k_actions[action];
+    const char *label = launcher_binding_title() ? a->offroad_label :
+                                                   a->hydro_label;
 
-    out[0] = '\0';
-    if (s_cap_key[0]) {
-        char item[64];
-        unsigned i;
-
-        for (i = 0; ini_list_item(s_cap_key, i, item, sizeof item); i++)
-            at += (size_t)snprintf(out + at, out_size - at, "%s%s",
-                                   at ? " or " : "", item);
-    }
-    if (s_cap_pad[0]) {
-        if (at)
-            at += (size_t)snprintf(out + at, out_size - at, " or ");
-        pad_binding_render(s_cap_pad, out + at, out_size - at);
-    }
+    return label ? label : a->key;
 }
 
-/* COMMIT WHAT WAS COLLECTED, and only that. A half nobody pressed is left
- * exactly as it was, which is what lets a controller button be added to a row
- * without losing its key. */
-static void commit_capture(void)
+/* The capture ends without writing anything, and says why. */
+static void leave_slot(const char *said)
 {
-    const action_desc_t *a = &k_actions[s_capture_action];
-    char said[256], what[192];
+    s_capture_kind = 0;
+    update_binding_display((unsigned)s_capture_action);
+    set_status(said);
+}
 
-    if (!s_cap_key_touched && !s_cap_pad_touched) {
-        s_capture_kind = 0;
-        update_binding_display((unsigned)s_capture_action);
-        set_status("Nothing was pressed, so the binding was left alone.");
+/* PUT ONE INPUT IN THE SLOT, OR EMPTY IT (`item` NULL), and nothing else: the
+ * other slot is never touched. A slot past the row's last input appends, so
+ * an empty slot always means "one more".
+ *
+ * A row a hand-edited file gave more inputs than there are slots keeps the
+ * ones on screen. Keeping the rest would leave a binding the page cannot show
+ * or remove; the status line says they went. */
+static void commit_slot(const binding_item_t *item, int restoring)
+{
+    binding_item_t row[IO_MAX_KEY_REFS + IO_MAX_PAD_REFS];
+    unsigned held, n, at, i;
+    int title = launcher_binding_title();
+    char said[320], what[160];
+    size_t len;
+
+    held = model_binding_items(title, (unsigned)s_capture_action, row,
+                               sizeof row / sizeof row[0]);
+    n = held < BINDING_SLOTS ? held : BINDING_SLOTS;
+    at = (unsigned)s_capture_slot < n ? (unsigned)s_capture_slot : n;
+    if (item) {
+        for (i = 0; i < n; i++)
+            if (i != at && item_same(&row[i], item)) {
+                snprintf(said, sizeof said,
+                         "%s already has %s in its other slot.",
+                         action_name((unsigned)s_capture_action),
+                         item_text(item, what, sizeof what));
+                leave_slot(said);
+                return;
+            }
+        row[at] = *item;
+        if (at == n)
+            n++;
+    } else {
+        if (at == n) {
+            leave_slot("That slot was already empty.");
+            return;
+        }
+        for (i = at; i + 1 < n; i++)
+            row[i] = row[i + 1];
+        n--;
+    }
+    if (!model_binding_set_items(title, (unsigned)s_capture_action, row, n)) {
+        MessageBeep(MB_ICONWARNING);
+        leave_slot("That does not fit this control's line in vcthunder.ini, "
+                   "so nothing was changed.");
         return;
     }
-    if (s_cap_key_touched && (launcher_binding_title() ? a->offroad_key : a->hydro_key))
-        snprintf(model_key_binding(launcher_binding_title(), s_capture_action),
-                 MODEL_BINDING_CAP, "%s", s_cap_key);
-    if (s_cap_pad_touched && a->has_pad)
-        snprintf(model_pad_binding(launcher_binding_title(), s_capture_action),
-                 MODEL_BINDING_CAP, "%s", s_cap_pad);
-    cap_so_far(what, sizeof what);
-    snprintf(said, sizeof said, "Bound to %s.", what);
+    if (item && restoring && at != (unsigned)s_capture_slot)
+        /* A row has no gaps, so a default for a slot past the row's end
+         * lands at the end, and the sentence has to say where. */
+        snprintf(said, sizeof said, "%s: %s is back as slot %d's default, "
+                 "in slot %u because a row has no gaps.",
+                 action_name((unsigned)s_capture_action),
+                 item_text(item, what, sizeof what), s_capture_slot + 1,
+                 at + 1);
+    else if (item)
+        snprintf(said, sizeof said, restoring ?
+                 "%s: slot back to its default, %s." : "%s: %s.",
+                 action_name((unsigned)s_capture_action),
+                 item_text(item, what, sizeof what));
+    else
+        snprintf(said, sizeof said, restoring ?
+                 "%s: slot back to its default, empty." :
+                 "%s: slot emptied.",
+                 action_name((unsigned)s_capture_action));
+    len = strlen(said);
+    if (held > BINDING_SLOTS)
+        snprintf(said + len, sizeof said - len,
+                 " The %u more vcthunder.ini gave it %s dropped: a control "
+                 "holds two.", held - BINDING_SLOTS,
+                 held - BINDING_SLOTS == 1 ? "was" : "were");
+    len = strlen(said);
+    snprintf(said + len, sizeof said - len,
+             " Press Apply to write it to vcthunder.ini.");
     finish_capture(said);
 }
 
 /* ONE CAPTURE, EVERY CONTROLLER. The keyboard half arrives through WM_KEYDOWN
- * and the controller half through here, and which one the user pressed is what
- * decides which half of the binding moves; the page never asks.
+ * and the controller half through here, and whichever is pressed first fills
+ * the slot; the page never asks which kind of thing is coming.
  *
  * ARMED ONLY AFTER EVERYTHING IS RELEASED, across every device: a wheel with a
  * paddle held, or the button the user is still holding from the last capture,
- * would otherwise bind itself instantly. Re-armed after every accepted press,
- * for the same reason one press must not count as four. */
+ * would otherwise bind itself instantly. Re-armed after a refused press for
+ * the same reason. */
 static void capture_tick(void)
 {
     unsigned i, b, n = input_probe_count();
@@ -809,17 +799,26 @@ static void capture_tick(void)
             continue;
         for (b = 0; b < IO_MAX_BUTTONS; b++)
             if (io_button_down(d->buttons, b + 1)) {
-                /* One press, then done. */
-                if (cap_add_pad(i, b + 1))
-                    commit_capture();
-                else
-                    s_capture_armed = 0;
-                update_binding_display((unsigned)s_capture_action);
+                binding_item_t item;
+
+                s_capture_armed = 0;
+                if (!k_actions[s_capture_action].has_pad) {
+                    /* Steering and the pedals: a controller drives the axis
+                     * itself, so only the keyboard needs a binding here. */
+                    MessageBeep(MB_ICONWARNING);
+                    set_status("This control takes keys only: a controller "
+                               "drives it through its axis. Press a key, or "
+                               "Esc.");
+                    return;
+                }
+                item.pad = 1;
+                if (pad_ref_for(i, b + 1, item.value, sizeof item.value))
+                    commit_slot(&item, 0);
                 return;
             }
     }
     if ((LONG)(GetTickCount() - s_capture_deadline) >= 0) {
-        commit_capture();
+        leave_slot("Nothing was pressed, so the slot was left as it was.");
     } else {
         int left = (LONG)(s_capture_deadline - GetTickCount()) / 1000;
         if (left != s_capture_shown) {
@@ -882,10 +881,10 @@ static const char *key_name_from_message(WPARAM key, LPARAM detail,
 /* DO THESE TWO BINDINGS SHARE AN INPUT? Element by element, because both
  * halves are comma lists and a whole-value compare only finds two rows given
  * the SAME list. `boost = LCTRL, SPACE` against `view_low = SPACE` is the
- * realistic collision and exactly the case it could not see.
+ * realistic collision.
  *
- * "NONE" and "0" are not inputs. The keyboard half skipped nothing, so Clear on
- * two rows produced a warning about two controls bound to NOTHING. */
+ * "NONE" and "0" are not inputs, or two emptied rows would be reported as two
+ * controls bound to the same nothing. */
 static int binding_lists_share(const char *a, const char *b, int pad,
                                char *shared, size_t shared_size)
 {
@@ -960,14 +959,12 @@ static int report_duplicate_binding(int pad)
     return 0;
 }
 
-/* ---- Change: press whatever you want it to be ----------------------------
+/* ---- a slot: press whatever you want in it ------------------------------
  *
- * ONE CAPTURE FOR BOTH HALVES. A Keyboard column and a Controller column with a
- * Bind button each made the user answer "what KIND of thing am I about to
- * press" before pressing it, and the controller half bound whatever the
- * preview combo held, so a binding made on one controller came back aimed at
- * another. Whatever is pressed first wins, and the half it replaces is the half
- * it is. */
+ * ONE CAPTURE FOR BOTH HALVES. A slot takes a key or a button on any
+ * controller, so nobody has to say what KIND of thing they are about to press;
+ * whatever is pressed first fills it, and the half it is written to is the
+ * half it is. */
 static void finish_capture(const char *said)
 {
     s_capture_kind = 0;
@@ -982,27 +979,31 @@ static void finish_capture(const char *said)
 
 static void handle_key_capture(WPARAM key, LPARAM detail)
 {
-    char name[32];
+    binding_item_t item;
     const char *mapped;
     const action_desc_t *a = &k_actions[s_capture_action];
 
     if (key == VK_ESCAPE) {
-        /* NOTHING WAS WRITTEN YET, so there is nothing to undo. That is the
-         * whole reason the capture collects into a scratch instead of
-         * committing as it goes. */
-        s_capture_kind = 0;
-        update_binding_display((unsigned)s_capture_action);
-        set_status("Left alone.");
+        /* NOTHING WAS WRITTEN YET, so there is nothing to undo: the slot is
+         * committed when the press arrives and not before. */
+        leave_slot("Left as it was.");
         return;
     }
-    if (key == VK_BACK || key == VK_DELETE) {
-        if (launcher_binding_title() ? a->offroad_key : a->hydro_key)
-            snprintf(model_key_binding(launcher_binding_title(), s_capture_action),
-                     MODEL_BINDING_CAP, "NONE");
-        if (a->has_pad)
-            snprintf(model_pad_binding(launcher_binding_title(), s_capture_action),
-                     MODEL_BINDING_CAP, "0");
-        finish_capture("Unbound.");
+    /* DELETE EMPTIES, BACKSPACE PUTS BACK: the slot's own default, the
+     * input at the same place in the row's default, or empty if the
+     * default has nothing there. One slot, as every other press. */
+    if (key == VK_DELETE) {
+        commit_slot(NULL, 0);
+        return;
+    }
+    if (key == VK_BACK) {
+        binding_item_t def[IO_MAX_KEY_REFS + IO_MAX_PAD_REFS];
+        unsigned n = model_binding_default_items(launcher_binding_title(),
+                         (unsigned)s_capture_action, def,
+                         sizeof def / sizeof def[0]);
+
+        commit_slot((unsigned)s_capture_slot < n ? &def[s_capture_slot] :
+                                                   NULL, 1);
         return;
     }
     if (!(launcher_binding_title() ? a->offroad_key : a->hydro_key)) {
@@ -1013,61 +1014,59 @@ static void handle_key_capture(WPARAM key, LPARAM detail)
                    "controller instead.");
         return;
     }
-    mapped = key_name_from_message(key, detail, name, sizeof name);
+    mapped = key_name_from_message(key, detail, item.value, sizeof item.value);
     if (!mapped) {
         MessageBeep(MB_ICONWARNING);
         set_status("That key is not one of the MAME key names supported by "
                    "VCThunder.");
         return;
     }
-    /* THE KEY JOINS THE LIST, exactly as a controller button does. */
-    if (cap_add_key(mapped))
-        commit_capture();
+    item.pad = 0;
+    if (mapped != item.value)
+        snprintf(item.value, sizeof item.value, "%s", mapped);
+    commit_slot(&item, 0);
 }
 
-/* ADD IS THE ONLY WAY IN, so the capture always starts from what the row
- * already holds and joins the press to it. Replacing is Clear then Add, which
- * is two presses for the rarer thing and no hidden mode for either. */
-void begin_capture(unsigned action)
+/* A SLOT IS THE WAY IN, so a press replaces exactly one input and the row's
+ * other input stays where it is. A slot with nothing in it adds one. */
+void begin_capture(unsigned action, unsigned slot)
 {
-    const action_desc_t *a = &k_actions[action];
-    const char *have_key = model_key_binding(launcher_binding_title(), action);
-    const char *have_pad = model_pad_binding(launcher_binding_title(), action);
-
     s_capture_kind = 4;
     s_capture_action = (int)action;
+    s_capture_slot = (int)slot;
     s_capture_armed = 0;
     s_capture_deadline = GetTickCount() + CAPTURE_MS;
     s_capture_shown = -1;
-    s_cap_key[0] = s_cap_pad[0] = '\0';
-    s_cap_key_touched = s_cap_pad_touched = 0;
-    if ((launcher_binding_title() ? a->offroad_key : a->hydro_key) &&
-        *have_key && _stricmp(have_key, "NONE"))
-        snprintf(s_cap_key, sizeof s_cap_key, "%s", have_key);
-    if (a->has_pad && strcmp(have_pad, "0"))
-        snprintf(s_cap_pad, sizeof s_cap_pad, "%s", have_pad);
     /* THE KEYS THIS PROMISES ARRIVE AT THE MAIN WINDOW, AND THE BUTTON JUST
      * CLICKED HAS THE FOCUS. Without taking it back, Escape is dispatched to
      * that push button and the line below promises a key that does nothing. */
     SetFocus(launcher_window());
     update_binding_display(action);
-    set_status("Press the key or the button to add, on any controller. "
-               "Escape leaves this control alone; Clear empties it.");
+    set_status("Press the key or button for this slot, on any controller. "
+               "Delete empties it, Backspace puts back its default, Esc "
+               "leaves it as it was.");
 }
 
-void clear_binding(unsigned action)
+/* EVERY ROW OF THE GAME SHOWN back to its default, both halves. Nothing to
+ * confirm: nothing is written before Apply, and Close asks about unsaved
+ * changes. */
+void restore_all_bindings(void)
 {
-    const action_desc_t *a = &k_actions[action];
+    unsigned i;
+    char said[160];
 
     s_capture_kind = 0;
-    s_capture_action = (int)action;
-    if (launcher_binding_title() ? a->offroad_key : a->hydro_key)
-        snprintf(model_key_binding(launcher_binding_title(), action),
-                 MODEL_BINDING_CAP, "NONE");
-    if (a->has_pad)
-        snprintf(model_pad_binding(launcher_binding_title(), action),
-                 MODEL_BINDING_CAP, "0");
-    finish_capture("Unbound.");
+    for (i = 0; i < ACTION_COUNT; i++) {
+        model_binding_restore(launcher_binding_title(), i);
+        update_binding_display(i);
+    }
+    mark_dirty();
+    snprintf(said, sizeof said, "Every %s button is back to its default. "
+             "Press Apply to write it to vcthunder.ini.",
+             launcher_binding_title() ? "Offroad Thunder" : "Hydro Thunder");
+    /* A shared [digital] line can still put one input on two rows. */
+    if (!report_duplicate_binding(0) && !report_duplicate_binding(1))
+        set_status(said);
 }
 
 /* ---- Set up: three steps, and they MEASURE -------------------------------
@@ -1120,7 +1119,11 @@ static void wizard_stop(const char *why)
  * and manage both fields. One door out. */
 void abandon_capture(void)
 {
+    int slot_row = s_capture_kind == 4;
+
     s_capture_kind = 0;
+    if (slot_row)
+        update_binding_display((unsigned)s_capture_action);
     if (s_wizard)
         wizard_stop("Set up was interrupted; nothing was changed.");
 }
@@ -1337,7 +1340,7 @@ void begin_wizard(void)
          * questions would be about controls it does not have. */
         hold_note("Set up measures a wheel's axes. A gamepad's sticks and "
                   "triggers are already mapped; to change them, turn on Show "
-                  "advanced settings on Troubleshooting.");
+                  "advanced settings on Help.");
         MessageBeep(MB_ICONWARNING);
         return;
     }
@@ -1401,22 +1404,19 @@ void capture_tick_all(int have_device)
         axis_detect_tick();
 }
 
-int capture_row_text(unsigned action, char *out, size_t out_size)
+int capture_slot_text(unsigned action, unsigned slot, char *out,
+                      size_t out_size)
 {
-    char so_far[160];
     int left;
 
-    if (s_capture_kind != 4 || s_capture_action != (int)action)
+    if (s_capture_kind != 4 || s_capture_action != (int)action ||
+        s_capture_slot != (int)slot)
         return 0;
     left = (LONG)(s_capture_deadline - GetTickCount()) / 1000 + 1;
     if (left < 0)
         left = 0;
-    cap_so_far(so_far, sizeof so_far);
-    if (so_far[0])
-        snprintf(out, out_size, "%s  +  press one to add...  %d", so_far, left);
-    else
-        snprintf(out, out_size,
-                 "Press a key, or a button on any controller...  %d", left);
+    /* Short: the slot can be narrow, and the status line has the sentence. */
+    snprintf(out, out_size, "Press now...  %d", left);
     return 1;
 }
 

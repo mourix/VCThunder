@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
 """x86len.py -- a length-only x86-32 decoder, so that capstone is optional.
 

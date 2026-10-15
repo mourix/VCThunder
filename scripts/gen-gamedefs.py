@@ -13,13 +13,14 @@ found by scanning code patterns.
     python3 scripts/gen-gamedefs.py --title offroad
     python3 scripts/gen-gamedefs.py --check          # verify only, write nothing
 """
+import bisect
 import os
 import re
 import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from titles import get, ets_titles, REPO                   # noqa: E402
+from titles import get, ets_titles, REPO, MAME_DISKS       # noqa: E402
 from glide2_abi import FALLBACK_ARG_BYTES                  # noqa: E402
 from glide2_pushes import push_argbytes                    # noqa: E402
 
@@ -42,7 +43,7 @@ OUTDIR = os.path.join(REPO, "generated")
 
 # Ceilings must match src/game.h. Duplicated deliberately: the
 # generator refusing is a better failure than the shim overrunning an array.
-MAX = {"glide": 96, "imp": 160, "w32": 96, "loop": 32}
+MAX = {"glide": 96, "imp": 160, "w32": 96, "loop": 32, "hud": 16, "hudtext": 16}
 
 # --- hardware boundaries the shim implements itself -----------------------
 #
@@ -176,6 +177,28 @@ ANCHORS = [
                                "ring index the five phase histories are written at"),
     ("gameloop_delta_frames",  ["_Gameloop_nDeltaFrames"],
                                "_glcount_Advance stores its argument here; the 1/30 s step count"),
+    ("gameloop_setdrawfunc",   ["_gameloop_SetDrawFunc"],
+                               "installs the loop's draw function; drawreplay wraps what it installs"),
+    ("xfm_push",               ["_xfm_Push"],
+                               "every object matrix reaches the transform stack here; drawinterp blends it"),
+    ("xfm_initcamerarot",      ["_xfm_InitCameraRot"],
+                               "camera position + three 16-bit angles; drawinterp blends them"),
+    ("sky_work",               ["_sky_Work"],
+                               "pans Hydro's screen-space sky from the camera's three angles once a tick"),
+    ("hud_draw",               ["_hud_Draw"],
+                               "the HUD; drawinterp draws it from the real state, not the blend"),
+    ("xfm_stack",              ["_Xfm_aStack"],
+                               "the transform stack; element 0 is the camera, read for cuts"),
+    ("mesh3d_slidest",         ["_mesh3d_SlideST"],
+                               "steps a mesh's texture coordinates; drawinterp never blends what it moves"),
+    ("mvplayer_inmovie",       ["_mvplayer_inMovie"],
+                               "Offroad: nonzero while an attract movie plays; drawinterp stands aside"),
+    ("stream_file",            ["_stream_file"],
+                               "Offroad: the movie stream's open file, set before the player's flag"),
+    ("mvplayer_openmovie",     ["_mvplayer_OpenMovie"],
+                               "Offroad: opens a movie; an in-between draw that reaches it is abandoned"),
+    ("linklist_initpool",      ["_linklist_InitPool"],
+                               "threads a free-list pool; drawinterp notes where the never-blended pools live"),
     # --- geometry census ---
     ("mesh3d_drawgroup",   ["_mesh3d_DrawGroup_NoFrustumTest"],
                            "largest sampled game path; counted per frame against grDrawTriangle"),
@@ -292,6 +315,21 @@ ANCHORS = [
                            "the 2D/HUD ortho path; authored 1px oversize"),
     ("sky_viewport",       ["_sky_ChangeViewport"],
                            "rebuilds the sky quad after every viewport init"),
+    # Widescreen HUD at the edges (d_hud_elements and the comment above it).
+    ("hud_text_draw",      ["_hud_text_Draw"],
+                           "Hydro: every race-HUD string is printed inside it"),
+    ("text_printstr",      ["_text_PrintStr"],
+                           "appends one string's glyph records when buffered"),
+    ("gametext_print",     ["__GameTextPrint"],
+                           "Offroad: prints one gametext object at its own x"),
+    ("gametext_width",     ["_text_gametext_CalcWidth"],
+                           "Offroad: an object's width in pixels, as the HUD lays it out"),
+    ("text_flush",         ["_text_Flush"],
+                           "draws every buffered glyph; Offroad clips them to the screen limit"),
+    ("hud_lap_texts",      ["__hud_apLapTimeText"],
+                           "Offroad: pointer to the HUD's per-lap gametext objects"),
+    ("hud_num_laps",       ["__hud_nNumLaps"],
+                           "Offroad: how many of those there are"),
     ("sky_init",           ["_sky_Init"],
                            "builds the same sky quad at track load"),
     ("init3dfx_init",      ["_init3dfx_Init"],
@@ -491,6 +529,329 @@ def observed_argbytes(t, names):
 # Each returns its value or None. None is emitted as 0 and reported; it means
 # "this title does not have this pattern", which for a cross-title generator is
 # an ordinary answer and not a failure.
+
+
+# --- the draw phase as a script (drawinterp, Offroad) ----------------------
+#
+# Offroad has no draw function to call: `_gameloop_Start` inlines its draw phase
+# as a straight run of calls from `call _shadow_PerFrameStart` to
+# `call _grBufferSwap`. An in-between picture is that run again, so the run is
+# read out of the binary as a script the host can replay:
+#
+#   DS_CALL  fn, arg-kind, arg      a call with at most one cdecl argument
+#   DS_STOP  cell                   end the script if the dword at cell != 0
+#   DS_SKIP  cell, to               jump to step `to` if the dword at cell == 0
+#
+# Arguments are an immediate, a register whose constant the function set before
+# the run (`xor r,r` / `mov r,imm32`), or the previous call's return value.
+# Stores into cells and stack fix-ups are dropped: the replay restores memory.
+# ANY other instruction makes the derivation refuse, so a title shaped
+# differently gets no script rather than a wrong one.
+DS_CALL, DS_STOP, DS_SKIP = 1, 2, 3
+ARG_NONE, ARG_IMM, ARG_RET = 0, 1, 2
+DRAW_STEPS_MAX = 24
+
+
+def d_draw_script(t, log):
+    """(phase_site, swap_site, steps) or (0, 0, [])."""
+    import x86len
+    d = t.read()
+    loop = t.va("_gameloop_Start")
+    shadow = t.va("_shadow_PerFrameStart")
+    swap = t.va("_grBufferSwap")
+    if not (loop and shadow and swap):
+        return 0, 0, []
+    starts = sorted(v["va"] for v in t.symbols().values()
+                    if v.get("va") and v["va"] > loop)
+    end = starts[0] if starts else loop + 0x1000
+    off = lambda va: va - t.image_base
+    regs = {}
+    va, begin = loop, 0
+    while va < end:
+        r = x86len.decode(d, off(va), t.image_base)
+        if not r:
+            return 0, 0, []
+        size = r[0]
+        b = d[off(va):off(va) + size]
+        if b[0] == 0xE8 and va + 5 + int.from_bytes(b[1:5], "little", signed=True) == shadow:
+            begin = va
+            break
+        if size == 2 and b[0] in (0x31, 0x33) and (b[1] >> 6) == 3 and ((b[1] >> 3) & 7) == (b[1] & 7):
+            regs[b[1] & 7] = 0
+        elif size == 5 and 0xB8 <= b[0] <= 0xBF:
+            regs[b[0] - 0xB8] = int.from_bytes(b[1:5], "little")
+        va += size
+    if not begin:
+        return 0, 0, []
+    steps, pending, labels, fixups = [], None, {}, []
+    va = begin
+    last_cell = None
+    while True:
+        labels[va] = len(steps)
+        b = d[off(va):off(va) + 8]
+        if b[0] == 0xE8:
+            tgt = va + 5 + int.from_bytes(b[1:5], "little", signed=True)
+            if tgt == swap:
+                swap_site = va
+                break
+            kind, arg = pending if pending else (ARG_NONE, 0)
+            steps.append((DS_CALL, tgt, kind, arg))
+            pending = None
+            va += 5
+        elif b[0] == 0x68:                                   # push imm32
+            pending = (ARG_IMM, int.from_bytes(b[1:5], "little")); va += 5
+        elif 0x50 <= b[0] <= 0x57:                           # push reg
+            r = b[0] - 0x50
+            if r == 0:
+                pending = (ARG_RET, 0)
+            elif r in regs:
+                pending = (ARG_IMM, regs[r])
+            else:
+                log(f"draw script: push of an unknown register at 0x{va:08X}; refused")
+                return 0, 0, []
+            va += 1
+        elif b[0] == 0x83 and b[1] == 0xC4:                  # add esp, imm8
+            va += 3
+        elif b[0] == 0xA1:                                   # mov eax, [cell]
+            last_cell = int.from_bytes(b[1:5], "little"); va += 5
+        elif b[0] == 0xA3 or b[0] == 0x48:                   # store / dec eax
+            va += 5 if b[0] == 0xA3 else 1
+        elif b[0] == 0x3B and b[1] == 0xC3 and regs.get(3) == 0:   # cmp eax, ebx(=0)
+            va += 2
+        elif b[0] == 0x0F and b[1] == 0x85 and last_cell:    # jne out: stop
+            steps.append((DS_STOP, last_cell, 0, 0)); va += 6
+        elif b[0] == 0x39 and b[1] == 0x1D and regs.get(3) == 0:   # cmp [cell], ebx(=0)
+            last_cell = int.from_bytes(b[2:6], "little"); va += 6
+        elif b[0] == 0x74 and last_cell:                     # je short: skip
+            to = va + 2 + int.from_bytes(b[1:2], "little", signed=True)
+            fixups.append(len(steps))
+            steps.append((DS_SKIP, last_cell, to, 0)); va += 2
+        else:
+            log(f"draw script: unrecognised {b[:6].hex(' ')} at 0x{va:08X}; refused")
+            return 0, 0, []
+        if va - begin > 0x200 or len(steps) > DRAW_STEPS_MAX:
+            log("draw script: no _grBufferSwap within reach; refused")
+            return 0, 0, []
+    for i in fixups:
+        op, cell, to, _ = steps[i]
+        if to not in labels:
+            log(f"draw script: skip target 0x{to:08X} is not an instruction; refused")
+            return 0, 0, []
+        steps[i] = (op, cell, labels[to], 0)
+    return begin, swap_site, steps
+
+
+def d_timer_base(t):
+    """The cells `_timer_ResetHiResTimer` stamps with `_cpuTimeStamp(hi, lo)`:
+    the base the frame limiter measures its tick from. Both titles open it
+    `push lo; push hi; call _cpuTimeStamp`. (hi, lo) or (0, 0)."""
+    reset, stamp = t.va("_timer_ResetHiResTimer"), t.va("_cpuTimeStamp")
+    if not reset or not stamp:
+        return 0, 0
+    d = t.read()
+    o = reset - t.image_base
+    b = d[o:o + 15]
+    if b[0] != 0x68 or b[5] != 0x68 or b[10] != 0xE8:
+        return 0, 0
+    if reset + 15 + int.from_bytes(b[11:15], "little", signed=True) != stamp:
+        return 0, 0
+    lo = int.from_bytes(b[1:5], "little")
+    hi = int.from_bytes(b[6:10], "little")
+    return hi, lo
+
+
+# Functions whose _linklist_InitPool pools hold world-space records that are
+# recycled: a slot holds one record at tick N and another at N+1, and a blend
+# between them draws something neither tick has (a skid quad stretched across
+# the track, a splash droplet halfway between two). drawinterp never blends them.
+# Offroad's spark pool is one, and also a pool whose launch writes only the low
+# byte of a word (the type at +0x10): over the allocator's leftover bytes that
+# word can read as a float on both ticks, and its blend hands _spark_DrawCluster
+# a type past its five-entry curve table.
+NOBLEND_POOL_OWNERS = ["_skid_Init", "_particle_ResetSystem", "_spark_Init"]
+NOBLEND_POOLS_MAX = 4
+
+
+def d_noblend_pools(t):
+    """Every pool root a NOBLEND_POOL_OWNERS function hands _linklist_InitPool,
+    each the last `push imm32` before its call. A list of at most
+    NOBLEND_POOLS_MAX roots; an owner whose shape differs adds none."""
+    import x86len
+    pool = t.va("_linklist_InitPool")
+    if not pool:
+        return []
+    d = t.read()
+    fstarts = sorted(v["va"] for v in t.symbols().values() if v.get("va"))
+    roots = []
+    for owner in NOBLEND_POOL_OWNERS:
+        init = t.va(owner)
+        if not init:
+            continue
+        later = [a for a in fstarts if a > init]
+        end = later[0] if later else init + 0x200
+        found, last, va = [], None, init
+        while va < end:
+            r = x86len.decode(d, va - t.image_base, t.image_base)
+            if not r:
+                found = []
+                break
+            b = d[va - t.image_base:va - t.image_base + r[0]]
+            if b[0] == 0x68 and r[0] == 5:
+                last = int.from_bytes(b[1:5], "little")
+            elif b[0] == 0xE8 and va + 5 + int.from_bytes(b[1:5], "little", signed=True) == pool:
+                if not last:
+                    found = []
+                    break
+                found.append(last)
+            va += r[0]
+        roots += found
+    return roots[:NOBLEND_POOLS_MAX]
+
+
+def _insns(t, name, limit=0x400):
+    """(va, bytes) for each instruction of `name` from its entry, decoded
+    linearly for at most `limit` bytes; [] if absent or undecodable."""
+    import x86len
+    va = t.va(name)
+    if not va:
+        return []
+    d, out, end = t.read(), [], va + limit
+    while va < end:
+        r = x86len.decode(d, va - t.image_base, t.image_base)
+        if not r:
+            return []
+        out.append((va, d[va - t.image_base:va - t.image_base + r[0]]))
+        va += r[0]
+    return out
+
+
+def _s8(b):
+    return b - 0x100 if b >= 0x80 else b
+
+
+def d_record_tables(t):
+    """Hydro's effect records whose slots change owner between ticks, so
+    drawinterp must tell a record that is the same thing at tick N and N+1 from
+    one that is not. All zero for a title without them.
+
+    _waterspray_Work: the droplet buffer and its walk.
+        8b 0d <abs32>   mov ecx,[count]
+        a1 <abs32>      mov eax,[buffer pointer cell]
+        8d 68 BB        lea ebp,[eax+BB]        walk pointer = record + BB
+        d9 45 VV        fld [ebp+VV]            head velocity = BB + VV
+        8d 4d PP        lea ecx,[ebp+PP]        head position = BB + PP
+        83 c5 SS        add ebp,SS              record stride
+    _fx_splash_InitInstance: the instance table, first free slot.
+        b8 <abs32>      mov eax,base ; 83 38 00  cmp [eax],0 (active at +0)
+        83 c0 SS        add eax,SS ; 3d <abs32> cmp eax,end
+        c7 86 <abs32> 00000000   mov [esi+base+K],0   frame counter at +K
+    _fx_particles_InitSystem: per-type blocks of records.
+        bb <abs32>      mov ebx,first block ; be <abs32> mov esi,type table
+        8d 43 LL        lea eax,[ebx+LL] ; 89 50 MM  mov [eax+MM],edx
+                        first record at block + LL + MM, active bit 0 there
+        b9 <imm32>      mov ecx,records per block ; 83 c0 RR  add eax,RR
+        83 c6 TT        add esi,TT ; 81 c3 <imm32> add ebx,block stride
+        81 fe <abs32>   cmp esi,table end: blocks = (end - table) / TT
+    """
+    r = dict.fromkeys([
+        "spray_cell", "spray_count", "spray_stride", "spray_pos", "spray_vel",
+        "splash_base", "splash_stride", "splash_n", "splash_counter",
+        "fxpart_base", "fxpart_blocks", "fxpart_block_stride", "fxpart_recs",
+        "fxpart_rec_stride", "fxpart_rec_off"], 0)
+    u32 = lambda b, i: int.from_bytes(b[i:i + 4], "little")
+
+    ins = [b for _, b in _insns(t, "_waterspray_Work", 0x200)]
+    sp = {}
+    for b in ins:
+        if b[:2] == b"\x8b\x0d" and len(b) == 6 and "count" not in sp:
+            sp["count"] = u32(b, 2)
+        elif b[0] == 0xa1 and len(b) == 5 and "cell" not in sp:
+            sp["cell"] = u32(b, 1)
+        elif b[:2] == b"\x8d\x68" and len(b) == 3 and "bias" not in sp:
+            sp["bias"] = b[2]
+        elif b[:2] == b"\xd9\x45" and len(b) == 3 and "bias" in sp and "vel" not in sp:
+            sp["vel"] = sp["bias"] + _s8(b[2])
+        elif b[:2] == b"\x8d\x4d" and len(b) == 3 and "bias" in sp and "pos" not in sp:
+            sp["pos"] = sp["bias"] + _s8(b[2])
+    for _, b in _insns(t, "_waterspray_Work", 0x400):
+        if b[:2] == b"\x83\xc5" and len(b) == 3:
+            sp["stride"] = b[2]
+            break
+    if all(k in sp for k in ("count", "cell", "vel", "pos", "stride")):
+        r.update(spray_cell=sp["cell"], spray_count=sp["count"],
+                 spray_stride=sp["stride"], spray_pos=sp["pos"],
+                 spray_vel=sp["vel"])
+
+    ins = [b for _, b in _insns(t, "_fx_splash_InitInstance", 0x98)]
+    fs = {}
+    for i, b in enumerate(ins):
+        if (b[0] == 0xb8 and len(b) == 5 and i + 1 < len(ins) and
+                ins[i + 1] == b"\x83\x38\x00" and "base" not in fs):
+            fs["base"] = u32(b, 1)
+        elif b[:2] == b"\x83\xc0" and len(b) == 3 and "base" in fs and "stride" not in fs:
+            fs["stride"] = b[2]
+        elif b[0] == 0x3d and len(b) == 5 and "stride" in fs and "end" not in fs:
+            fs["end"] = u32(b, 1)
+        elif (b[:2] == b"\xc7\x86" and len(b) == 10 and u32(b, 6) == 0 and
+              "end" in fs and "counter" not in fs and
+              fs["base"] < u32(b, 2) < fs["base"] + fs["stride"]):
+            fs["counter"] = u32(b, 2) - fs["base"]
+    if (len(fs) == 4 and fs["stride"] and
+            (fs["end"] - fs["base"]) % fs["stride"] == 0):
+        r.update(splash_base=fs["base"], splash_stride=fs["stride"],
+                 splash_n=(fs["end"] - fs["base"]) // fs["stride"],
+                 splash_counter=fs["counter"])
+
+    ins = [b for _, b in _insns(t, "_fx_particles_InitSystem", 0x90)]
+    fp = {}
+    for b in ins:
+        if b[0] == 0xbb and len(b) == 5 and "base" not in fp:
+            fp["base"] = u32(b, 1)
+        elif b[0] == 0xbe and len(b) == 5 and "table" not in fp:
+            fp["table"] = u32(b, 1)
+        elif b[:2] == b"\x8d\x43" and len(b) == 3 and "lea" not in fp:
+            fp["lea"] = _s8(b[2])
+        elif b[:2] == b"\x89\x50" and len(b) == 3 and "lea" in fp and "off" not in fp:
+            fp["off"] = fp["lea"] + _s8(b[2])
+        elif b[0] == 0xb9 and len(b) == 5 and "recs" not in fp:
+            fp["recs"] = u32(b, 1)
+        elif b[:2] == b"\x83\xc0" and len(b) == 3 and "rstride" not in fp:
+            fp["rstride"] = b[2]
+        elif b[:2] == b"\x83\xc6" and len(b) == 3 and "tstep" not in fp:
+            fp["tstep"] = b[2]
+        elif b[:2] == b"\x81\xc3" and len(b) == 6 and "bstride" not in fp:
+            fp["bstride"] = u32(b, 2)
+        elif b[:2] == b"\x81\xfe" and len(b) == 6 and "tend" not in fp:
+            fp["tend"] = u32(b, 2)
+    if (all(k in fp for k in ("base", "table", "off", "recs", "rstride",
+                              "tstep", "bstride", "tend")) and fp["tstep"] and
+            (fp["tend"] - fp["table"]) % fp["tstep"] == 0 and
+            fp["off"] + fp["recs"] * fp["rstride"] <= fp["bstride"]):
+        r.update(fxpart_base=fp["base"],
+                 fxpart_blocks=(fp["tend"] - fp["table"]) // fp["tstep"],
+                 fxpart_block_stride=fp["bstride"], fxpart_recs=fp["recs"],
+                 fxpart_rec_stride=fp["rstride"], fxpart_rec_off=fp["off"])
+    return r
+
+
+def d_draw_site(t):
+    """Hydro: the loop's one `call dword ptr [_Gameloop_pDrawFunc]`. Hooking the
+    SETTER caught only the race's draw function; attract runs the default one
+    _gameloop_ModuleInit stores directly. (cell, site) or (0, 0)."""
+    loop, cell = t.va("_gameloop_Start"), t.va("_Gameloop_pDrawFunc")
+    if not loop or not cell:
+        return 0, 0
+    d = t.read()
+    needle = b"\xff\x15" + cell.to_bytes(4, "little")
+    a = loop - t.image_base
+    hits = []
+    pos = d.find(needle, a, a + 0x1000)
+    while pos >= 0:
+        hits.append(pos)
+        pos = d.find(needle, pos + 1, a + 0x1000)
+    if len(hits) != 1:
+        return 0, 0
+    return cell, t.image_base + hits[0]
 
 def d_arrow_materials(t):
     """_anim_land_InitArrowSign caches one (mesh, material) pair per ramp material
@@ -1233,6 +1594,18 @@ def d_hooks(t, log):
         ("hook_ws_race_update",  "_race_UpdateDynamics"),
         ("hook_ws_flag_icon",    "__hud_DrawFlagIcon"),
         ("hook_ws_select_draw",  "_wpr_select_Draw"),
+        ("hook_hud_text_draw",   "_hud_text_Draw"),
+        ("hook_text_printstr",   "_text_PrintStr"),
+        ("hook_gametext_print",  "__GameTextPrint"),
+        ("hook_text_flush",      "_text_Flush"),
+        ("hook_setdrawfunc",     "_gameloop_SetDrawFunc"),
+        ("hook_xfm_push",        "_xfm_Push"),
+        ("hook_xfm_initcamerarot", "_xfm_InitCameraRot"),
+        ("hook_sky_work",        "_sky_Work"),
+        ("hook_hud_draw",        "_hud_Draw"),
+        ("hook_mesh3d_slidest",  "_mesh3d_SlideST"),
+        ("hook_mvplayer_openmovie", "_mvplayer_OpenMovie"),
+        ("hook_linklist_initpool", "_linklist_InitPool"),
         ("hook_ymf_alloc",       "_ymf_AllocateSoundBuffer"),
         ("hook_ymf_free",        "_ymf_DeallocateSoundBuffer"),
         ("hook_r2_find_name",    "_r2file_FindObjectNameInDir"),
@@ -1268,6 +1641,274 @@ def d_hooks(t, log):
                 f"-- the shim must refuse this hook")
     return out
 
+
+
+# --- widescreen HUD at the edges ------------------------------------------
+#
+# A race HUD is authored for 512 columns: dials hug the 4:3 edges. Moving one
+# to the wide edge means giving each ELEMENT one horizontal offset, decided by
+# where it sits, so the host needs the element boundaries (the functions that
+# draw one element each) and, for text, the place the string's position lives
+# before it reaches the seam, because both titles buffer HUD text and draw it
+# later in one flush where strings can no longer be told apart.
+
+def _calls_in(t, d, va, starts, known):
+    """Direct call targets inside one function, in order. `starts` is the sorted
+    function-start list that bounds it; a target must be in `known`, which
+    rejects E8 bytes inside immediates. `known=None` accepts any target in
+    CODE, for a callee with one call site (func_table needs two); the caller
+    must then filter by what the target does."""
+    i = bisect.bisect_right(starts, va)
+    end = starts[i] if i < len(starts) else va + 0x1000
+    out, off = [], va - t.image_base
+    for at in range(off, end - t.image_base - 4):
+        if d[at] == 0xE8:
+            tgt = at + 5 + struct.unpack_from("<i", d, at + 1)[0] + t.image_base
+            if (tgt in known) if known is not None else \
+                    (t.code_va <= tgt < t.real_code_end_va):
+                out.append(tgt)
+    return out
+
+
+def d_text_glyphs(t, log):
+    """Hydro: where `_text_PrintStr` appends its glyph records. With
+    `_Text_nAttr & 0x100` (every HUD string: `_text_SetFont` sets 0x104) a
+    string is not drawn but appended to a buffer `_text_Flush` draws later:
+
+        mov eax, [count]  ; and eax, 0xffff         the record count (u16)
+        lea eax, [eax+eax*4] ; lea eax, [eax*8+buf]  40-byte records
+        mov edx, [_Text_fX] ... mov [eax+X], edx     the pen x of each glyph
+
+    Offroad's records are 64 bytes behind a different load and do not match;
+    its HUD text is moved by object instead (d_gametext)."""
+    keys = ("text_glyph_count", "text_glyph_buf", "text_glyph_stride", "text_glyph_x")
+    out = dict.fromkeys(keys)
+    va, fx = t.va("_text_PrintStr"), t.va("_Text_fX")
+    if not va or not fx:
+        return out
+    d = t.read()
+    body = d[va - t.image_base:va - t.image_base + 0x400]
+    m = re.search(rb"\xa1(....)\x25\xff\xff\x00\x00", body, re.S)
+    n = re.search(rb"\x8d\x04\x80\x8d\x04\xc5(....)", body, re.S)
+    x = re.search(rb"\x8b\x15" + re.escape(struct.pack("<I", fx)) +
+                  rb".{0,12}?\x89\x50(.)", body, re.S)
+    if not (m and n and x and m.start() < n.start() < x.start()):
+        return out
+    out["text_glyph_count"] = struct.unpack("<I", m.group(1))[0]
+    out["text_glyph_buf"] = struct.unpack("<I", n.group(1))[0]
+    out["text_glyph_stride"] = 5 * 8
+    out["text_glyph_x"] = x.group(1)[0]
+    log(f"HUD text glyphs           : count @0x{out['text_glyph_count']:08X} "
+        f"buf @0x{out['text_glyph_buf']:08X}, {out['text_glyph_stride']}-byte "
+        f"records, pen x at +{out['text_glyph_x']}")
+    return out
+
+
+def d_finish_stats(t, log):
+    """Hydro: `_hud_text_SetupFinishStats` turns the result screen on by
+    setting one bit in `_hud_text_Draw`'s flags word:
+
+        mov eax, [flags] ... or eax, BIT ... mov [flags], eax
+
+    While it is set the text pass draws the result composition (your time,
+    best time, place, new high score), which is centred and must not split."""
+    va = t.va("_hud_text_SetupFinishStats")
+    if not va:
+        return None, None
+    d = t.read()
+    body = d[va - t.image_base:va - t.image_base + 0x60]
+    m = re.search(rb"\xa1(....).{0,24}?\x0d(....).{0,24}?\xa3\1", body, re.S)
+    if not m:
+        raise SystemExit(f"gen-gamedefs: {t.id} _hud_text_SetupFinishStats: "
+                         f"no flags read-or-write found")
+    flags = struct.unpack("<I", m.group(1))[0]
+    bit = struct.unpack("<I", m.group(2))[0]
+    log(f"HUD finish stats          : flags @0x{flags:08X} bit 0x{bit:X}")
+    return flags, bit
+
+
+def d_tracking_cards(t, log):
+    """Hydro: `_boats_DrawAllTrackingNumbers` puts a card on the screen's edge
+    for each boat beside or behind the camera, one `_mesh3d_DrawOrtho(mesh, x,
+    y, ...)` each, x about the field's centre. A side card's x is a literal
+    pushed just before the mesh; a bottom card's is the rival's sideways
+    direction times a constant, the last `fmul m32` before the call:
+
+        push imm32 ; push r32 ; call _mesh3d_DrawOrtho          side, x = +-k'
+        fmul [k] .. fstp [esp] ; push r32 ; call ...            bottom, |x| <= k
+
+    Returns (ra_lo, ra_hi, &k): the span of the calls' return addresses and
+    where k lives. Offroad places its racer tags by projecting against the
+    viewport, which the ws_racer_tag repair already widens."""
+    va, ortho = t.va("_boats_DrawAllTrackingNumbers"), t.va("_mesh3d_DrawOrtho")
+    if not va or not ortho:
+        return None, None, None
+    d = t.read()
+    starts = func_table(t)
+    end = starts[bisect.bisect_right(starts, va)] - t.image_base
+    lo = va - t.image_base
+    ras, sides, ks = [], set(), set()
+    for at in range(lo, end - 4):
+        if d[at] != 0xE8 or (at + 5 + struct.unpack_from("<i", d, at + 1)[0]
+                             + t.image_base) != ortho:
+            continue
+        if not 0x50 <= d[at - 1] <= 0x57:
+            raise SystemExit(f"gen-gamedefs: {t.id} tracking card call at "
+                             f"0x{at + t.image_base:08X}: no mesh push before it")
+        ras.append(at + 5 + t.image_base)
+        if d[at - 6] == 0x68:
+            sides.add(abs(struct.unpack_from("<f", d, at - 5)[0]))
+            continue
+        m = None
+        for m in re.finditer(rb"\xd8\x0d(....)", d[at - 0x30:at], re.S):
+            pass
+        if not m:
+            raise SystemExit(f"gen-gamedefs: {t.id} tracking card call at "
+                             f"0x{at + t.image_base:08X}: no x scale before it")
+        ks.add(struct.unpack("<I", m.group(1))[0])
+    if len(sides) != 1 or len(ks) != 1 or len(ras) < 2:
+        raise SystemExit(f"gen-gamedefs: {t.id} _boats_DrawAllTrackingNumbers: "
+                         f"expected one side x and one bottom scale, found "
+                         f"{sorted(sides)} and {[hex(k) for k in ks]}")
+    k = ks.pop()
+    kf = struct.unpack_from("<f", d, k - t.image_base)[0]
+    side = sides.pop()
+    if not 0.0 < kf <= side < 512.0:
+        raise SystemExit(f"gen-gamedefs: {t.id} tracking cards: bottom scale "
+                         f"{kf} and side x {side} do not nest")
+    log(f"tracking cards            : {len(ras)} ortho calls, sides at x "
+        f"+-{side:g}, bottom x scale @0x{k:08X} = {kf:g}")
+    return min(ras), max(ras), k
+
+
+def d_gametext(t, log):
+    """Offroad: `__GameTextPrint(obj)` sets the font, scale and attributes from
+    a gametext object and calls `_text_PrintF(obj->x, obj->y, obj->str)`; the
+    object's style word goes to `_Text_nStyle`, whose bit 4 centres the string
+    on x (`x -= width * 0.5`, both titles). Both offsets are read from the
+    function rather than assumed."""
+    out = {"gametext_x": None, "gametext_style": None}
+    va, st, pf = t.va("__GameTextPrint"), t.va("_Text_nStyle"), t.va("_text_PrintF")
+    if not va or not st or not pf:
+        return out
+    d = t.read()
+    off = va - t.image_base
+    body = d[off:off + 0xB0]
+    s = re.search(rb"\x8b\x46(.).{0,4}?\xa3" + re.escape(struct.pack("<I", st)),
+                  body, re.S)
+    for m in re.finditer(rb"\x8b\x4e(.).{0,6}?\x51\xe8(....)", body, re.S):
+        at = off + m.end() - 5
+        if at + 5 + struct.unpack("<i", m.group(2))[0] + t.image_base == pf:
+            out["gametext_x"] = m.group(1)[0]
+    if s:
+        out["gametext_style"] = s.group(1)[0]
+    if out["gametext_x"] is not None and out["gametext_style"] is not None:
+        log(f"HUD gametext object       : x at +0x{out['gametext_x']:X}, "
+            f"style at +0x{out['gametext_style']:X}")
+    return out
+
+
+def d_hud_text_vars(t, log):
+    """Offroad: the pointer variables holding the gametext objects that sit at
+    a screen edge: the race HUD's `__hud_p*Text`. Only these objects move;
+    every other string keeps the cabinet's place: high-score tables, legal
+    text, racer tags, and attract's yellow credit line (`__attract_p*Gametext`,
+    which the owner wants left where the cabinet had it)."""
+    syms = t.symbols()
+    out = sorted((v["va"], k) for k, v in syms.items() if v["va"] and
+                 re.match(r"^__hud_p\w+Text$", k))
+    if out:
+        log(f"HUD text objects          : {len(out)} "
+            f"({', '.join(k for _, k in out)})")
+    return out
+
+
+def d_hud_elements(t, log):
+    """The functions that draw one HUD element each. Every primitive one of
+    them submits gets the same offset, decided by where the first lands.
+
+    Hydro: `_hud_Draw` calls `_hud_radar_Draw` (the right dial) and then two
+    unnamed functions (the speed and boost dials, left) before the lens flare,
+    once in each of two switch arms; and `_hud_text_Draw` calls one unnamed
+    helper that draws a time as ortho digits (it converts with
+    `_xmath_ConvertAFloatSecs2NumOfMinSecCSec`). Attract's overlay is the one
+    unnamed callee of `_wpr_attract_Draw` that draws ortho meshes. With no
+    high-score table up it draws the logo and the web address, one
+    `_mesh3d_DrawOrtho` each, and returns; past that first `ret` it draws the
+    table one mesh per character, which must stay put. So there an element is
+    each `_mesh3d_DrawOrtho` whose return address is before that `ret`. Offroad: every `__hud_Draw*` that
+    `_hud_Draw` calls, except `__hud_DrawFlagIcon`, whose widescreen hook
+    already exists and opens the element itself; and
+    `__attract_Draw2DAssetEZ`, whose one caller draws the demo's logo."""
+    d = t.read()
+    starts = func_table(t)
+    known = set(starts)
+    syms = t.symbols()
+    named = {v["va"]: k for k, v in syms.items() if v["va"]}
+    hud = t.va("_hud_Draw")
+    if not hud:
+        return []
+    els = []
+    radar, flare = t.va("_hud_radar_Draw"), t.va("_anim_air_DoLensFlare")
+    if radar and flare:
+        calls = _calls_in(t, d, hud, starts, known)
+        arms = {tuple(calls[i + 1:i + 3]) for i, c in enumerate(calls)
+                if c == radar and i + 3 < len(calls) and calls[i + 3] == flare}
+        if len(arms) != 1:
+            raise SystemExit(f"gen-gamedefs: {t.id} _hud_Draw: expected one "
+                             f"radar/dial/dial/flare order, found {sorted(arms)}")
+        els.append((radar, "_hud_radar_Draw", (0, 0, 0)))
+        for va in next(iter(arms)):
+            if va in named:
+                raise SystemExit(f"gen-gamedefs: {t.id} _hud_Draw dial "
+                                 f"0x{va:08X} is named {named[va]}")
+            els.append((va, f"_hud_Draw dial 0x{va:06X}", (0, 0, 0)))
+        txt, conv = t.va("_hud_text_Draw"), t.va("_xmath_ConvertAFloatSecs2NumOfMinSecCSec")
+        ortho = t.va("_mesh3d_DrawOrtho")
+        digits = sorted({c for c in _calls_in(t, d, txt, starts, known)
+                         if c not in named and conv in _calls_in(t, d, c, starts, known)
+                         and ortho in _calls_in(t, d, c, starts, known)})
+        if len(digits) != 1:
+            raise SystemExit(f"gen-gamedefs: {t.id} _hud_text_Draw: expected one "
+                             f"time-digit helper, found {[hex(v) for v in digits]}")
+        els.append((digits[0], f"_hud_text_Draw digits 0x{digits[0]:06X}", (0, 0, 0)))
+        att = t.va("_wpr_attract_Draw")
+        over = sorted({c for c in _calls_in(t, d, att, starts, None)
+                       if c not in named and ortho in _calls_in(t, d, c, starts, known)})
+        if len(over) != 1:
+            raise SystemExit(f"gen-gamedefs: {t.id} _wpr_attract_Draw: expected "
+                             f"one ortho overlay, found {[hex(v) for v in over]}")
+        o = over[0] - t.image_base
+        ret = d.index(b"\xc3", o)              # the logo path's own return
+        ras = [at + 5 + t.image_base for at in range(o, ret - 4)
+               if d[at] == 0xE8 and at + 5 + struct.unpack_from("<i", d, at + 1)[0]
+               + t.image_base == ortho]
+        if len(ras) != 2:
+            raise SystemExit(f"gen-gamedefs: {t.id} attract overlay: expected "
+                             f"two ortho draws before its first ret, found "
+                             f"{[hex(r) for r in ras]}")
+        els.append((over[0], f"_wpr_attract_Draw overlay 0x{over[0]:06X}",
+                    (1, ras[0], ras[-1])))
+    else:
+        seen = []
+        for c in _calls_in(t, d, hud, starts, known):
+            n = named.get(c, "")
+            if n.startswith("__hud_Draw") and n != "__hud_DrawFlagIcon" and c not in seen:
+                seen.append(c)
+        els = [(va, named[va], (0, 0, 0)) for va in seen]
+        logo = t.va("__attract_Draw2DAssetEZ")
+        if logo:
+            els.append((logo, "__attract_Draw2DAssetEZ", (0, 0, 0)))
+    out = []
+    for va, name, kind in els:
+        meta = _hook_prologue(d, va - t.image_base)
+        if not meta:
+            log(f"hook: HUD element {name} @ 0x{va:08X} has no relocatable "
+                f"prologue -- it stays where the cabinet put it")
+            continue
+        out.append((va, meta, kind, name))
+    log(f"HUD elements              : {len(out)} ({', '.join(n for _, _, _, n in out)})")
+    return out
 
 def _branch_targets(data, lo, hi, image_base):
     tg, i = set(), lo
@@ -1458,7 +2099,7 @@ def emit(t, tables, log):
       f" * Title   : {t.id} ({t.name})\n"
       f" * Image   : {t.meta['exe']}\n"
       f" * sha256  : {t.sha256()}\n"
-      f" * Symbols : {os.path.relpath(t.symbols_path, REPO)}\n"
+      f" * Symbols : the image's own CodeView table (scripts/p1-symbols.py)\n"
       f" * Regenerate after any analysis change:\n"
       f" *     python3 scripts/gen-gamedefs.py --title {t.id}\n"
       f" */\n"
@@ -1487,6 +2128,11 @@ def emit(t, tables, log):
     spk = d_speaker_mode(t)
     vhit, vmiss = d_vtxcache(t)
     arrows = d_arrow_materials(t)
+    ds_begin, ds_swap, ds_steps = d_draw_script(t, log)
+    pdraw_cell, pdraw_site = d_draw_site(t)
+    tbase_hi, tbase_lo = d_timer_base(t)
+    noblend = d_noblend_pools(t) + [0] * NOBLEND_POOLS_MAX
+    rect = d_record_tables(t)
     loops = d_loop_heads(t, log)
     funcs = func_table(t)
 
@@ -1499,6 +2145,18 @@ def emit(t, tables, log):
     ffb = d_ffb_cells(t)
     cks = d_code_cksum(t)
     hooks = d_hooks(t, log)
+    glyph = d_text_glyphs(t, log)
+    fin_flags, fin_bit = d_finish_stats(t, log)
+    track_lo, track_hi, track_k = d_tracking_cards(t, log)
+    gtext = d_gametext(t, log)
+    hud_txt = d_hud_text_vars(t, log)
+    hud_els = d_hud_elements(t, log)
+    if len(hud_els) > MAX["hud"]:
+        log(f"ERROR: HUD element table has {len(hud_els)} entries, ceiling is {MAX['hud']}")
+        tables["over"].append(("hud", len(hud_els), MAX["hud"]))
+    if len(hud_txt) > MAX["hudtext"]:
+        log(f"ERROR: HUD text table has {len(hud_txt)} entries, ceiling is {MAX['hudtext']}")
+        tables["over"].append(("hudtext", len(hud_txt), MAX["hudtext"]))
     derived = [
         ("hook_init3dfx", hooks["hook_init3dfx"],
          "_init3dfx_Init prologue: len | reloc<<8"),
@@ -1531,6 +2189,86 @@ def emit(t, tables, log):
          "__hud_DrawFlagIcon prologue: len | reloc<<8"),
         ("hook_ws_select_draw", hooks["hook_ws_select_draw"],
          "_wpr_select_Draw prologue: len | reloc<<8"),
+        ("hook_hud_text_draw", hooks["hook_hud_text_draw"],
+         "_hud_text_Draw prologue: len | reloc<<8"),
+        ("hook_text_printstr", hooks["hook_text_printstr"],
+         "_text_PrintStr prologue: len | reloc<<8"),
+        ("hook_gametext_print", hooks["hook_gametext_print"],
+         "__GameTextPrint prologue: len | reloc<<8"),
+        ("hook_text_flush", hooks["hook_text_flush"],
+         "_text_Flush prologue: len | reloc<<8"),
+        ("hook_setdrawfunc", hooks["hook_setdrawfunc"],
+         "_gameloop_SetDrawFunc prologue: len | reloc<<8"),
+        ("hook_xfm_push", hooks["hook_xfm_push"],
+         "_xfm_Push prologue: len | reloc<<8"),
+        ("hook_xfm_initcamerarot", hooks["hook_xfm_initcamerarot"],
+         "_xfm_InitCameraRot prologue: len | reloc<<8"),
+        ("hook_sky_work", hooks["hook_sky_work"],
+         "_sky_Work prologue: len | reloc<<8"),
+        ("hook_hud_draw", hooks["hook_hud_draw"],
+         "_hud_Draw prologue: len | reloc<<8"),
+        ("hook_mesh3d_slidest", hooks["hook_mesh3d_slidest"],
+         "_mesh3d_SlideST prologue: len | reloc<<8"),
+        ("hook_mvplayer_openmovie", hooks["hook_mvplayer_openmovie"],
+         "_mvplayer_OpenMovie prologue: len | reloc<<8"),
+        ("hook_linklist_initpool", hooks["hook_linklist_initpool"],
+         "_linklist_InitPool prologue: len | reloc<<8"),
+        ("noblend_pool_a", noblend[0],
+         "a recycled pool drawinterp never blends (NOBLEND_POOL_OWNERS)"),
+        ("noblend_pool_b", noblend[1], "likewise"),
+        ("noblend_pool_c", noblend[2], "likewise"),
+        ("noblend_pool_d", noblend[3], "likewise"),
+        ("spray_cell", rect["spray_cell"],
+         "Hydro: _waterspray's droplet buffer pointer cell (d_record_tables)"),
+        ("spray_count", rect["spray_count"], "Hydro: its droplet count"),
+        ("spray_stride", rect["spray_stride"], "Hydro: bytes per droplet record"),
+        ("spray_pos", rect["spray_pos"], "Hydro: offset of a droplet's head position"),
+        ("spray_vel", rect["spray_vel"], "Hydro: offset of a droplet's head velocity"),
+        ("splash_base", rect["splash_base"], "Hydro: _fx_splash's instance table"),
+        ("splash_stride", rect["splash_stride"], "Hydro: bytes per splash instance"),
+        ("splash_n", rect["splash_n"], "Hydro: splash instances"),
+        ("splash_counter", rect["splash_counter"],
+         "Hydro: offset of a splash instance's frame counter"),
+        ("fxpart_base", rect["fxpart_base"], "Hydro: _fx_particles' first record block"),
+        ("fxpart_blocks", rect["fxpart_blocks"], "Hydro: record blocks, one per effect type"),
+        ("fxpart_block_stride", rect["fxpart_block_stride"], "Hydro: bytes per block"),
+        ("fxpart_recs", rect["fxpart_recs"], "Hydro: records per block"),
+        ("fxpart_rec_stride", rect["fxpart_rec_stride"], "Hydro: bytes per record"),
+        ("fxpart_rec_off", rect["fxpart_rec_off"],
+         "Hydro: offset of a block's first record (active bit 0 of its first dword)"),
+        ("gameloop_pdrawfunc", pdraw_cell,
+         "Hydro: _Gameloop_pDrawFunc, the loop's draw function cell"),
+        ("gameloop_draw_site", pdraw_site,
+         "Hydro: the loop's one call [_Gameloop_pDrawFunc]"),
+        ("draw_phase_site", ds_begin,
+         "Offroad: the loop's call _shadow_PerFrameStart, where its draw phase begins"),
+        ("draw_swap_site", ds_swap,
+         "Offroad: the loop's call _grBufferSwap, where its draw phase ends"),
+        ("timer_base_hi", tbase_hi,
+         "_timer_ResetHiResTimer's base stamp, high dword: the limiter's tick start"),
+        ("timer_base_lo", tbase_lo,
+         "_timer_ResetHiResTimer's base stamp, low dword"),
+        ("text_glyph_count", glyph["text_glyph_count"],
+         "Hydro: u16 count of buffered glyph records, from _text_PrintStr"),
+        ("text_glyph_buf", glyph["text_glyph_buf"],
+         "Hydro: the glyph record buffer, from _text_PrintStr"),
+        ("text_glyph_stride", glyph["text_glyph_stride"],
+         "Hydro: bytes per glyph record, from _text_PrintStr's lea pair"),
+        ("text_glyph_x", glyph["text_glyph_x"],
+         "Hydro: offset of a record's pen x, stored from _Text_fX"),
+        ("hud_finish_flags", fin_flags,
+         "Hydro: _hud_text_Draw's flags word, from _hud_text_SetupFinishStats"),
+        ("hud_finish_bit", fin_bit,
+         "Hydro: the bit in it that puts the result screen up"),
+        ("track_ra_lo", track_lo,
+         "Hydro: first return address of _boats_DrawAllTrackingNumbers' card draws"),
+        ("track_ra_hi", track_hi, "Hydro: and the last"),
+        ("track_spread", track_k,
+         "Hydro: the float a bottom card's sideways direction is scaled by"),
+        ("gametext_x", gtext["gametext_x"],
+         "Offroad: offset of a gametext object's x, from __GameTextPrint"),
+        ("gametext_style", gtext["gametext_style"],
+         "Offroad: offset of its style word, copied to _Text_nStyle"),
         ("hook_ymf_alloc", hooks["hook_ymf_alloc"],
          "_ymf_AllocateSoundBuffer prologue: len | reloc<<8"),
         ("hook_ymf_free", hooks["hook_ymf_free"],
@@ -1681,6 +2419,28 @@ def emit(t, tables, log):
         w("    0,   /* none found; arrow_material_count is 0 */\n")
     w("};\n")
 
+    w(f"\nstatic const uint32_t DRAWSCRIPT_{tid}[] = {{\n")
+    for op, a, b2, c in ds_steps:
+        w(f"    {op}, 0x{a:08X}, {b2}, 0x{c:08X},\n")
+    if not ds_steps:
+        w("    0,   /* none derived; draw_step_count is 0 */\n")
+    w("};\n")
+
+    w(f"\nstatic const game_hud_t HUD_{tid}[] = {{\n")
+    for va, meta, (kind, lo, hi), name in hud_els:
+        w(f'    {{ 0x{va:08X}, 0x{meta:08X}, {kind}, 0x{lo:08X}, 0x{hi:08X}, '
+          f'"{name}" }},\n')
+    if not hud_els:
+        w("    { 0, 0, 0, 0, 0, 0 },   /* none found; hud_elem_count is 0 */\n")
+    w("};\n")
+
+    w(f"\nstatic const uint32_t HUDTXT_{tid}[] = {{\n")
+    for va, name in hud_txt:
+        w(f"    0x{va:08X},   /* {name} */\n")
+    if not hud_txt:
+        w("    0,   /* none found; hud_text_var_count is 0 */\n")
+    w("};\n")
+
     w(f"\nstatic const uint32_t FUNCS_{tid}[] = {{\n")
     for i in range(0, len(funcs), 8):
         w("    " + " ".join(f"0x{v:08X}," for v in funcs[i:i + 8]) + "\n")
@@ -1692,7 +2452,8 @@ def emit(t, tables, log):
     w(f'    .exe = "{os.path.basename(t.meta["exe"])}",\n')
     w(f'    .sha256 = "{t.sha256()}",\n')
     w(f"    .file_size = {len(t.read())},\n")
-    w(f'    .io_board = "{t.meta["io"]}",\n\n')
+    w(f'    .io_board = "{t.meta["io"]}",\n')
+    w(f'    .build = "{t.meta["build"]}",\n\n')
     for f, v in [("image_base", t.image_base), ("code_file_off", t.code_file_off),
                  ("code_size", t.code_size), ("code_va", t.code_va),
                  ("real_code_end_va", t.real_code_end_va), ("data_va", t.data_va),
@@ -1709,7 +2470,10 @@ def emit(t, tables, log):
                            ("hw", f"HW_{tid}", len(tables["hw"])),
                            ("loop", f"LOOP_{tid}", len(loops)),
                            ("arrow_material", f"ARROW_{tid}", len(arrows)),
-                           ("func_va", f"FUNCS_{tid}", len(funcs))]:
+                           ("func_va", f"FUNCS_{tid}", len(funcs)),
+                           ("hud_elem", f"HUD_{tid}", len(hud_els)),
+                           ("hud_text_var", f"HUDTXT_{tid}", len(hud_txt)),
+                           ("draw_step", f"DRAWSCRIPT_{tid}", len(ds_steps))]:
         cf = "func_count" if name == "func_va" else f"{name}_count"
         w(f"    .{name} = {arr}, .{cf} = {cnt},\n")
     w("};\n")
@@ -1770,6 +2534,15 @@ def emit_registry(tids):
     for t in tids:
         out.append(f"    &g_profile_{t},\n")
     out.append("    0\n};\n")
+    out.append("\nconst game_mame_disk_t g_mame_disks[] = {\n")
+    for d in MAME_DISKS:
+        if d["title"] not in tids:
+            continue
+        out.append(f'    {{ "{d["set"]}", "{d["chd"]}", "{d["name"]}", '
+                   f'&g_profile_{d["title"]},\n'
+                   f'      "{d["sha1"]}", "{d["rawsha1"]}",\n'
+                   f'      "{d["exe_sha256"]}" }},\n')
+    out.append("    { 0 }\n};\n")
     return "".join(out)
 
 
@@ -1777,6 +2550,21 @@ def emit_registry(tids):
 # an anchor absent from a title is a fact about the title, and the shim's
 # installers check for it. Guessing a plausible address instead would produce a
 # shim that patches the wrong function and reports success.
+def same_as_disk(path, src):
+    """True when the committed file is exactly what the dump produces."""
+    rel = os.path.relpath(path, REPO)
+    try:
+        have = open(path).read()
+    except FileNotFoundError:
+        print(f"  {rel}: missing; 'make defs' writes it")
+        return False
+    if have != src:
+        print(f"  {rel}: DIFFERS from what the dump produces; 'make defs'"
+              f" rewrites it, and the diff is reviewed like code")
+        return False
+    return True
+
+
 def main():
     argv = sys.argv[1:]
     check = "--check" in argv
@@ -1804,13 +2592,22 @@ def main():
             failed.append(tid)
             print(f"  REFUSING to write {tid}: table over ceiling")
             continue
+        path = os.path.join(OUTDIR, f"{tid}_profile.c")
         if check:
+            if not same_as_disk(path, src):
+                failed.append(tid)
             continue
         os.makedirs(OUTDIR, exist_ok=True)
-        path = os.path.join(OUTDIR, f"{tid}_profile.c")
         open(path, "w").write(src)
         print(f"wrote generated/{tid}_profile.c")
 
+    # generated/ is committed, so --check is the drift guard: what the dumps
+    # produce must be byte-identical to what the build compiles.
+    if check and not failed and len(tids) == len(ets_titles()):
+        for name, src in (("profiles.c", emit_registry(tids)),
+                          ("span.h", emit_span(tids))):
+            if not same_as_disk(os.path.join(OUTDIR, name), src):
+                failed.append(name)
     if not check and not failed:
         ok = [t for t in tids if t not in failed]
         open(os.path.join(OUTDIR, "profiles.c"), "w").write(emit_registry(ok))

@@ -18,8 +18,8 @@ import argparse
 import sys
 from pathlib import Path
 
-# Not tracked, not published: build output, the profiles generated from the
-# user's own dump, and logs.
+# Not tracked, not published: build output and logs. generated/ IS scanned: it
+# is committed, and it is text.
 # 'chd' holds what the user supplies: their own CHDs and chdman; see
 # chd/README.md. It is documented, gitignored, and not ours, so it is not
 # scanned.
@@ -29,7 +29,7 @@ from pathlib import Path
 # and data/ is the unpacked games. Both live inside this tree, so without
 # these two entries the scan reports every file in them and `make check` fails
 # on a repository that is perfectly clean.
-SKIP_DIRS = {'build', 'generated', '__pycache__', '.git', 'chd', 'run', 'data'}
+SKIP_DIRS = {'build', '__pycache__', '.git', 'chd', 'run', 'data'}
 
 # The one binary this repository is allowed to contain. It is project-authored,
 # generated from coordinates, and it has to be binary to be an icon.

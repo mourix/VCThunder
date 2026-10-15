@@ -155,6 +155,119 @@ static void texture_write(int tmu, uint32_t first, uint32_t last)
         s_write_count[tmu]++;
 }
 
+/* ---- speculative writes ---------------------------------------------------
+ *
+ * The host can draw a picture from game state it will then throw away (an
+ * in-between frame at frame_rate = 60). The game's record of which texture sits
+ * where in texture memory is thrown away with that state, so texture memory
+ * has to be as well: an upload made for the discarded picture would otherwise
+ * stay, and the next real frame would draw a texture the game no longer
+ * believes is there. Between vgl_spec_begin and vgl_spec_end every write saves
+ * the bytes it replaces, and the end puts them back, newest first, through
+ * texture_write so every cache sees the range change again. Palettes are
+ * saved whole on their first change. */
+typedef struct { int tmu; uint32_t off, len; size_t at; } spec_rec_t;
+static int          s_spec;
+static unsigned char *s_spec_buf;
+static size_t       s_spec_used, s_spec_cap;
+static spec_rec_t  *s_spec_rec;
+static size_t       s_spec_n, s_spec_rcap;
+static int          s_spec_pal_saved;
+static uint32_t     s_spec_pal[VGL_TMUS][256];
+static int          s_spec_pal_valid[VGL_TMUS];
+
+static void spec_save(int tmu, uint32_t off, uint32_t len)
+{
+    vgl_tmu_t *u = &vgl.tmu[tmu];
+
+    if (!s_spec || !len || !u->mem)
+        return;
+    if (s_spec_used + len > s_spec_cap) {
+        size_t cap = s_spec_cap ? s_spec_cap : (1u << 20);
+        unsigned char *b;
+
+        while (cap < s_spec_used + len)
+            cap *= 2;
+        b = (unsigned char *)realloc(s_spec_buf, cap);
+        if (!b) {
+            s_spec = 0;                 /* cannot journal: say so, stop */
+            vgl_log(0, "tex: speculative journal out of memory; writes "
+                       "from here on are kept");
+            return;
+        }
+        s_spec_buf = b;
+        s_spec_cap = cap;
+    }
+    if (s_spec_n == s_spec_rcap) {
+        size_t cap = s_spec_rcap ? s_spec_rcap * 2 : 256;
+        spec_rec_t *r = (spec_rec_t *)realloc(s_spec_rec, cap * sizeof *r);
+
+        if (!r) {
+            s_spec = 0;
+            return;
+        }
+        s_spec_rec = r;
+        s_spec_rcap = cap;
+    }
+    memcpy(s_spec_buf + s_spec_used, u->mem + off, len);
+    s_spec_rec[s_spec_n].tmu = tmu;
+    s_spec_rec[s_spec_n].off = off;
+    s_spec_rec[s_spec_n].len = len;
+    s_spec_rec[s_spec_n].at = s_spec_used;
+    s_spec_n++;
+    s_spec_used += len;
+}
+
+static void spec_save_palettes(void)
+{
+    int t;
+
+    if (!s_spec || s_spec_pal_saved)
+        return;
+    for (t = 0; t < VGL_TMUS; t++) {
+        memcpy(s_spec_pal[t], vgl.tmu[t].palette, sizeof s_spec_pal[t]);
+        s_spec_pal_valid[t] = vgl.tmu[t].palette_valid;
+    }
+    s_spec_pal_saved = 1;
+}
+
+void vgl_spec_begin(void)
+{
+    s_spec = 1;
+    s_spec_used = s_spec_n = 0;
+    s_spec_pal_saved = 0;
+}
+
+void vgl_spec_end(void)
+{
+    size_t i;
+    int t;
+
+    s_spec = 0;
+    for (i = s_spec_n; i-- > 0; ) {
+        const spec_rec_t *r = &s_spec_rec[i];
+
+        memcpy(vgl.tmu[r->tmu].mem + r->off, s_spec_buf + r->at, r->len);
+        texture_write(r->tmu, r->off, r->off + r->len);
+    }
+    s_spec_n = s_spec_used = 0;
+    if (s_spec_pal_saved) {
+        for (t = 0; t < VGL_TMUS; t++) {
+            vgl_tmu_t *u = &vgl.tmu[t];
+
+            if (u->palette_valid == s_spec_pal_valid[t] &&
+                !memcmp(u->palette, s_spec_pal[t], sizeof s_spec_pal[t]))
+                continue;
+            memcpy(u->palette, s_spec_pal[t], sizeof s_spec_pal[t]);
+            u->palette_valid = s_spec_pal_valid[t];
+            u->pal_ver++;
+            if (u->lut_fmt >= 0)
+                build_decode_tables(u);
+        }
+        s_spec_pal_saved = 0;
+    }
+}
+
 uint32_t vgl_tex_dirty_mips(int tmu, unsigned since_ver)
 {
     const vgl_tmu_t *u;
@@ -265,6 +378,7 @@ void vgl_tex_download(int tmu, uint32_t start, int even_odd, const void *info)
 
         if (wanted) {
             if (start + dst_off + bytes <= u->mem_bytes) {
+                spec_save(tmu, start + dst_off, bytes);
                 memcpy(u->mem + start + dst_off, src + src_off, bytes);
                 if (dirty_first == ~0u)
                     dirty_first = start + dst_off;
@@ -317,6 +431,8 @@ void vgl_tex_download_partial(int tmu, uint32_t start, int this_lod,
     if (to < from)
         return;
     if (u->mem && start + off + (uint32_t)(to + 1) * row_bytes <= u->mem_bytes) {
+        spec_save(tmu, start + off + (uint32_t)from * row_bytes,
+                  (uint32_t)(to - from + 1) * row_bytes);
         memcpy(u->mem + start + off + (uint32_t)from * row_bytes, data,
                (size_t)(to - from + 1) * row_bytes);
         texture_write(tmu, start + off + (uint32_t)from * row_bytes,
@@ -396,19 +512,36 @@ void vgl_tex_source(int tmu, uint32_t start, int even_odd, const void *info)
 
 void vgl_tex_table(int tmu, int type, const void *data)
 {
-    vgl_tmu_t *u;
-
     if (tmu < 0 || tmu >= VGL_TMUS || !data)
         return;
-    u = &vgl.tmu[tmu];
     if (type == GR_TEXTABLE_PALETTE) {
-        memcpy(u->palette, data, GR_PALETTE_BYTES);
-        u->palette_valid = 1;
-        u->pal_ver++;
-        /* Rebuild active decode tables immediately because palette updates may
-         * occur between draws without a new grTexSource call. */
-        if (u->lut_fmt >= 0)
-            build_decode_tables(u);
+        int t;
+
+        /* ONE palette, whichever unit the call names. Hydro sends every
+         * palette with tmu = 0 (_tmem_Select, HYDRO.EXE 0x1736E1 and
+         * 0x1737C2) while its allocator places a P_8/AP_88 texture on
+         * whichever unit has room (HYDRO.EXE 0x173AB0), so the race minimap
+         * landed on TMU1 on five tracks and sampled no palette there.
+         * Offroad sends each palette to TMU0 and then TMU1, identical bytes
+         * with no call between, so it cannot tell the two readings apart. */
+        for (t = 0; t < VGL_TMUS; t++) {
+            vgl_tmu_t *u = &vgl.tmu[t];
+
+            /* Offroad's second call of each pair is then a repeat; keeping
+             * the generation still spares both backends a rebuild. */
+            if (u->palette_valid &&
+                memcmp(u->palette, data, GR_PALETTE_BYTES) == 0)
+                continue;
+            spec_save_palettes();
+            memcpy(u->palette, data, GR_PALETTE_BYTES);
+            u->palette_valid = 1;
+            u->pal_ver++;
+            /* Rebuild active decode tables immediately because palette
+             * updates may occur between draws without a new grTexSource
+             * call. */
+            if (u->lut_fmt >= 0)
+                build_decode_tables(u);
+        }
     } else {
         /* An NCC table. Neither game downloads one (Hydro's single
          * grTexDownloadTable is a palette and its two grTexNCCTable calls

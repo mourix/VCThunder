@@ -1,7 +1,7 @@
-/* launcher_capture.h -- the launcher's capture machine: Add, Detect, Set up.
+/* launcher_capture.h -- the launcher's capture machine: slots, Detect, Set up.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * THREE FLOWS BEHIND ONE FLAG: the binding capture (`Add`), the axis guard
+ * THREE FLOWS BEHIND ONE FLAG: the binding capture (a slot), the axis guard
  * (`Detect`) and Set up, which wraps the guard rather than being a second
  * instrument. Exactly one runs at a time, so every way out of any of them has to
  * be a way out of all three, and the fields that say where each one is sit
@@ -25,7 +25,7 @@ void capture_reset(void);
 int  capture_active(void);
 
 /* THE ONE DOOR OUT, from outside. Seven callers: a page change, either subpage
- * tab, Rescan, Detect, Add and Clear. The flow's OWN transitions are
+ * tab, Rescan, Detect, a slot and Reset to defaults. The flow's OWN transitions are
  * deliberately not routed through it; wizard_took(), wizard_failed() and
  * wizard_start_step() hand the capture on. */
 void abandon_capture(void);
@@ -40,8 +40,8 @@ int  capture_key(WPARAM key, LPARAM detail);
 void capture_tick_all(int have_device);
 
 /* The four things the user can start. */
-void begin_capture(unsigned action);        /* Add, on a binding row        */
-void clear_binding(unsigned action);        /* Clear, on a binding row      */
+void begin_capture(unsigned action, unsigned slot); /* a binding row's slot */
+void restore_all_bindings(void);           /* Reset to defaults, the card  */
 void begin_axis_capture(unsigned setting);  /* Detect, on an axis row       */
 void begin_wizard(void);                    /* Set up                       */
 /* Set up's button while it runs: skip this step, leaving its row as it was.
@@ -53,10 +53,10 @@ int  capture_wizard_running(void);
  * from inside the preview's timer re-enters it (WM_APP + 3). */
 void confirm_axis_detect(void);
 
-/* THE BINDING ROW WHILE IT IS BEING CAPTURED: 1 when `action` is the row this
- * capture is on, with the countdown and what has been collected so far. 0 when
- * the row should render its binding normally. */
-int  capture_row_text(unsigned action, char *out, size_t out_size);
+/* THE SLOT WHILE IT IS BEING CAPTURED: 1, with the countdown, when it is the
+ * slot this capture fills; 0 when it should show its input. */
+int  capture_slot_text(unsigned action, unsigned slot, char *out,
+                       size_t out_size);
 
 /* The first line under the bars: Set up's step question while it runs, a held
  * result after, or NULL when the live preview's own hint should be drawn. */
@@ -98,7 +98,11 @@ void update_binding_display(unsigned action);
 void update_model_control(const char *section, const char *key);
 void model_set(const char *section, const char *key, const char *value);
 size_t pad_binding_render(const char *value, char *out, size_t out_size);
+const char *key_display_name(const char *ini_name);
 void pad_binding_text(const char *value, char *out, size_t out_size);
+/* Two [gamepad] references to one button: a bare ordinal is the button on the
+ * controller that drives the car, under whatever label that one has. */
+int  pad_refs_same(const char *a, const char *b);
 int  action_visible(unsigned action);
 int  launcher_binding_title(void);          /* 0 hydro, 1 offroad           */
 

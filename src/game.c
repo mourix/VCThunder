@@ -85,6 +85,8 @@ static int profile_check(const game_profile_t *p)
         { "__imp__", p->imp_count, VCT_MAX_IMP },
         { "direct win32", p->w32_count, VCT_MAX_W32 },
         { "mesh loop", p->loop_count, VCT_MAX_MESH_LOOPS },
+        { "HUD element", p->hud_elem_count, VCT_MAX_HUD_ELEMS },
+        { "HUD text pointer", p->hud_text_var_count, VCT_MAX_HUD_TEXTS },
     };
     unsigned i;
     int ok = 1;

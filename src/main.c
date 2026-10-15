@@ -7,6 +7,7 @@
  * unpacked and the game CRT is entered.
  */
 #include "vcthunder.h"
+#include "ingest.h"
 
 #include <shellapi.h>
 
@@ -143,6 +144,22 @@ static int heal_privileged(EXCEPTION_POINTERS *ep)
     return 1;
 }
 
+/* The other threads that run game code (the DCS playlist driver, the board's
+ * fallback decoder) hold this shared around that code; a diagnostic that runs
+ * game code and then restores the game's memory holds it exclusive, so no
+ * write of theirs lands inside its window and is rolled back with it. */
+static SRWLOCK s_side_lock = SRWLOCK_INIT;
+
+void game_side_thread_enter(void) { AcquireSRWLockShared(&s_side_lock); }
+void game_side_thread_leave(void) { ReleaseSRWLockShared(&s_side_lock); }
+void game_hold_side_threads(int on)
+{
+    if (on)
+        AcquireSRWLockExclusive(&s_side_lock);
+    else
+        ReleaseSRWLockExclusive(&s_side_lock);
+}
+
 int game_irq_disabled(void)
 {
     return InterlockedCompareExchange(&s_irq_depth, 0, 0) > 0;
@@ -181,6 +198,17 @@ int game_irq_wait(unsigned max_us)
     }
     InterlockedIncrement(&s_irq_steals);
     return 0;
+}
+
+int game_irq_depth(void)
+{
+    return (int)InterlockedCompareExchange(&s_irq_depth, 0, 0);
+}
+
+void game_irq_unwind(int depth)
+{
+    if (game_irq_depth() > depth)
+        InterlockedExchange(&s_irq_depth, depth);
 }
 
 void game_irq_resync(const char *where)
@@ -508,6 +536,17 @@ __declspec(dllexport) int shim_run(void)
      * one written here. It never overwrites, so this is a no-op on every run
      * but the first. config_seed_ini(). */
     config_seed_ini("vcthunder.ini");
+    /* CHDs dropped on the exe: the launcher opens and imports them, so the
+     * person who did it sees a window rather than a console. */
+    if (argc > 1 && ingest_dropped(argc, argv)) {
+        int wargc, i;
+        LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &wargc);
+        for (i = 1; wargv && i < wargc; i++)
+            launcher_queue_import(wargv[i]);
+        if (wargv)
+            LocalFree(wargv);
+        argc = 1;
+    }
     if (argc == 1) {
         launcher_result_t selected = launcher_run("vcthunder.ini");
 
@@ -520,6 +559,10 @@ __declspec(dllexport) int shim_run(void)
     } else {
         config_defaults(&g_cfg);
         config_load_shared(&g_cfg, "vcthunder.ini");
+        /* `import FILE.chd`: the front door from a command line, which runs
+         * no game and so opens no log to truncate. */
+        if (ingest_is_command(argc, argv))
+            ExitProcess((UINT)ingest_cli(g_cfg.data_dir));
         if (!config_parse_argv(&g_cfg, argc, argv))
             ExitProcess(2);
     }
@@ -634,6 +677,9 @@ __declspec(dllexport) int shim_run(void)
 
     /* Diagnostic only, and off unless the INI asks for it. */
     profile_install(g_cfg.profile_ms);
+    drawreplay_install(g_cfg.draw_replay, g_cfg.draw_replay_start,
+                       g_cfg.draw_replay_control,
+                       strcmp(g_cfg.frame_rate, "60") == 0, 1);
 
     /* Last, because it has to see every patch this host installs, and before
      * the dry-run exit, because the comparison it makes needs no game thread:

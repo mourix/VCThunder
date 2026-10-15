@@ -230,6 +230,28 @@ int patch_call(uint32_t site_va, const void *target)
     return 1;
 }
 
+int patch_call_indirect(uint32_t site_va, uint32_t cell_va, const void *target)
+{
+    unsigned char *p = (unsigned char *)(uintptr_t)site_va;
+    uint32_t cell;
+    int32_t rel;
+
+    if (refuse_null(site_va, "patch_call_indirect"))
+        return 0;
+    memcpy(&cell, p + 2, 4);
+    if (p[0] != 0xFF || p[1] != 0x15 || cell != cell_va) {
+        LOGE("patch_call_indirect: 0x%08X is not call [0x%08X]; refusing",
+             site_va, cell_va);
+        return 0;
+    }
+    rel = (int32_t)((intptr_t)target - ((intptr_t)p + 5));
+    p[0] = 0xE8;
+    memcpy(p + 1, &rel, 4);
+    p[5] = 0x90;
+    flush(p, 6);
+    return 1;
+}
+
 void patch_ret_imm(uint32_t va, uint32_t eax_value)
 {
     unsigned char *p = (unsigned char *)(uintptr_t)va;

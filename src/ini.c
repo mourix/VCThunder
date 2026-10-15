@@ -121,8 +121,8 @@ unsigned ini_uint_or(const char *v, unsigned lo, unsigned hi, unsigned fallback)
     return ini_parse_uint(v, lo, hi, &n) ? n : fallback;
 }
 
-void ini_read_scoped(const char *path, const char *section, const char *key,
-                     const char *fallback, char *out, DWORD out_size)
+int ini_read_scoped(const char *path, const char *section, const char *key,
+                    const char *fallback, char *out, DWORD out_size)
 {
     char scoped[64];
 
@@ -132,11 +132,12 @@ void ini_read_scoped(const char *path, const char *section, const char *key,
         GetPrivateProfileStringA(scoped, key, "", out, out_size, path);
         ini_strip_comment(out);
         if (out[0])
-            return;
+            return 1;
     }
     /* 2. the plain section both cabinets share */
     GetPrivateProfileStringA(section, key, fallback, out, out_size, path);
     ini_strip_comment(out);
+    return 0;
 }
 
 void ini_resolve_path(const char *in, char *out, size_t out_size)

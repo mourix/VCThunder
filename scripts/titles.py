@@ -61,6 +61,62 @@ TITLES = {
     },
 }
 
+# --- the disks MAME lists ---------------------------------------------------
+#
+# Every Hydro and Offroad hard disk in MAME's driver, so the importer can say
+# which set a CHD is and point at the one that runs. A LABEL, NEVER THE GATE:
+# a disk that has been booted once (NVRAM, high scores) has another SHA-1 and
+# can still hold the registered executable, so the build is decided by
+# hashing the executable exactly as before.
+#
+#   set, chd, name  MAME's set name, CHD file name and description, from
+#                   MAME's src/mame/williams/midqslvr.cpp, BSD-3-Clause
+#   sha1            the header's SHA-1 of data and metadata, which is the one
+#                   MAME names a disk by
+#   rawsha1         the header's SHA-1 of the data alone: the same disk
+#                   re-made with other metadata (MAME notes the geometry of
+#                   two of these as wrong) still matches on this
+#   exe_sha256      the executable on it, measured here; equal to the
+#                   title's sha256 above is what makes a set the one to use
+MAME_DISKS = [
+    {"set": "hydrthnd101b", "chd": "hydro_101b", "title": "hydro",
+     "name": "Hydro Thunder (v1.01b)",
+     "sha1": "182a7966c40676031c92dbfbd1b8e594a505a930",
+     "rawsha1": "1dea185530d361f38b4bacd43845dcc54bc1c8ca",
+     "exe_sha256": "a421f5fd4ee0d90f57815975d4a47bb784f2b46d48085e42b422605a029f8e3f"},
+    {"set": "hydrthnd", "chd": "hydro", "title": "hydro",
+     "name": "Hydro Thunder",
+     "sha1": "d481d178782943c066b41764628a419cd55f676d",
+     "rawsha1": "3e9956dd4a62f540ea2900f857611ff9f035b76a",
+     "exe_sha256": "a421f5fd4ee0d90f57815975d4a47bb784f2b46d48085e42b422605a029f8e3f"},
+    {"set": "hydrthnd100d", "chd": "hydro_100d", "title": "hydro",
+     "name": "Hydro Thunder (v1.00d)",
+     "sha1": "5462f7197b3c510b791093e938a614e706aaed4a",
+     "rawsha1": "98656c94e9f2765fb92eacc8d0f86d5ceca37b5a",
+     "exe_sha256": "323eb5d23541c233285d8c071c2c32c13aad34c03c53a7c016f839bcdc67da6e"},
+    {"set": "offrthnd", "chd": "offrthnd", "title": "offroad",
+     "name": "Offroad Thunder",
+     "sha1": "d88f1c5b75361a1e310565a8a5a09c674a4a1a22",
+     "rawsha1": "5a35b98fffa96dc3c21da2c136a5909a2f3d9341",
+     "exe_sha256": "fa739d0f1a80c6e429ca73fdee04c3d6d6325bb95848cb701114f74bf2a5e9bf"},
+]
+
+
+def mame_disk(sha1, rawsha1):
+    """The MAME_DISKS entry a CHD header names, or None. Either SHA-1 is
+    enough: rawsha1 alone is the same disk under other metadata."""
+    for d in MAME_DISKS:
+        if sha1 == d["sha1"] or rawsha1 == d["rawsha1"]:
+            return d
+    return None
+
+
+def mame_supported(tid):
+    """The MAME disks that hold the title's registered build."""
+    return [d for d in MAME_DISKS
+            if d["title"] == tid and d["exe_sha256"] == TITLES[tid]["sha256"]]
+
+
 DEFAULT = "hydro"
 
 
@@ -103,13 +159,12 @@ class Title:
             f"no game dump for {self.id}: looked for:\n"
             f"    {self.exe}\n\n"
             f"{self.name} is supplied by you, from your own lawful copy. This\n"
-            f"repository contains no game material. Get a data directory with:\n\n"
-            f"    python3 tools/ingest-chd.py --title {self.id} --chd <your.chd> --out data\n\n"
-            f"then point the build at it:\n\n"
-            f"    VCT_DUMPS=$PWD/data make defs\n\n"
-            f"See docs/building.md. A dump is required to BUILD, not just to\n"
-            f"run: generated/span.h carries the address span the stub reserves\n"
-            f"at link time. `make` and `make check` both stop here without one.")
+            f"repository contains no game material. Import your CHD with\n"
+            f"VCThunder.exe (its launcher, or `VCThunder.exe import <your.chd>`),\n"
+            f"then point this at the folder it wrote, which holds <title>/<exe>:\n\n"
+            f"    VCT_DUMPS=<that data folder> make defs\n\n"
+            f"Only regenerating generated/ needs a dump; building does not.\n"
+            f"See docs/building.md.")
 
     # --- where the game binary is -----------------------------------------
     def _locate(self):
@@ -124,8 +179,7 @@ class Title:
                                 <VCT_DUMPS>/<title>/<exe>. One ingest run then
                                 feeds both the build and the run directory, and
                                 nobody has to learn a second layout.
-          3. data/              this repository's own <title>/<exe>, where
-                                ingest-chd.py writes by default.
+          3. data/              this repository's own <title>/<exe>.
           4. DUMP_DIRS          a per-title directory, when one is set.
 
         Nothing here decides whether the file is the RIGHT one: verify() does
@@ -141,11 +195,8 @@ class Title:
             return os.path.join(os.path.abspath(os.path.expanduser(dumps)),
                                 self.id, self.meta["exe"])
 
-        # The repository's own data/: where tools/ingest-chd.py writes by
-        # default and where the run directory keeps the same layout. Checking
-        # it means the ordinary path (ingest, then build) needs NO environment
-        # variable at all; without it the tool has to end by telling the user
-        # to set VCT_DUMPS, which is one more thing to get wrong.
+        # The repository's own data/, in the run directory's layout. Checking
+        # it means a dump imported there needs NO environment variable at all.
         local = os.path.join(REPO, "data", self.id, self.meta["exe"])
         if os.path.isfile(local) or self.id not in DUMP_DIRS:
             return local

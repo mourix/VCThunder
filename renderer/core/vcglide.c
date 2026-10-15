@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "vcglide.h"
@@ -26,6 +27,7 @@ const vgl_entry_desc_t vgl_entries[VGL_COUNT] = {
 unsigned  vgl_calls[VGL_COUNT];
 
 vgl_config_t vgl_cfg;
+vgl_bezel_t vgl_bezel;
 int vgl_ready;
 int vgl_capturing;
 int vgl_surface_w, vgl_surface_h;
@@ -159,11 +161,101 @@ int __stdcall vglHealth(void)
     return vgl_gpu_lost() ? VGL_HEALTH_DEVICE_LOST : VGL_HEALTH_OK;
 }
 
+/* The host is about to draw a picture it will throw away, and then has. */
+void __stdcall vglSpecBegin(void)
+{
+    if (!vgl_ready)
+        vgl_init();
+    vgl_spec_begin();
+}
+
+void __stdcall vglSpecEnd(void)
+{
+    if (vgl_ready)
+        vgl_spec_end();
+}
+
 /* The host knows a screen frames its world in native-width art; black both
  * side strips at the next swap even though the frame drew into them. */
 void __stdcall vglBlackMargins(void)
 {
     vgl.margin_black = 1;
+}
+
+static void bezel_release(void)
+{
+    int i;
+    for (i = 0; i < vgl_bezel.levels; i++)
+        free(vgl_bezel.px[i]);
+    memset(vgl_bezel.px, 0, sizeof vgl_bezel.px);
+    vgl_bezel.levels = 0;
+}
+
+/* The host's bezel art: premultiplied RGBA8, top-down, w*h, with the screen
+ * hole in its pixels. Copied, with a 2x2 box mip chain under it, because the
+ * art is drawn smaller than it was made whenever the screen is (a 4096-wide
+ * frame on a 1920-wide screen is a 2.1:1 reduction). NULL clears it. Kept
+ * across surface opens: a backend uploads it again whenever it opens. */
+int __stdcall vglSetBezel(const void *rgba, int w, int h, int hole_x,
+                          int hole_y, int hole_w, int hole_h)
+{
+    int k;
+
+    if (!vgl_ready)
+        vgl_init();
+    bezel_release();
+    vgl_bezel.generation++;
+    if (!rgba || w <= 0 || h <= 0 || hole_w <= 0 || hole_h <= 0 ||
+        hole_x < 0 || hole_y < 0 || hole_x + hole_w > w || hole_y + hole_h > h) {
+        if (rgba)
+            vgl_log(0, "bezel: refused %dx%d art with hole %d,%d %dx%d",
+                    w, h, hole_x, hole_y, hole_w, hole_h);
+        return 0;
+    }
+    vgl_bezel.w[0] = w;
+    vgl_bezel.h[0] = h;
+    vgl_bezel.px[0] = (uint8_t *)malloc((size_t)w * h * 4);
+    if (!vgl_bezel.px[0]) {
+        vgl_log(0, "bezel: no memory for %dx%d art; no bezel", w, h);
+        return 0;
+    }
+    memcpy(vgl_bezel.px[0], rgba, (size_t)w * h * 4);
+    vgl_bezel.levels = 1;
+    for (k = 1; k < VGL_BEZEL_LEVELS && (vgl_bezel.w[k - 1] > 1 ||
+                                         vgl_bezel.h[k - 1] > 1); k++) {
+        int pw = vgl_bezel.w[k - 1], ph = vgl_bezel.h[k - 1];
+        int nw = pw > 1 ? pw / 2 : 1, nh = ph > 1 ? ph / 2 : 1, x, y, c;
+        const uint8_t *src = vgl_bezel.px[k - 1];
+        uint8_t *dst = (uint8_t *)malloc((size_t)nw * nh * 4);
+
+        if (!dst)
+            break;
+        for (y = 0; y < nh; y++) {
+            int y0 = 2 * y < ph ? 2 * y : ph - 1;
+            int y1 = 2 * y + 1 < ph ? 2 * y + 1 : ph - 1;
+            for (x = 0; x < nw; x++) {
+                int x0 = 2 * x < pw ? 2 * x : pw - 1;
+                int x1 = 2 * x + 1 < pw ? 2 * x + 1 : pw - 1;
+                for (c = 0; c < 4; c++)
+                    dst[((size_t)y * nw + x) * 4 + c] = (uint8_t)
+                        ((src[((size_t)y0 * pw + x0) * 4 + c] +
+                          src[((size_t)y0 * pw + x1) * 4 + c] +
+                          src[((size_t)y1 * pw + x0) * 4 + c] +
+                          src[((size_t)y1 * pw + x1) * 4 + c] + 2) / 4);
+            }
+        }
+        vgl_bezel.w[k] = nw;
+        vgl_bezel.h[k] = nh;
+        vgl_bezel.px[k] = dst;
+        vgl_bezel.levels = k + 1;
+    }
+    vgl_bezel.hole_x = hole_x;
+    vgl_bezel.hole_y = hole_y;
+    vgl_bezel.hole_w = hole_w;
+    vgl_bezel.hole_h = hole_h;
+    vgl_log(0, "bezel: %dx%d art, %d levels, screen hole %d,%d %dx%d",
+            w, h, vgl_bezel.levels, hole_x, hole_y, hole_w, hole_h);
+    return 1;
 }
 
 void vgl_init(void)
@@ -183,6 +275,10 @@ void vgl_init(void)
     }
     cfg_str("VCGLIDE_CAPTURE", vgl_cfg.capture, sizeof vgl_cfg.capture, "");
     cfg_str("VCGLIDE_FRAMES", vgl_cfg.frames, sizeof vgl_cfg.frames, "");
+    cfg_str("VCGLIDE_DISPLAY_DUMP", vgl_cfg.display_dump,
+            sizeof vgl_cfg.display_dump, "");
+    cfg_str("VCGLIDE_DISPLAY_FRAMES", vgl_cfg.display_frames,
+            sizeof vgl_cfg.display_frames, "");
     cfg_str("VCGLIDE_TITLE", vgl_cfg.title, sizeof vgl_cfg.title, "unknown");
     cfg_str("VCGLIDE_RENDERER", vgl_cfg.renderer, sizeof vgl_cfg.renderer,
             "auto");
@@ -210,6 +306,28 @@ void vgl_init(void)
     else {
         vgl_log(0, "config: VCGLIDE_ASPECT value is invalid; using raster");
         snprintf(vgl_cfg.aspect, sizeof vgl_cfg.aspect, "raster");
+    }
+    cfg_str("VCGLIDE_UPSCALE_2D", vgl_cfg.upscale_2d,
+            sizeof vgl_cfg.upscale_2d, "bilinear");
+    if (_stricmp(vgl_cfg.upscale_2d, "catmull_rom") == 0)
+        snprintf(vgl_cfg.upscale_2d, sizeof vgl_cfg.upscale_2d, "catmull_rom");
+    else if (_stricmp(vgl_cfg.upscale_2d, "fsr1") == 0)
+        snprintf(vgl_cfg.upscale_2d, sizeof vgl_cfg.upscale_2d, "fsr1");
+    else {
+        if (_stricmp(vgl_cfg.upscale_2d, "bilinear") != 0)
+            vgl_log(0, "config: VCGLIDE_UPSCALE_2D value is invalid; "
+                       "using bilinear");
+        snprintf(vgl_cfg.upscale_2d, sizeof vgl_cfg.upscale_2d, "bilinear");
+    }
+    cfg_str("VCGLIDE_TEXMAG", vgl_cfg.texmag, sizeof vgl_cfg.texmag,
+            "bilinear");
+    if (_stricmp(vgl_cfg.texmag, "catmull_rom") == 0)
+        snprintf(vgl_cfg.texmag, sizeof vgl_cfg.texmag, "catmull_rom");
+    else {
+        if (_stricmp(vgl_cfg.texmag, "bilinear") != 0)
+            vgl_log(0, "config: VCGLIDE_TEXMAG value is invalid; "
+                       "using bilinear");
+        snprintf(vgl_cfg.texmag, sizeof vgl_cfg.texmag, "bilinear");
     }
     vgl_cfg.capture_frames = cfg_num("VCGLIDE_CAPTURE_FRAMES", 0);
     vgl_cfg.verbose        = (int)cfg_num("VCGLIDE_VERBOSE", 0);
@@ -314,6 +432,56 @@ report:
         last_cw = client_w; last_ch = client_h;
         last_x = *x; last_y = *y; last_w = *w; last_h = *h;
     }
+}
+
+int vgl_present_layout(int fullscreen, int raster_w, int raster_h,
+                       int client_w, int client_h, int ready,
+                       vgl_rect_t *picture, vgl_rect_t *canvas)
+{
+    static int last_cw, last_ch, last_rw, last_rh;
+    static vgl_rect_t last_pic;
+    int wide;
+
+    canvas->x = canvas->y = 0;
+    canvas->w = client_w;
+    canvas->h = client_h;
+    if (!vgl_bezel.levels) {
+        vgl_destination_rect(fullscreen, raster_w, raster_h, client_w, client_h,
+                             &picture->x, &picture->y, &picture->w, &picture->h);
+        return 0;
+    }
+    /* `aspect` is not consulted. The cabinet's raster (512x400) and every
+     * operator screen are shown 4:3, the cabinet monitor's shape, and cover
+     * the hole; a widescreen raster is wider than 4:3, keeps its own shape
+     * and spans the hole's width. Read from the raster, not from the ini,
+     * because a title can refuse widescreen after the ini asked for it. */
+    wide = (int64_t)raster_w * 3 > (int64_t)raster_h * 4;
+    if (!ready) {
+        /* The backend could not draw the art: nothing would cover what
+         * passes the hole, so the picture is fitted to the window instead,
+         * still in its own shape. */
+        VGL_LOG_ONCE("present: the bezel art cannot be drawn by this "
+                     "presenter; the picture is fitted to the window without it");
+        vgl_fit_layout(client_w, client_h, wide ? raster_w : 4,
+                       wide ? raster_h : 3, picture);
+        return 0;
+    }
+    vgl_bezel_layout(client_w, client_h, vgl_bezel.w[0], vgl_bezel.h[0],
+                     vgl_bezel.hole_x, vgl_bezel.hole_y,
+                     vgl_bezel.hole_w, vgl_bezel.hole_h,
+                     wide ? raster_w : 4, wide ? raster_h : 3, !wide,
+                     canvas, picture);
+    if (last_cw != client_w || last_ch != client_h || last_rw != raster_w ||
+        last_rh != raster_h || memcmp(&last_pic, picture, sizeof last_pic)) {
+        vgl_log(0, "present: bezel, raster %dx%d, client %dx%d -> art %d,%d "
+                   "%dx%d, picture %d,%d %dx%d", raster_w, raster_h,
+                client_w, client_h, canvas->x, canvas->y, canvas->w, canvas->h,
+                picture->x, picture->y, picture->w, picture->h);
+        last_cw = client_w; last_ch = client_h;
+        last_rw = raster_w; last_rh = raster_h;
+        last_pic = *picture;
+    }
+    return 1;
 }
 
 /* Raster geometry is published immediately before grSstWinOpen, which is

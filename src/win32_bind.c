@@ -220,24 +220,421 @@ void win32_report_nocache(void)
              s_nocache_calls, (unsigned long long)(s_nocache_bytes / 1024u));
 }
 
+/* The game's own memory, as it asked for it: every VirtualAlloc reservation it
+ * holds, every private heap and every CRITICAL_SECTION it made. The draw
+ * interpolation restores exactly this memory after an in-between picture, so a
+ * list that misses something lets that picture change the game. A list that
+ * fills up says so through win32_game_memory_lost() rather than dropping
+ * entries quietly. */
+#define GAME_VALLOC_MAX 1024
+#define GAME_HEAP_MAX   16
+#define GAME_CS_MAX     256
+static SRWLOCK       s_mem_lock = SRWLOCK_INIT;
+static struct { uintptr_t base; size_t size; int watched; } s_game_valloc[GAME_VALLOC_MAX];
+static unsigned      s_game_vallocs;
+static volatile LONG s_vgen;          /* bumped by every change to the game's VM */
+static volatile LONG s_write_watch;
+static HANDLE        s_game_heap[GAME_HEAP_MAX];
+static volatile LONG s_game_heaps;
+static const char * volatile s_mem_lost;
+
+static void mem_lost(const char *what)
+{
+    if (!InterlockedCompareExchangePointer((PVOID volatile *)&s_mem_lost,
+                                           (PVOID)what, NULL))
+        LOGE("vm: more %s than the host tracks; the game's memory is no "
+             "longer fully known, so frame_rate = 60 turns itself off", what);
+}
+
+const char *win32_game_memory_lost(void) { return s_mem_lost; }
+
+/* Copy out at most `max` reservations; returns how many. */
+unsigned win32_game_vallocs(uintptr_t *base, size_t *size,
+                            unsigned char *watched, unsigned max)
+{
+    unsigned i, n;
+
+    AcquireSRWLockShared(&s_mem_lock);
+    n = s_game_vallocs < max ? s_game_vallocs : max;
+    for (i = 0; i < n; i++) {
+        base[i] = s_game_valloc[i].base;
+        size[i] = s_game_valloc[i].size;
+        if (watched)
+            watched[i] = (unsigned char)s_game_valloc[i].watched;
+    }
+    ReleaseSRWLockShared(&s_mem_lock);
+    return n;
+}
+
+/* Changes whenever the game allocates, commits, decommits or frees VM, both
+ * before the call and after it: a reader that sees the same value twice saw
+ * the same reservations, holding the same committed pages, both times. */
+uint32_t win32_game_vgen(void) { return (uint32_t)s_vgen; }
+
+/* From now on the game's new reservations are made with MEM_WRITE_WATCH. */
+void win32_write_watch(int on) { InterlockedExchange(&s_write_watch, on); }
+
+/* NULL in a slot is a heap the game has destroyed. */
+unsigned win32_game_heaps(void) { return (unsigned)s_game_heaps; }
+void *win32_game_heap(unsigned i) { return s_game_heap[i]; }
+
+/* Record the whole reservation `p` lies in, once: a commit inside a region
+ * already reserved is the same memory, and keeps the reservation's `watched`. */
+static void valloc_note(const void *p, int watched)
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    uintptr_t base, a;
+    unsigned i;
+
+    if (!VirtualQuery(p, &mbi, sizeof mbi) || mbi.State == MEM_FREE)
+        return;
+    base = (uintptr_t)mbi.AllocationBase;
+    for (a = base; VirtualQuery((const void *)a, &mbi, sizeof mbi) &&
+                   (uintptr_t)mbi.AllocationBase == base &&
+                   mbi.State != MEM_FREE;
+         a = (uintptr_t)mbi.BaseAddress + mbi.RegionSize)
+        ;
+    AcquireSRWLockExclusive(&s_mem_lock);
+    for (i = 0; i < s_game_vallocs; i++)
+        if (s_game_valloc[i].base == base)
+            break;
+    if (i < GAME_VALLOC_MAX) {
+        s_game_valloc[i].base = base;
+        s_game_valloc[i].size = a - base;
+        if (i == s_game_vallocs) {
+            s_game_valloc[i].watched = watched;
+            s_game_vallocs++;
+        }
+    }
+    ReleaseSRWLockExclusive(&s_mem_lock);
+    if (i == GAME_VALLOC_MAX)
+        mem_lost("VirtualAlloc reservations");
+}
+
+/* A released reservation is no longer the game's: the address range can be
+ * handed to anyone next, and must not be snapshotted or restored as the
+ * game's. */
+static int valloc_forget(uintptr_t base)
+{
+    unsigned i;
+    int watched = 0;
+
+    AcquireSRWLockExclusive(&s_mem_lock);
+    for (i = 0; i < s_game_vallocs; i++)
+        if (s_game_valloc[i].base == base) {
+            watched = s_game_valloc[i].watched;
+            s_game_valloc[i] = s_game_valloc[--s_game_vallocs];
+            break;
+        }
+    ReleaseSRWLockExclusive(&s_mem_lock);
+    return watched;
+}
+
+/* A call that makes a new reservation can take MEM_WRITE_WATCH: one that
+ * reserves, or commits with no address (which reserves too). */
 static LPVOID WINAPI ov_VirtualAlloc(LPVOID addr, SIZE_T size, DWORD type,
                                      DWORD protect)
 {
-    return VirtualAlloc(addr, size, type,
-                        strip_cache_bits(protect, size, "VirtualAlloc"));
+    DWORD prot = strip_cache_bits(protect, size, "VirtualAlloc");
+    int ww = s_write_watch &&
+             !(type & ~(DWORD)(MEM_RESERVE | MEM_COMMIT | MEM_TOP_DOWN)) &&
+             ((type & MEM_RESERVE) || (!addr && (type & MEM_COMMIT)));
+    LPVOID p = NULL;
+
+    InterlockedIncrement(&s_vgen);
+    if (ww)
+        p = VirtualAlloc(addr, size, type | MEM_RESERVE | MEM_WRITE_WATCH, prot);
+    if (!p) {
+        ww = 0;
+        p = VirtualAlloc(addr, size, type, prot);
+    }
+    if (p && (type & (MEM_RESERVE | MEM_COMMIT)))
+        valloc_note(p, ww);
+    InterlockedIncrement(&s_vgen);
+    return p;
+}
+
+/* A diagnostic that restores the game's memory after running game code (the
+ * draw replay) must not let that code give memory back to the OS: the restore
+ * would roll the heap's bookkeeping back over pages that no longer exist.
+ * While held, the game's frees do nothing and a growing realloc copies
+ * instead of freeing; the restore then puts the bookkeeping back exactly as
+ * it was, so nothing leaks either. */
+static volatile LONG s_hold_frees;
+
+void win32_hold_frees(int on) { InterlockedExchange(&s_hold_frees, on); }
+
+/* A block this large never shares pages with a heap's small ones: the heap
+ * gives it a VM allocation of its own, inside Windows where write-watch cannot
+ * see it. While write-watch is on, a game heap's large block is that
+ * allocation made here instead, with MEM_WRITE_WATCH, so the 60 Hz snapshot
+ * copies only its written pages. Offroad keeps its whole memory pool in one
+ * (53 MB, HeapAlloc'd once from its runtime's heap). */
+#define BIG_BLOCK (1u << 20)
+#define BIG_MAX   64
+static struct { uintptr_t p; size_t n; HANDLE heap; } s_big[BIG_MAX];
+static volatile unsigned s_nbig;
+
+static int is_game_heap(HANDLE h)
+{
+    LONG i, n = s_game_heaps;
+
+    for (i = 0; i < n; i++)
+        if (s_game_heap[i] == h)
+            return 1;
+    return 0;
+}
+
+/* The size of the large block at `p`, or 0 if it is not one. */
+static size_t big_size(const void *p)
+{
+    unsigned i;
+    size_t n = 0;
+
+    AcquireSRWLockShared(&s_mem_lock);
+    for (i = 0; i < s_nbig; i++)
+        if (s_big[i].p == (uintptr_t)p)
+            n = s_big[i].n;
+    ReleaseSRWLockShared(&s_mem_lock);
+    return n;
+}
+
+static LPVOID big_alloc(HANDLE h, SIZE_T n)
+{
+    static volatile LONG warned;
+    LPVOID p;
+
+    if (s_nbig >= BIG_MAX) {
+        if (!InterlockedExchange(&warned, 1))
+            LOGW("vm: more than %d large heap blocks; the rest stay in their "
+                 "heap, unwatched, and the 60 Hz snapshot copies them whole",
+                 BIG_MAX);
+        return NULL;
+    }
+    InterlockedIncrement(&s_vgen);
+    p = VirtualAlloc(NULL, n, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
+                     PAGE_READWRITE);
+    if (p) {
+        AcquireSRWLockExclusive(&s_mem_lock);
+        if (s_nbig < BIG_MAX) {
+            s_big[s_nbig].p = (uintptr_t)p;
+            s_big[s_nbig].n = n;
+            s_big[s_nbig].heap = h;
+            s_nbig++;
+        } else {
+            VirtualFree(p, 0, MEM_RELEASE);
+            p = NULL;
+        }
+        ReleaseSRWLockExclusive(&s_mem_lock);
+    }
+    if (p)
+        valloc_note(p, 1);
+    InterlockedIncrement(&s_vgen);
+    return p;
+}
+
+static void big_free(const void *p)
+{
+    unsigned i;
+
+    InterlockedIncrement(&s_vgen);
+    AcquireSRWLockExclusive(&s_mem_lock);
+    for (i = 0; i < s_nbig; i++)
+        if (s_big[i].p == (uintptr_t)p) {
+            s_big[i] = s_big[--s_nbig];
+            break;
+        }
+    ReleaseSRWLockExclusive(&s_mem_lock);
+    valloc_forget((uintptr_t)p);
+    VirtualFree((LPVOID)p, 0, MEM_RELEASE);
+    InterlockedIncrement(&s_vgen);
+}
+
+static LPVOID WINAPI ov_HeapAlloc(HANDLE h, DWORD flags, SIZE_T n)
+{
+    LPVOID p;
+
+    if (s_write_watch && !s_hold_frees && n >= BIG_BLOCK && is_game_heap(h) &&
+        (p = big_alloc(h, n)) != NULL)
+        return p;                      /* zeroed, as HEAP_ZERO_MEMORY asks */
+    return HeapAlloc(h, flags, n);
+}
+
+static BOOL WINAPI ov_HeapFree(HANDLE h, DWORD flags, LPVOID p)
+{
+    if (s_hold_frees)
+        return TRUE;
+    if (p && s_nbig && big_size(p)) {
+        big_free(p);
+        return TRUE;
+    }
+    return HeapFree(h, flags, p);
+}
+
+static BOOL WINAPI ov_VirtualFree(LPVOID p, SIZE_T size, DWORD type)
+{
+    BOOL ok;
+    int watched;
+
+    if (s_hold_frees)
+        return TRUE;
+    InterlockedIncrement(&s_vgen);
+    if (!(type & MEM_RELEASE)) {
+        ok = VirtualFree(p, size, type);
+        InterlockedIncrement(&s_vgen);
+        return ok;
+    }
+    watched = valloc_forget((uintptr_t)p);
+    ok = VirtualFree(p, size, type);
+    if (!ok)
+        valloc_note(p, watched);
+    InterlockedIncrement(&s_vgen);
+    return ok;
+}
+
+static LPVOID WINAPI ov_HeapReAlloc(HANDLE h, DWORD flags, LPVOID p, SIZE_T n)
+{
+    SIZE_T old = p && s_nbig ? big_size(p) : 0;
+    LPVOID q;
+
+    if (old) {
+        if (n <= old)
+            return p;
+        if (flags & HEAP_REALLOC_IN_PLACE_ONLY)
+            return NULL;
+        q = ov_HeapAlloc(h, flags, n);
+        if (q) {
+            memcpy(q, p, old);
+            if (!s_hold_frees)
+                big_free(p);
+        }
+        return q;
+    }
+    if (!s_hold_frees) {
+        /* Grown into a large block: one of ours, as ov_HeapAlloc would make. */
+        if (p && n >= BIG_BLOCK && s_write_watch &&
+            !(flags & HEAP_REALLOC_IN_PLACE_ONLY) && is_game_heap(h) &&
+            (old = HeapSize(h, 0, p)) != (SIZE_T)-1 &&
+            (q = big_alloc(h, n)) != NULL) {
+            memcpy(q, p, old < n ? old : n);
+            HeapFree(h, 0, p);
+            return q;
+        }
+        return HeapReAlloc(h, flags, p, n);
+    }
+    old = HeapSize(h, 0, p);
+    if (old != (SIZE_T)-1 && n <= old)
+        return p;
+    if (flags & HEAP_REALLOC_IN_PLACE_ONLY)
+        return NULL;
+    q = HeapAlloc(h, flags & ~HEAP_REALLOC_IN_PLACE_ONLY, n);
+    if (q && old != (SIZE_T)-1)
+        memcpy(q, p, old);
+    return q;
+}
+
+/* Every CRITICAL_SECTION the game initialises lives in the game's own memory,
+ * and its fields are Windows' lock state. A diagnostic that restores that
+ * memory must put them back as they are, never as they were: Offroad's
+ * _stream_critSection rolled back under its streaming thread and the attract
+ * hung for ever in _mvplayer_OpenMovie. */
+static CRITICAL_SECTION *s_game_cs[GAME_CS_MAX];
+static volatile LONG     s_game_css;
+
+unsigned win32_game_css(void) { return (unsigned)s_game_css; }
+void *win32_game_cs(unsigned i) { return s_game_cs[i]; }
+
+/* Slots are written before the count that publishes them, so a reader on
+ * another thread never sees an empty one. */
+static VOID WINAPI ov_InitializeCriticalSection(LPCRITICAL_SECTION cs)
+{
+    LONG i, n;
+
+    AcquireSRWLockExclusive(&s_mem_lock);
+    n = s_game_css;
+    for (i = 0; i < n; i++)
+        if (s_game_cs[i] == cs)
+            break;
+    if (i == n && n < GAME_CS_MAX) {
+        s_game_cs[n] = cs;
+        MemoryBarrier();
+        s_game_css = n + 1;
+    }
+    ReleaseSRWLockExclusive(&s_mem_lock);
+    if (i == n && n == GAME_CS_MAX)
+        mem_lost("CRITICAL_SECTIONs");
+    InitializeCriticalSection(cs);
+}
+
+static HANDLE WINAPI ov_HeapCreate(DWORD options, SIZE_T initial, SIZE_T max)
+{
+    HANDLE h = HeapCreate(options, initial, max);
+    LONG n;
+
+    if (!h)
+        return h;
+    AcquireSRWLockExclusive(&s_mem_lock);
+    n = s_game_heaps;
+    if (n < GAME_HEAP_MAX) {
+        s_game_heap[n] = h;
+        MemoryBarrier();
+        s_game_heaps = n + 1;
+    }
+    ReleaseSRWLockExclusive(&s_mem_lock);
+    if (n == GAME_HEAP_MAX)
+        mem_lost("private heaps");
+    return h;
+}
+
+static BOOL WINAPI ov_HeapDestroy(HANDLE h)
+{
+    LONG i;
+
+    if (s_hold_frees)
+        return TRUE;
+    for (;;) {
+        LPVOID p = NULL;
+        unsigned k;
+
+        AcquireSRWLockShared(&s_mem_lock);
+        for (k = 0; k < s_nbig && !p; k++)
+            if (s_big[k].heap == h)
+                p = (LPVOID)s_big[k].p;
+        ReleaseSRWLockShared(&s_mem_lock);
+        if (!p)
+            break;
+        big_free(p);
+    }
+    AcquireSRWLockExclusive(&s_mem_lock);
+    for (i = 0; i < s_game_heaps; i++)
+        if (s_game_heap[i] == h)
+            s_game_heap[i] = NULL;
+    ReleaseSRWLockExclusive(&s_mem_lock);
+    return HeapDestroy(h);
 }
 
 static BOOL WINAPI ov_VirtualProtect(LPVOID addr, SIZE_T size, DWORD protect,
                                      PDWORD old)
 {
-    return VirtualProtect(addr, size,
-                          strip_cache_bits(protect, size, "VirtualProtect"),
-                          old);
+    BOOL ok;
+
+    InterlockedIncrement(&s_vgen);
+    ok = VirtualProtect(addr, size,
+                        strip_cache_bits(protect, size, "VirtualProtect"), old);
+    InterlockedIncrement(&s_vgen);
+    return ok;
 }
 
 static const struct { const char *name; void *fn; } OVERRIDE[] = {
     { "VirtualAlloc",          (void *)ov_VirtualAlloc          },
     { "VirtualProtect",        (void *)ov_VirtualProtect        },
+    { "HeapCreate",            (void *)ov_HeapCreate            },
+    { "HeapDestroy",           (void *)ov_HeapDestroy           },
+    { "InitializeCriticalSection", (void *)ov_InitializeCriticalSection },
+    { "HeapAlloc",             (void *)ov_HeapAlloc             },
+    { "HeapFree",              (void *)ov_HeapFree              },
+    { "HeapReAlloc",           (void *)ov_HeapReAlloc           },
+    { "VirtualFree",           (void *)ov_VirtualFree           },
     { "WriteConsoleA",         (void *)ov_WriteConsoleA         },
     { "ExitProcess",           (void *)ov_ExitProcess           },
     { "TerminateProcess",      (void *)ov_TerminateProcess      },

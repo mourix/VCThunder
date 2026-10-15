@@ -190,10 +190,18 @@ static int valid_slot(uint32_t slot)
     return slot < OR_VOICES;
 }
 
-/* ---- the eleven cdecl Audiolib driver entries ------------------------- */
+/* ---- the eleven cdecl Audiolib driver entries -------------------------
+ *
+ * An in-between picture (frame_rate = 60) runs the game's draw, which frees
+ * and stops voices, and then restores the game's memory: the real draw makes
+ * the same calls again. So every entry that changes a voice or the master
+ * drops a held thread's call (audio_held()) and reports success; the reads
+ * pass. A held Allocate returns no voice. */
 
 static int __cdecl or_Init(void)
 {
+    if (audio_held())
+        return 0;
     EnterCriticalSection(&s_cs);
     memset(s_voice, 0, sizeof s_voice);
     s_allocated = 0;
@@ -209,6 +217,8 @@ static int __cdecl or_Init(void)
 
 static int __cdecl or_UnInit(void)
 {
+    if (audio_held())
+        return 0;
     EnterCriticalSection(&s_cs);
     memset(s_voice, 0, sizeof s_voice);
     s_allocated = 0;
@@ -241,7 +251,7 @@ static int __cdecl or_Allocate(const or_attr_t *initial)
     uint32_t i;
     or_attr_t logged;
 
-    if (!initial)
+    if (!initial || audio_held())
         return -1;
 
     EnterCriticalSection(&s_cs);
@@ -277,6 +287,8 @@ static int __cdecl or_Allocate(const or_attr_t *initial)
 
 static int __cdecl or_Deallocate(uint32_t slot)
 {
+    if (audio_held())
+        return 0;
     if (!valid_slot(slot)) {
         LOGW("offroad audio: deallocate slot %u out of range", slot);
         return 1;
@@ -319,6 +331,8 @@ static int __cdecl or_SetAttr(uint32_t slot, const or_attr_t *in, uint32_t mask)
     or_voice_t *v;
     int was_playing, now_playing;
 
+    if (audio_held())
+        return 0;
     if (!valid_slot(slot) || !in)
         return 1;
 
@@ -387,6 +401,8 @@ static int __cdecl or_SetMaster(uint32_t left, uint32_t right)
 {
     int report_minimum = 0;
 
+    if (audio_held())
+        return 0;
     EnterCriticalSection(&s_cs);
     s_master_l = gain16(left);
     s_master_r = gain16(right);

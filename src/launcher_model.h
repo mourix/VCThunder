@@ -4,7 +4,7 @@
  * WHAT THE LAUNCHER IS A VIEW OF. src/launcher.c draws pages; this half holds
  * the ini document, every key and binding value, which section a key is read from
  * and written to, what is wrong with the file, what a value has to satisfy, and
- * the known-good copy. The line between them is Win32, not subject matter:
+ * restoring the defaults. The line between them is Win32, not subject matter:
  * nothing here creates a window, reads a control or shows a message, which lets
  * tests/launcher_model_test.c link it without a GUI.
  */
@@ -109,6 +109,49 @@ const char *model_device_value(const char *label, const char *key);
 /* A [devices] line this session added and Apply has not written yet. */
 void        model_device_entry_added(void);
 
+/* ONE CONTROLLER PER CABINET. The keys that choose a controller and its
+ * steering, accelerator and brake axes can be set per cabinet
+ * ([<title>.analog], [<title>.analog.<label>]); facts about a controller stay
+ * shared. The model shows one cabinet's choices at a time.
+ *
+ *   _split          does the file give each cabinet its own choice?
+ *   _title          0 hydro, 1 offroad: the cabinet shown
+ *   _show           show the other cabinet's choices; the shown one's go into
+ *                   the document first and Apply writes both
+ *   _split_on       start giving each its own, from the one both share now
+ *   _join           one for both again, the shown cabinet's
+ *   per_cabinet     is setting `i` one of those choices?
+ *
+ * 0 from the three that change something: out of memory. */
+/* "hydro" or "offroad", the prefix of a cabinet's own sections. */
+const char *model_title_id(int title);
+/* A key the launcher does not edit, as one cabinet reads it: [<title>.<section>]
+ * if it has a value there, else [<section>]. 0 when neither has the key. */
+int         model_title_raw(int title, const char *section, const char *key,
+                            char *out, size_t out_size);
+
+/* BEZEL ART, PER CABINET, the Graphics page's Bezel box.
+ *   _get          whether it is on, and the file the row shows: one chosen and
+ *                 not yet applied, else the file's own path, else
+ *                 bezels\<title>.png if that is there; "" when none
+ *   _set_enabled  on or off; nothing is written until Apply
+ *   _choose       a file the caller has checked; turns it on. model_save()
+ *                 copies it to bezels\<title>.png and writes that path
+ *   _destination  bezels\<title>.png beside the ini, where a choice goes */
+int         model_bezel_get(int title, char *path, size_t path_size);
+void        model_bezel_set_enabled(int title, int on);
+void        model_bezel_choose(int title, const char *source);
+void        model_bezel_destination(int title, char *out, size_t out_size);
+/* How many art files the last model_save() copied: a replaced file under a
+ * line that already names it changes no key and is still a save. */
+int         model_bezel_copied(void);
+int         model_controls_split(void);
+int         model_controls_title(void);
+int         model_controls_show(int title);
+int         model_controls_split_on(void);
+int         model_controls_join(void);
+int         model_setting_per_cabinet(unsigned i);
+
 /* The attached controllers of one provider, in enumeration order, from the
  * launcher's probe. `ffb[k]` is whether ids[k] publishes effects, for the
  * auto rule. */
@@ -151,6 +194,36 @@ int         model_device_label_ensure(const char *provider,
 char       *model_key_binding(int title, unsigned action);
 char       *model_pad_binding(int title, unsigned action);
 
+/* A BINDING ROW AS THE PAGE SHOWS IT: a list of inputs, the keys first and the
+ * controller buttons after, in file order. The file keeps the two halves as
+ * two lists and cannot remember an order across them, so this one is the
+ * order. `NONE` and `0` are how the file spells "nothing" and are not inputs. */
+#define BINDING_SLOTS 2
+typedef struct {
+    int  pad;                           /* 0 a key name, 1 a [gamepad] ref  */
+    char value[MODEL_BINDING_CAP];
+} binding_item_t;
+
+/* Fills at most `max` and returns how many the row HOLDS, which a hand-edited
+ * file can make more than the page has slots for. */
+unsigned    model_binding_items(int title, unsigned action,
+                                binding_item_t *out, unsigned max);
+/* The same, for what the row inherits: what Reset would put back. */
+unsigned    model_binding_default_items(int title, unsigned action,
+                                        binding_item_t *out, unsigned max);
+/* The row becomes exactly these `n` inputs; a half left with none is written
+ * `NONE` or `0`. 0, and nothing changed, when an input belongs to a half the
+ * action does not have or the halves do not fit. */
+int         model_binding_set_items(int title, unsigned action,
+                                    const binding_item_t *items, unsigned n);
+/* What the row inherits when its title section says nothing: the shared
+ * section's line, or the table's default. `pad` picks the half; 0 when the
+ * action has no such half. */
+int         model_binding_default(int title, unsigned action, int pad,
+                                  char *out, size_t out_size);
+int         model_binding_is_default(int title, unsigned action);
+void        model_binding_restore(int title, unsigned action);
+
 /* ---- what is wrong with the file ----------------------------------------- */
 
 void        scan_ini_problems(void);
@@ -187,19 +260,18 @@ enum {
  * is attached right now, so that stays a view of two things, in the window. */
 int         model_save(char *why, size_t why_size, int *changed);
 
-/* ---- the known-good copy ------------------------------------------------- */
+/* ---- restoring the defaults ---------------------------------------------- */
 
-void        known_good_path(char *out, size_t out_size);
-/* One sentence for the page: whether there is a copy, and when it was made. */
-void        known_good_state(char *out, size_t out_size);
-void        seed_known_good(void);
-int         model_known_good_exists(void);
-/* Copy the ini over the known-good copy. Asking first is the window's job. */
-int         model_known_good_write(char *why, size_t why_size);
-/* Put the known-good copy in place of the ini, keeping the file as it is now
- * as vcthunder.ini.bak. THE DOCUMENT IS NOT RELOADED: the caller flushes what
- * it caches about the file and calls model_reopen(), which can fail on its
- * own and means something different when it does. */
-int         model_known_good_restore(char *why, size_t why_size);
+/* Where model_defaults_restore() keeps the file it replaced. Nothing else
+ * writes it, so it survives every later Apply. */
+#define MODEL_RESTORE_SUFFIX ".before-defaults"
+
+/* Replace the ini with `data` (the shipped ini, config_default_ini()), whole,
+ * keeping the file as it is now as vcthunder.ini MODEL_RESTORE_SUFFIX. THE
+ * DOCUMENT IS NOT RELOADED: the caller flushes what it caches about the file
+ * and calls model_reopen(), which can fail on its own and means something
+ * different when it does. */
+int         model_defaults_restore(const void *data, unsigned long size,
+                                   char *why, size_t why_size);
 
 #endif /* VCT_LAUNCHER_MODEL_H */

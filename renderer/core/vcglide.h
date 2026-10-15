@@ -35,9 +35,13 @@ typedef struct {
     char     log[260];
     char     capture[260];
     char     frames[260];       /* dump each frame here as a PNG; "" = off */
+    char     display_dump[260]; /* GPU: the displayed picture, full size, as PPM */
+    char     display_frames[32];/* "A:B", the frames display_dump writes */
     char     title[32];
     char     renderer[16];      /* auto | gpu | cpu */
     char     aspect[16];        /* raster | 4:3 | 16:9 | stretch */
+    char     upscale_2d[16];    /* bilinear | catmull_rom | fsr1 */
+    char     texmag[16];        /* bilinear | catmull_rom: 3D texture magnifier */
     unsigned capture_frames;
     int      verbose;
     int      present;           /* show what was rendered; a harness says no */
@@ -143,6 +147,31 @@ extern int vgl_surface_w, vgl_surface_h;
 void vgl_destination_rect(int fullscreen, int raster_w, int raster_h,
                           int client_w, int client_h,
                           int *x, int *y, int *w, int *h);
+
+/* Bezel art, set once by the host (vglSetBezel) and kept across surface opens:
+ * premultiplied RGBA8 with its mip chain, level 0 first, and the hole in
+ * level-0 pixels. `generation` changes whenever the art does, so a backend
+ * knows its uploaded copy is stale. levels == 0: no bezel. */
+#define VGL_BEZEL_LEVELS 16
+typedef struct {
+    int      levels;
+    int      w[VGL_BEZEL_LEVELS], h[VGL_BEZEL_LEVELS];
+    uint8_t *px[VGL_BEZEL_LEVELS];
+    int      hole_x, hole_y, hole_w, hole_h;
+    unsigned generation;
+} vgl_bezel_t;
+
+extern vgl_bezel_t vgl_bezel;
+
+/* The game's destination and, under a bezel the backend can draw (`ready`),
+ * the art's. Returns 1 and fills `canvas` when the art is to be drawn;
+ * otherwise `picture` is vgl_destination_rect's answer, or with art set but
+ * not drawable the picture fitted in its own shape, and `canvas` is the whole
+ * client. */
+#include "layout.h"
+int vgl_present_layout(int fullscreen, int raster_w, int raster_h,
+                       int client_w, int client_h, int ready,
+                       vgl_rect_t *picture, vgl_rect_t *canvas);
 void vgl_refresh_geometry(int surface_w, int surface_h);
 
 #endif /* VCGLIDE_INTERNAL_H */

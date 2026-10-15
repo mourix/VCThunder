@@ -43,6 +43,7 @@ HFONT  theme_play_font(void);           /* the two Play buttons' face       */
 HFONT  theme_title_font(void);          /* the Launch page's title          */
 HFONT  theme_title_small_font(void);    /* ...on a desktop with no room     */
 HFONT  theme_note_font(void);           /* the lines under the live bars    */
+HFONT  theme_heading_font(void);        /* every box's title, in capitals   */
 HBRUSH theme_main_brush(void);          /* the frame                        */
 HBRUSH theme_page_brush(void);          /* the scrolling page and its cards */
 HBRUSH theme_border_brush(void);        /* a card's frame                   */
@@ -78,7 +79,9 @@ typedef enum {
     THEME_BUTTON_TAB,           /* one of a row, and not the one you are on */
     THEME_BUTTON_TAB_LIT,       /* ...and the one you are                   */
     THEME_BUTTON_HYDRO,         /* the two Play buttons, in the cabinets'   */
-    THEME_BUTTON_OFFROAD        /* own colours                              */
+    THEME_BUTTON_OFFROAD,       /* own colours                              */
+    THEME_BUTTON_LIT,           /* a binding slot held, or being captured   */
+    THEME_BUTTON_EMPTY          /* a binding slot with nothing in it        */
 } theme_button_t;
 
 theme_button_t launcher_button_kind(int id);
@@ -91,7 +94,8 @@ typedef enum {
     THEME_TONE_RED,             /* hold still                               */
     THEME_TONE_GREEN,           /* do it now                                */
     THEME_TONE_AMBER,           /* going on, or going again                 */
-    THEME_TONE_BLUE             /* done, finish it                          */
+    THEME_TONE_BLUE,            /* done, finish it                          */
+    THEME_TONE_DIM              /* a greyed settings row's label            */
 } theme_tone_t;
 
 theme_tone_t launcher_control_tone(int id);

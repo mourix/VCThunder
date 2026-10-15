@@ -327,6 +327,40 @@ static void test_append_to_trailing_section(const char *folder)
     ini_doc_free(&doc);
 }
 
+/* A new key goes after the section's last key, not after the blank line and
+ * the comment that lead into the next section. */
+static void test_insert_after_last_key(const char *folder)
+{
+    char path[MAX_PATH], why[256], *saved;
+    ini_doc_t doc;
+
+    snprintf(path, sizeof path, "%.*s\\gap.ini",
+             (int)(sizeof path - sizeof "\\gap.ini"), folder);
+    check(write_bytes(path, "[ffb]\r\nenabled = true\r\n\r\n"
+                            "; the next section's own comment\r\n"
+                            "[hydro.ffb]\r\nrumble = 8\r\n"
+                            "[empty]\r\n\r\n[last]\r\n"),
+          "write the gap fixture");
+    check(ini_doc_load(&doc, path), "load the gap fixture");
+    check(ini_doc_set(&doc, "ffb", "strength_percent", "90") &&
+          ini_doc_set(&doc, "empty", "a", "1") &&
+          ini_doc_set(&doc, "last", "b", "2"), "add three keys");
+    check(ini_doc_save(&doc, why, sizeof why), why);
+    ini_doc_free(&doc);
+    saved = read_bytes(path);
+    check(saved && strstr(saved, "[ffb]\r\nenabled = true\r\n"
+                                 "strength_percent = 90\r\n\r\n"
+                                 "; the next section's own comment\r\n"
+                                 "[hydro.ffb]") != NULL,
+          "THE KEY LANDS UNDER THE LAST KEY, before the blank line and the "
+          "comment that belong to the next section");
+    check(saved && strstr(saved, "[empty]\r\na = 1\r\n\r\n[last]") != NULL,
+          "a section with no keys gets it right under its header");
+    check(saved && strstr(saved, "[last]\r\nb = 2\r\n") != NULL,
+          "and a header that ends the file still takes one");
+    free(saved);
+}
+
 /* ---- the value grammar (src/ini.c) --------------------------------------
  *
  * Four readers of vcthunder.ini share this and nothing tested it. Two of the
@@ -836,6 +870,7 @@ int main(void)
     test_empty_value_gets_a_gap(folder);
     test_padded_value_reads_back(folder);
     test_append_to_trailing_section(folder);
+    test_insert_after_last_key(folder);
     test_device_grammar();
     test_binding_grammar();
     test_device_scope(folder);

@@ -82,6 +82,11 @@ DWORD    game_thread_id(unsigned i);
  * seam) must call game_irq_wait() before it runs game code. That is what
  * `cli` meant. */
 int  game_irq_disabled(void);
+/* Shared around game code on a thread other than the game's own; exclusive
+ * while a diagnostic replays game code and restores its memory. */
+void game_side_thread_enter(void);
+void game_side_thread_leave(void);
+void game_hold_side_threads(int on);
 /* Wait up to max_us for the game to leave its critical section. Returns 1 if it
  * did, 0 if the caller should proceed anyway, which is counted and reported,
  * because a stalled audio tick is worse than a rare unprotected one. */
@@ -91,6 +96,10 @@ int  game_irq_wait(unsigned max_us);
  * costs one frame rather than the rest of the run. Call only from the game's
  * own thread. */
 void game_irq_resync(const char *where);
+/* The cli depth, and a return to one read earlier, for a replay of game code
+ * abandoned past its `sti`. Game thread only, with side threads held. */
+int  game_irq_depth(void);
+void game_irq_unwind(int depth);
 /* Per-site fault census, into the periodic report. */
 void game_irq_report(void);
 
@@ -159,6 +168,9 @@ void  patch_ret_imm(uint32_t va, uint32_t eax_value);
  * and the callee is left byte-identical. Refuses, loudly, if the byte at
  * site_va is not 0xE8. Returns nonzero on success. */
 int   patch_call(uint32_t site_va, const void *target);
+/* Rewrite ONE `call dword ptr [cell_va]` (FF 15, six bytes) into a direct
+ * call to target and a nop. Refuses unless those exact bytes are there. */
+int   patch_call_indirect(uint32_t site_va, uint32_t cell_va, const void *target);
 
 /* Build a trampoline that logs the call by name, then returns eax_value.
  * Emitted as cdecl, so it is stack-safe regardless of the callee's arity. */
@@ -186,6 +198,42 @@ void *thunk_count_only(const void *target, uint32_t *counter);
 void win32_report_calls(uint64_t frames);
 /* PAGE_NOCACHE/WRITECOMBINE stripped from the game's own VM requests. */
 void win32_report_nocache(void);
+/* The game's own memory, as it asked for it: its live VirtualAlloc
+ * reservations (copied out, at most `max`) and its HeapCreate heaps (a NULL
+ * slot is one it destroyed). NULL while every list holds everything; once one
+ * overflowed, what overflowed. */
+unsigned win32_game_vallocs(uintptr_t *base, size_t *size,
+                            unsigned char *watched, unsigned max);
+/* Changes with every VM call the game makes; equal twice = the same VM. */
+uint32_t win32_game_vgen(void);
+/* Reserve the game's new VM with MEM_WRITE_WATCH (`watched` above). */
+void     win32_write_watch(int on);
+unsigned win32_game_heaps(void);
+void    *win32_game_heap(unsigned i);
+const char *win32_game_memory_lost(void);
+/* Hold the game's frees while a diagnostic will restore its memory. */
+void     win32_hold_frees(int on);
+/* The CRITICAL_SECTIONs the game initialised, which a restore must not touch. */
+unsigned win32_game_css(void);
+void    *win32_game_cs(unsigned i);
+/* Drop this thread's voice commands while a diagnostic replays game code. */
+void     audio_hold_this_thread(int on);
+/* This thread's nesting of the DCS mask, and a release back down to a depth
+ * read earlier: for a replay abandoned past its unmask. */
+int      audio_mask_depth(void);
+void     audio_mask_unwind(int depth);
+unsigned audio_held_commands(void);   /* dropped since the last call */
+/* This thread is held: drop the voice command it is making, and count it. */
+int      audio_held(void);
+/* drawreplay.c: in-between pictures (frame_rate = 60), and the replay check. */
+int      drawreplay_install(unsigned samples, unsigned skip, int control,
+                            int interp, int interp_state);
+void     drawreplay_swapped(uint64_t before_qpc, uint64_t after_qpc);
+/* After the loop's swap, sleep to just before the tick's deadline. */
+void     drawreplay_idle(int interval);
+/* Wall ms slept so far; the latest wake past its target and the wakes past
+ * the deadline, since the last call. */
+double   drawreplay_idle_ms(double *latest_ms, unsigned *past);
 
 /* Per-call timing for functions of unknown signature. Values include callees;
  * instrumentation is restricted to one configured thread. */
@@ -678,6 +726,9 @@ void window_set_hwnd(HWND hwnd);
  * Applies the configured mode, so this is also what puts the pack into
  * fullscreen at startup: it is the first moment a window exists. */
 void window_geometry(int view_w, int view_h);
+/* Bezel art is active: size the window to the art's shape, with its screen
+ * hole as tall as the raster at the window scale. 0 for any value clears it. */
+void window_set_bezel(int art_w, int art_h, int hole_h);
 
 /* Re-apply the configured geometry. force=1 after a game mode request;
  * force=0 is the bounded per-swap re-apply after one (written for a provider
@@ -708,6 +759,8 @@ typedef enum {
 
 /* Run before any game image is mapped. It owns no state after returning. */
 launcher_result_t launcher_run(const char *ini_path);
+/* A CHD to start importing as the launcher opens: one dropped on the exe. */
+void launcher_queue_import(const wchar_t *file);
 
 /* The DLL's entry point, called by VCThunder.exe (src/stub.c). Never
  * returns: its return address is inside memory the game takes over. */
@@ -735,6 +788,7 @@ typedef struct {
     log_level_t log_level;
     unsigned cpu_hz;      /* synthetic CPU rate the game is told it has */
     unsigned speed_percent;/* virtual game-clock rate; 100 = real time  */
+    int      limiter_idle; /* sleep the tick's idle instead of spinning */
     unsigned dip_switches;/* cabinet DIP byte reported by the I/O board  */
     unsigned io_ms;       /* I/O board poll period                       */
     char io_backend[16];  /* only `sim` is implemented; `serial` is not yet */
@@ -746,6 +800,10 @@ typedef struct {
     unsigned render_scale;/* wrapper's internal render multiplier; 1 = native */
     int  fullscreen;      /* start borderless-fullscreen; Alt+Enter toggles   */
     char aspect[16];      /* raster | 4:3 | 16:9 | stretch; see window.c   */
+    char bezel[MAX_PATH]; /* bezel art, a PNG; "off" or "" = none          */
+    char upscale_2d[16];  /* bilinear | catmull_rom | fsr1, above 1x       */
+    char texmag[16];      /* bilinear | catmull_rom: 3D textures, above 1x */
+    char frame_rate[4];   /* 30 | 60: 60 adds an in-between picture each tick */
     /* Which entry of the GAME'S OWN video-mode table _init3dfx_Init selects.
      * -1 = whatever the game asked for, which is the cabinet's mode 1. Mode 2
      * is 640x480 and exists here to match an 86Box oracle frame; it is NOT
@@ -755,6 +813,7 @@ typedef struct {
      * height and select the smallest containing Glide surface. Projection
      * correction is applied separately. */
     int  widescreen;
+    char widescreen_hud[8];   /* centre | edges: where the side HUD goes */
     /* Pass vcglide configuration through the environment before loading it. */
     int  vcglide_threads;          /* rasteriser workers: 0 = one per physical
                                     * core, 1 = single-threaded. The split is
@@ -779,10 +838,18 @@ typedef struct {
     int  audio;           /* enable the WASAPI mixer behind the YMF boundary */
     unsigned audio_volume;/* host-side output gain, percent                   */
     unsigned dcs_us;      /* DCS driver tick in us; the cabinet's was 5400 */
-    char audio_routing[16];/* mix | cabinet | front; see audio.c            */
+    char audio_routing[16];/* mix | cabinet; see audio.c                    */
     unsigned audio_balance;/* front..seat bus balance, 0..100; 50 = both full */
     unsigned profile_ms;  /* diagnostic sampling period, 0 = off */
     unsigned trace_draw_state;/* seconds before dumping distinct draw states */
+    unsigned draw_replay;      /* draws to replay from a restore; 0 = off      */
+    unsigned draw_replay_start;/* draws to let pass before sampling            */
+    int      draw_replay_control;/* no draws: the other threads' noise floor  */
+    unsigned draw_replay_watch;/* diagnostic: first page to write-watch       */
+    unsigned draw_replay_watch_pages;
+    unsigned draw_interp_trace;      /* diagnostic: first word to trace   */
+    unsigned draw_interp_trace_words;
+    int      draw_interp_profile; /* diagnostic: 60 Hz cost distributions */
     /* Count call sites that submit geometry outside the native field. */
     int      margin_census;
     /* THE OTHER HALF OF A MARGIN REPORT. The census above names the game code
@@ -826,6 +893,8 @@ void config_defaults(shim_config_t *c);
  * NEVER overwrites, so a pack whose file was replaced by a newer build's zip
  * cannot exist: the zip does not carry one. Nonzero when a file was created. */
 int  config_seed_ini(const char *path);
+/* The shipped ini, as embedded in this binary. Nonzero when found. */
+int  config_default_ini(const void **data, unsigned long *size);
 
 /* Load one file in two passes: shared sections, then selected-title sections.
  * Command-line values have final precedence. A missing file preserves defaults. */

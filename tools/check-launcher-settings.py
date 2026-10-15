@@ -91,7 +91,7 @@ for _n, _line in enumerate(_def_lines):
         if _line2.rstrip().endswith("))"):
             break
     _text = "\n".join(_row)
-    _show = re.search(r'SHOW\(\s*PAGE_\w+,\s*"((?:[^"\\]|\\.)*)",\s*(ST_\w+)',
+    _show = re.search(r'SHOW\(\s*(?:PAGE|GROUP)_\w+,\s*"((?:[^"\\]|\\.)*)",\s*(ST_\w+)',
                       _text, re.S)
     if not _show or _show.group(2) == "ST_BOOL":
         continue
@@ -102,6 +102,18 @@ if wide_labels:
         f"a setting label is wider than its column ({LABEL_MAX} characters); "
         f"the launcher would wrap it into the help caption below it:\n  "
         + "\n  ".join(wide_labels))
+
+# A BOX IS ONE RUN OF ROWS. The launcher opens a box wherever the group changes
+# between two rows, so a group split by another row draws as two boxes under
+# one heading.
+_runs = []
+for _g in re.findall(r'SHOW\(\s*((?:PAGE|GROUP)_\w+)', DEF):
+    if not _runs or _runs[-1] != _g:
+        _runs.append(_g)
+_split = sorted({g for g in _runs if g.startswith("GROUP_") and _runs.count(g) > 1})
+if _split:
+    raise SystemExit("a settings.def group is not one run of rows: "
+                     + ", ".join(_split))
 
 # config.c's cross-section fallback resolves a key by name alone.
 by_name: dict[str, list[str]] = {}

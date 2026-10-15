@@ -17,11 +17,23 @@
 #define VCT_MAX_IMP        160      /* Hydro 98 __imp__ slots                    */
 #define VCT_MAX_W32         96      /* Hydro 25 direct stdcall entries           */
 #define VCT_MAX_MESH_LOOPS  32      /* Hydro 13 instrumentable loop heads        */
+#define VCT_MAX_HUD_ELEMS   16      /* Offroad 10 HUD/attract draw functions     */
+#define VCT_MAX_HUD_TEXTS   16      /* Offroad 7 race-HUD gametext pointers      */
 
 typedef struct { uint32_t va; const char *name; int argbytes; } game_fn_t;
 typedef struct { uint32_t slot; const char *name; } game_imp_t;
 typedef struct { uint32_t va; const char *name; const char *group; } game_hw_t;
 typedef struct { uint32_t va; int prologue; int body; } game_loop_t;
+/* A HUD draw function and its call-through descriptor (len | reloc<<8). Its
+ * kind says what one element is: the whole call, or each _mesh3d_DrawOrtho
+ * inside it whose return address is in ra_lo..ra_hi (an overlay that draws
+ * several pieces in one function, and other things that must not move). */
+#define GAME_HUD_WHOLE      0u
+#define GAME_HUD_EACH_ORTHO 1u
+typedef struct {
+    uint32_t va, hook, kind, ra_lo, ra_hi;
+    const char *name;
+} game_hud_t;
 
 typedef struct game_profile {
     /* ---- identity ---- */
@@ -31,6 +43,7 @@ typedef struct game_profile {
     const char *sha256;         /* the image these addresses were derived from      */
     uint32_t    file_size;      /* ...and its length, for a cheap up-front check    */
     const char *io_board;       /* "Diego" | "MagicBus": display name             */
+    const char *build;          /* "v01.01b, 1999-02-27": the build sha256 names  */
 
     /* ---- image layout (PE headers + __pl_unpackrom's own stream literal) ---- */
     uint32_t image_base, code_file_off, code_size, code_va, real_code_end_va;
@@ -53,7 +66,20 @@ typedef struct game_profile {
     uint32_t gameloop_target_frame_time;
     uint32_t gameloop_frame_seconds, gameloop_draw_seconds, gameloop_work_seconds;
     uint32_t gameloop_net_seconds, gameloop_win_seconds, gameloop_history_index;
-    uint32_t gameloop_delta_frames;
+    uint32_t gameloop_delta_frames, gameloop_setdrawfunc;
+    uint32_t xfm_push, xfm_initcamerarot, sky_work;
+    uint32_t draw_phase_site, draw_swap_site;
+    uint32_t gameloop_pdrawfunc, gameloop_draw_site, hud_draw, hook_hud_draw;
+    uint32_t xfm_stack, mesh3d_slidest, hook_mesh3d_slidest, mvplayer_inmovie;
+    uint32_t stream_file, mvplayer_openmovie, hook_mvplayer_openmovie;
+    uint32_t timer_base_hi, timer_base_lo, linklist_initpool;
+    uint32_t noblend_pool_a, noblend_pool_b, noblend_pool_c, noblend_pool_d;
+    uint32_t hook_linklist_initpool;
+    /* Effect records whose slots change owner between ticks (d_record_tables). */
+    uint32_t spray_cell, spray_count, spray_stride, spray_pos, spray_vel;
+    uint32_t splash_base, splash_stride, splash_n, splash_counter;
+    uint32_t fxpart_base, fxpart_blocks, fxpart_block_stride, fxpart_recs;
+    uint32_t fxpart_rec_stride, fxpart_rec_off;
 
     /* ---- geometry / diagnostics ---- */
     uint32_t mesh3d_drawgroup, mesh3d_testbound, mesh3d_determinelod;
@@ -85,6 +111,19 @@ typedef struct game_profile {
      * overhang reaches the raster margin instead. 0 in Offroad. */
     uint32_t mesh3d_drawortho;
     uint32_t sky_viewport, sky_init;
+    /* Widescreen HUD at the edges. Hydro buffers its HUD text as glyph records
+     * (`_text_PrintStr` from `_hud_text_Draw`); Offroad keeps it as gametext
+     * objects whose position `__GameTextPrint` reads, and clips 2D to
+     * `_Viewport_screen_limit` before the seam. Each title has one family. */
+    uint32_t hud_text_draw, text_printstr;
+    uint32_t text_glyph_count, text_glyph_buf, text_glyph_stride, text_glyph_x;
+    uint32_t hud_finish_flags, hud_finish_bit;
+    /* Hydro's tracking cards: the return addresses of the card draws in
+     * _boats_DrawAllTrackingNumbers, and the float its bottom cards' x is
+     * scaled by. 0 in Offroad, whose racer tags are a ws_racer_tag repair. */
+    uint32_t track_ra_lo, track_ra_hi, track_spread;
+    uint32_t gametext_print, gametext_width, gametext_x, gametext_style;
+    uint32_t text_flush, hud_lap_texts, hud_num_laps;
     uint32_t init3dfx_init, init3dfx_hpixels, init3dfx_vpixels;
     uint32_t init3dfx_chipset, init3dfx_fb_bytes, init3dfx_fbi_rev;
     uint32_t init3dfx_tmu_count, init3dfx_tmu_rev, init3dfx_tmu_bytes;
@@ -223,6 +262,9 @@ typedef struct game_profile {
     uint32_t hook_ws_spark_cluster, hook_ws_racer_tag;
     uint32_t hook_ws_race_update, hook_ws_flag_icon;
     uint32_t hook_ws_select_draw;
+    uint32_t hook_hud_text_draw, hook_text_printstr;
+    uint32_t hook_gametext_print, hook_text_flush, hook_setdrawfunc;
+    uint32_t hook_xfm_push, hook_xfm_initcamerarot, hook_sky_work;
     uint32_t hook_ymf_alloc, hook_ymf_free;
     uint32_t hook_r2_find_name, hook_r2_name_to_doid;
     /* Call-timer targets. Per-title, for the reason in gen-gamedefs.py: Hydro's
@@ -238,6 +280,12 @@ typedef struct game_profile {
     const game_loop_t *loop;    unsigned loop_count;
     const uint32_t    *arrow_material; unsigned arrow_material_count;
     const uint32_t    *func_va; unsigned func_count;
+    const game_hud_t  *hud_elem; unsigned hud_elem_count;
+    const uint32_t    *hud_text_var; unsigned hud_text_var_count;
+    /* Offroad's inline draw phase as a script, four words a step: op, a, b, c.
+     * op 1 call a with argument kind b (0 none, 1 immediate c, 2 previous return);
+     * op 2 stop if the dword at a != 0; op 3 go to step b if the dword at a == 0. */
+    const uint32_t    *draw_step; unsigned draw_step_count;
 } game_profile_t;
 
 /* The selected title. Set once by game_select() before anything is mapped. */
@@ -251,6 +299,17 @@ extern const game_profile_t *g_game;
 
 /* Every profile linked into this build, NULL-terminated. */
 extern const game_profile_t *const g_profiles[];
+
+/* A hard disk MAME lists for one of these titles, from scripts/titles.py's
+ * MAME_DISKS. A label for the importer, never the gate: the build is decided
+ * by the executable's hash. SHA-1s are lowercase hex as the CHD header holds
+ * them; the list ends with set == NULL. */
+typedef struct {
+    const char *set, *chd, *name;
+    const game_profile_t *title;
+    const char *sha1, *rawsha1, *exe_sha256;
+} game_mame_disk_t;
+extern const game_mame_disk_t g_mame_disks[];
 
 /* Pick a profile by id, or NULL. */
 const game_profile_t *game_find(const char *id);

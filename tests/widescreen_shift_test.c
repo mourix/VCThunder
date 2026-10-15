@@ -215,6 +215,188 @@ static void case_triangle(float dx, int ortho, int margin, int reported,
     }
 }
 
+/* ---- widescreen HUD at the edges --------------------------------------- */
+
+static game_profile_t s_profile;
+static const game_hud_t s_hud_table[1] = { { 0, 0, 0, 0, 0, "test element" } };
+
+static void hud_state(void)
+{
+    set_state(99.0f, 0, 0, 1);
+    s_ws_raster_width = 711;
+    s_hud_armed = 1;
+    s_hud_bias = 0;
+    s_hud_pending = 0;
+    s_hud_seen_used = 0;
+    s_ws_world_now = s_ws_world_prev = 1;   /* the world fills the strips */
+    s_profile.id = "test";
+    s_profile.hud_elem = s_hud_table;
+    s_profile.hud_elem_count = 1;
+    g_game = &s_profile;
+    s_ws_real_tri = capture_tri;
+}
+
+/* Draw one triangle at x0, x0+20, x0+40 and return the x the provider saw for
+ * its first vertex, minus the game's: the whole offset it was given. */
+static float hud_tri(float x0)
+{
+    char v[3 * WS_VSIZE];
+    unsigned i;
+
+    memset(v, 0, sizeof v);
+    for (i = 0; i < 3; i++)
+        *(float *)(v + i * WS_VSIZE) = x0 + 20.0f * (float)i;
+    ws_draw_triangle(v, v + WS_VSIZE, v + 2 * WS_VSIZE);
+    return *(const float *)s_seen_copy[0] - x0;
+}
+
+static void case_hud_element(float first, float later, float want)
+{
+    ws_hud_scope_t scope;
+    char label[160];
+    float got1, got2, after;
+
+    hud_state();
+    ws_hud_enter(&scope, 1u, "test element", 0);
+    got1 = hud_tri(first);
+    got2 = hud_tri(later);
+    ws_hud_leave(&scope);
+    after = hud_tri(later);
+    snprintf(label, sizeof label, "HUD element first at x=%g: every primitive "
+             "moves %g (got %g, then %g for x=%g), and %g again outside it",
+             (double)first, (double)want, (double)got1, (double)got2,
+             (double)later, (double)after);
+    check(got1 == want && got2 == want && after == 99.0f && !s_hud_pending &&
+          s_hud_bias == 0, label);
+}
+
+/* An element whose side is not yet known moves nothing, and the mode being off
+ * means no element is ever opened. */
+static void case_hud_disarmed(void)
+{
+    ws_hud_scope_t scope;
+
+    hud_state();
+    s_hud_armed = 0;
+    ws_hud_enter(&scope, 1u, "test element", 0);
+    check(!s_hud_pending && hud_tri(20.0f) == 99.0f,
+          "HUD element with the mode off: the origin alone");
+    ws_hud_leave(&scope);
+}
+
+/* A buffer clear after the world (Hydro's finish screen wipes the race to
+ * black) makes what follows a page: an element there keeps the origin. */
+static void case_hud_after_clear(void)
+{
+    ws_hud_scope_t scope;
+    float got;
+
+    hud_state();
+    s_ws_world_prev = 0;
+    s_ws_real_clear = NULL;
+    ws_buffer_clear(0, 0, 0);
+    ws_hud_enter(&scope, 1u, "test element", 0);
+    got = hud_tri(20.0f);
+    ws_hud_leave(&scope);
+    check(!s_ws_world_now && got == 99.0f,
+          "HUD element after a buffer clear: the origin alone, page layout");
+}
+
+/* Hydro's text: a fake _text_PrintStr appends records the way the game does,
+ * and the hook must move exactly those, by the side of their own extent. */
+#define GLYPH_STRIDE 40u
+static uint16_t s_glyph_count;
+static char s_glyph_buf[8 * GLYPH_STRIDE];
+static float s_glyph_x[3];
+static uint32_t s_finish;
+
+static uint32_t __cdecl fake_printstr(uint32_t a0, uint32_t a1, uint32_t a2,
+                                      uint32_t a3, uint32_t a4, uint32_t a5,
+                                      uint32_t a6, uint32_t a7)
+{
+    unsigned i;
+
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)a7;
+    for (i = 0; i < 3; i++)
+        *(float *)(s_glyph_buf + (s_glyph_count + i) * GLYPH_STRIDE + 4) =
+            s_glyph_x[i];
+    s_glyph_count += 3;
+    return 0;
+}
+
+static void case_hud_text(float x0, int depth, int dials, float want)
+{
+    char label[160];
+    unsigned i;
+    int ok = 1;
+
+    hud_state();
+    s_profile.text_glyph_count = (uint32_t)(uintptr_t)&s_glyph_count;
+    s_profile.text_glyph_buf = (uint32_t)(uintptr_t)s_glyph_buf;
+    s_profile.text_glyph_stride = GLYPH_STRIDE;
+    s_profile.text_glyph_x = 4;
+    s_real_text_printstr = fake_printstr;
+    memset(s_glyph_buf, 0, sizeof s_glyph_buf);
+    *(float *)(s_glyph_buf + 4) = -5.0f;    /* an earlier string: never moved */
+    s_glyph_count = 1;
+    for (i = 0; i < 3; i++)
+        s_glyph_x[i] = x0 + 12.0f * (float)i;
+    s_hud_text_depth = depth;
+    s_finish = dials ? 0u : 0x100u;
+    s_profile.hud_finish_flags = (uint32_t)(uintptr_t)&s_finish;
+    s_profile.hud_finish_bit = 0x100u;
+    gl_text_printstr(0, 0, (uint32_t)(uintptr_t)"TEXT", 0, 0, 0, 0, 0);
+    s_hud_text_depth = 0;
+    for (i = 0; i < 3; i++)
+        if (*(const float *)(s_glyph_buf + (1 + i) * GLYPH_STRIDE + 4) !=
+            s_glyph_x[i] + want)
+            ok = 0;
+    snprintf(label, sizeof label, "HUD text at x=%g, depth %d, race %d: its own "
+             "records move %g and nothing before them does", (double)x0, depth,
+             dials, (double)want);
+    check(ok && *(const float *)(s_glyph_buf + 4) == -5.0f &&
+          s_glyph_count == 4, label);
+}
+
+/* Hydro's tracking cards: a fake _mesh3d_DrawOrtho draws one triangle inside
+ * the native field, and the card's own x argument decides the whole offset,
+ * with the HUD mode on or off. */
+static float s_card_got;
+
+static void __cdecl fake_card_ortho(uint32_t a0, uint32_t a1, uint32_t a2,
+                                    uint32_t a3, uint32_t a4, uint32_t a5,
+                                    uint32_t a6, uint32_t a7)
+{
+    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)a7;
+    s_card_got = hud_tri(200.0f);
+}
+
+static void case_track_card(float x, int armed, float want)
+{
+    static float spread = 245.0f;
+    char label[160];
+    uint32_t xb;
+    float after;
+
+    hud_state();
+    s_hud_armed = armed;
+    s_profile.track_ra_lo = 1u;             /* every caller is a card draw */
+    s_profile.track_ra_hi = 0xFFFFFFFFu;
+    s_profile.track_spread = (uint32_t)(uintptr_t)&spread;
+    s_real_drawortho = fake_card_ortho;
+    memcpy(&xb, &x, sizeof xb);
+    gl_draw_ortho(0, xb, 0, 0, 0, 0, 0, 0);
+    s_profile.track_ra_lo = s_profile.track_ra_hi = 0;
+    after = hud_tri(200.0f);
+    snprintf(label, sizeof label, "tracking card at x=%g, HUD mode %d: moves "
+             "%g (got %g), and %g again after it", (double)x, armed,
+             (double)want, (double)s_card_got, (double)after);
+    check(s_card_got == want && after == 99.0f && s_hud_bias == 0 &&
+          !s_hud_name && !s_ws_ortho_depth, label);
+}
+
 int main(void)
 {
     float dxs[] = { 0.0f, 99.0f, 1.0f };
@@ -242,6 +424,33 @@ int main(void)
     case_triangle(0.0f, 1, 0, 1, 0);        /* the ortho clamp still applies  */
     case_triangle(99.0f, 0, 0, 1, 0);       /* a real origin                  */
     case_triangle(99.0f, 1, 0, 1, 0);       /* origin and clamp together      */
+
+    /* 711-wide raster, 512-wide game, origin 99: a left-third element lands
+     * on raster 0 (total 0), a right-third one on the last column (total
+     * 199), the middle third keeps the origin. The FIRST primitive decides. */
+    case_hud_element(20.0f, 300.0f, 0.0f);
+    case_hud_element(420.0f, 30.0f, 199.0f);
+    case_hud_element(230.0f, 480.0f, 99.0f);
+    /* Halfway up the left ramp (centre 192 = 4.5/12 of 512): half the left
+     * offset, rounded away from zero, so a sliding element never jumps. */
+    case_hud_element(172.0f, 480.0f, 49.0f);
+    case_hud_element(300.0f, 20.0f, 149.0f);    /* centre 320 = 7.5/12 */
+    case_hud_disarmed();
+    case_hud_after_clear();
+    /* Records are moved before the seam, which adds the origin itself. */
+    case_hud_text(20.0f, 1, 1, -99.0f);
+    case_hud_text(440.0f, 1, 1, 100.0f);
+    case_hud_text(240.0f, 1, 1, 0.0f);
+    case_hud_text(20.0f, 0, 1, 0.0f);       /* not HUD text: untouched */
+    case_hud_text(20.0f, 1, 0, 0.0f);       /* result screen up: stays put */
+    /* Sides at +-253 reach the raster's edges whatever the HUD mode; the
+     * bottom (|x| <= 245) spreads in proportion, so it meets the sides. */
+    case_track_card(253.0f, 1, 199.0f);
+    case_track_card(-253.0f, 1, 0.0f);
+    case_track_card(253.0f, 0, 199.0f);
+    case_track_card(0.0f, 1, 99.0f);
+    case_track_card(122.5f, 0, 149.0f);
+    case_track_card(-122.5f, 0, 49.0f);
 
     if (failures) {
         fprintf(stderr, "widescreen shift tests: %d failure(s)\n", failures);

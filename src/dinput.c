@@ -198,8 +198,10 @@ static void di_load_ini(const char *path)
 
     memset(&s_cfg, 0, sizeof s_cfg);
 
-    ini_read_scoped(path, "analog", "dinput_name", "",
-                  s_cfg.device_name, sizeof s_cfg.device_name);
+    if (ini_read_scoped(path, "analog", "dinput_name", "",
+                        s_cfg.device_name, sizeof s_cfg.device_name))
+        LOGI("io: dinput_name = %s, from [%s.analog]", s_cfg.device_name,
+             G->id);
 
     s_cfg.ffb_enabled = di_bool(path, "ffb", "enabled", 1);
     s_cfg.ffb_gain_percent = di_percent(path, "ffb", "device_gain_percent", 100, 100);

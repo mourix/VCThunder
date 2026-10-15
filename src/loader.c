@@ -6,9 +6,8 @@
  * __pl_unpackrom materialise DATA and .bss.
  */
 #include "vcthunder.h"
+#include "hash.h"
 
-#include <bcrypt.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -98,51 +97,6 @@ static int read_all(const char *path, unsigned char **buf, size_t *len)
     return 1;
 }
 
-static int sha256_hex(const unsigned char *data, size_t len, char out[65])
-{
-    static const char hex[] = "0123456789abcdef";
-    BCRYPT_ALG_HANDLE alg = NULL;
-    BCRYPT_HASH_HANDLE hash = NULL;
-    unsigned char digest[32];
-    NTSTATUS status;
-    unsigned i;
-
-    if (len > ULONG_MAX) {
-        LOGE("image is too large to hash (%zu bytes)", len);
-        return 0;
-    }
-    status = BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM,
-                                         NULL, 0);
-    if (status < 0)
-        goto fail;
-    status = BCryptCreateHash(alg, &hash, NULL, 0, NULL, 0, 0);
-    if (status < 0)
-        goto fail;
-    status = BCryptHashData(hash, (PUCHAR)data, (ULONG)len, 0);
-    if (status < 0)
-        goto fail;
-    status = BCryptFinishHash(hash, digest, sizeof digest, 0);
-    if (status < 0)
-        goto fail;
-
-    BCryptDestroyHash(hash);
-    BCryptCloseAlgorithmProvider(alg, 0);
-    for (i = 0; i < sizeof digest; i++) {
-        out[2 * i]     = hex[digest[i] >> 4];
-        out[2 * i + 1] = hex[digest[i] & 15u];
-    }
-    out[64] = '\0';
-    return 1;
-
-fail:
-    LOGE("BCrypt SHA-256 failed (status=0x%08lX)", (unsigned long)status);
-    if (hash)
-        BCryptDestroyHash(hash);
-    if (alg)
-        BCryptCloseAlgorithmProvider(alg, 0);
-    return 0;
-}
-
 int game_map(const char *exe_path)
 {
     unsigned char *file = NULL;
@@ -161,6 +115,7 @@ int game_map(const char *exe_path)
         return 0;
     }
     if (!sha256_hex(file, len, actual_sha256)) {
+        LOGE("BCrypt SHA-256 of the image failed");
         free(file);
         return 0;
     }

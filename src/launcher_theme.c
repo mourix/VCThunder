@@ -14,6 +14,7 @@
 
 static HINSTANCE s_instance;
 static HFONT s_font, s_play_font, s_title_font, s_title_small_font, s_note_font;
+static HFONT s_heading_font;
 static HBRUSH s_main_brush, s_page_brush, s_control_brush, s_border_brush;
 static COLORREF s_main_color, s_page_color, s_control_color, s_text_color;
 static UINT s_dpi = 96;
@@ -28,6 +29,7 @@ HFONT  theme_play_font(void)         { return s_play_font; }
 HFONT  theme_title_font(void)        { return s_title_font; }
 HFONT  theme_title_small_font(void)  { return s_title_small_font; }
 HFONT  theme_note_font(void)         { return s_note_font ? s_note_font : s_font; }
+HFONT  theme_heading_font(void)      { return s_heading_font ? s_heading_font : s_font; }
 HBRUSH theme_main_brush(void)        { return s_main_brush; }
 HBRUSH theme_page_brush(void)        { return s_page_brush; }
 HBRUSH theme_border_brush(void)      { return s_border_brush; }
@@ -155,6 +157,15 @@ int draw_dark_button(const DRAWITEMSTRUCT *draw)
         kind == THEME_BUTTON_HYDRO) {
         face = draw->itemState & ODS_SELECTED ? RGB(0, 107, 132) :
                                                 RGB(0, 134, 165);
+    } else if (kind == THEME_BUTTON_EMPTY) {
+        /* AN OUTLINE, NOT A FACE: a filled box reads as a button that does
+         * something, and an empty slot is a place to put something. */
+        face = draw->itemState & ODS_SELECTED ? RGB(38, 38, 40) :
+                                                s_page_color;
+    } else if (!(draw->itemState & ODS_DISABLED) &&
+               kind == THEME_BUTTON_LIT) {
+        face = draw->itemState & ODS_SELECTED ? RGB(0, 84, 150) :
+                                                RGB(0, 100, 180);
     } else if (!(draw->itemState & ODS_DISABLED) &&
                kind == THEME_BUTTON_OFFROAD) {
         face = draw->itemState & ODS_SELECTED ? RGB(151, 10, 13) :
@@ -171,11 +182,16 @@ int draw_dark_button(const DRAWITEMSTRUCT *draw)
              tab == 0 ? RGB(72, 72, 76) : RGB(100, 100, 104);
     text_colour = tab >= 0 ? (tab ? s_text_color : RGB(198, 198, 202)) :
                   draw->itemState & ODS_DISABLED ? RGB(125, 125, 128) :
-                                                   s_text_color;
+                  kind == THEME_BUTTON_EMPTY ? RGB(135, 135, 140) :
+                                               s_text_color;
     brush = CreateSolidBrush(face);
-    pen = CreatePen(PS_SOLID, 1, border);
+    pen = CreatePen(kind == THEME_BUTTON_EMPTY &&
+                    !(draw->itemState & ODS_FOCUS) ? PS_DOT : PS_SOLID,
+                    1, border);
     old_brush = SelectObject(draw->hDC, brush);
     old_pen = SelectObject(draw->hDC, pen);
+    /* A dotted pen paints its gaps in the background colour. */
+    SetBkColor(draw->hDC, face);
     Rectangle(draw->hDC, rc.left, rc.top, rc.right, rc.bottom);
     SelectObject(draw->hDC, old_pen);
     SelectObject(draw->hDC, old_brush);
@@ -249,6 +265,8 @@ LRESULT control_colour(int on_page, UINT message, WPARAM wparam,
     case THEME_TONE_GREEN: SetTextColor(dc, RGB(110, 215, 125)); break;
     case THEME_TONE_AMBER: SetTextColor(dc, RGB(240, 185, 70));  break;
     case THEME_TONE_BLUE:  SetTextColor(dc, RGB(115, 175, 255)); break;
+    /* Dimmer than a caption, so a greyed label and its help stay apart. */
+    case THEME_TONE_DIM:   SetTextColor(dc, RGB(120, 120, 124)); break;
     default:
         SetTextColor(dc,
                      launcher_control_is_caption(GetDlgCtrlID((HWND)lparam)) ?
@@ -272,6 +290,12 @@ HWND make_control(DWORD ex, const char *class_name, const char *text,
         ((style & BS_TYPEMASK) == BS_PUSHBUTTON ||
          (style & BS_TYPEMASK) == BS_DEFPUSHBUTTON))
         style = (style & ~BS_TYPEMASK) | BS_OWNERDRAW;
+    /* A STATIC draws `&` as an underline under the next letter, and nothing
+     * here is a mnemonic: a page name ("Files & Logging"), a device name or a
+     * path would lose a character. text_block_height() measures DT_NOPREFIX,
+     * so this is also what makes the measure and the drawing agree. */
+    if (!_stricmp(class_name, "STATIC"))
+        style |= SS_NOPREFIX;
     HWND control = CreateWindowExA(ex, class_name, text,
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style,
         scale_px(x), scale_px(y),
@@ -368,6 +392,7 @@ void theme_open(HINSTANCE instance, const RECT *work)
     s_title_small_font = create_bold_font(1, 1);
     /* Heavier than the prose around it, lighter than a heading. */
     s_note_font = create_weighted_font(1, 1, FW_SEMIBOLD);
+    s_heading_font = create_bold_font(1, 1);
 }
 
 void theme_close(void)
@@ -382,6 +407,9 @@ void theme_close(void)
         DeleteObject(s_title_small_font);
     if (s_note_font)
         DeleteObject(s_note_font);
+    if (s_heading_font)
+        DeleteObject(s_heading_font);
+    s_heading_font = NULL;
     s_font = NULL;
     s_play_font = NULL;
     s_title_font = NULL;

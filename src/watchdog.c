@@ -28,23 +28,27 @@ static LARGE_INTEGER s_perf_freq;
 #define WATCHDOG_FRAMES     16u
 
 static HANDLE  s_render_thread;
+/* Held by a dump for its whole length and by the swap that replaces
+ * s_render_thread: a dump must resume the thread it suspended, and the handle
+ * it is using must not be closed under it. */
+static SRWLOCK s_render_lock = SRWLOCK_INIT;
 static HANDLE  s_watchdog_thread;
 static volatile LONG64 s_last_swap_qpc_atomic;
 static LONG64 s_watchdog_armed_qpc;
 static volatile LONG   s_watchdog_stop;
 
-static void watchdog_dump(unsigned report, double stalled_s)
+static void watchdog_dump_thread(HANDLE th, unsigned report, double stalled_s)
 {
     CONTEXT ctx;
-    char line[512];
+    char line[2048];
     int n = 0;
     unsigned depth;
 
-    if (SuspendThread(s_render_thread) == (DWORD)-1)
+    if (SuspendThread(th) == (DWORD)-1)
         return;
     memset(&ctx, 0, sizeof ctx);
     ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-    if (GetThreadContext(s_render_thread, &ctx)) {
+    if (GetThreadContext(th, &ctx)) {
         char mod[MAX_PATH] = "?";
         HMODULE h = NULL;
 
@@ -74,7 +78,7 @@ static void watchdog_dump(unsigned report, double stalled_s)
         LOGE("watchdog: render thread id=%lu (compare with the DCS lock owner "
              "below: equal means it OWNS the lock and is blocked elsewhere, "
              "different means it is WAITING on it)",
-             (unsigned long)GetThreadId(s_render_thread));
+             (unsigned long)GetThreadId(th));
 
         /* The render thread's block names the OBJECT and never the HOLDER. Ask
          * the audio side directly, from here, while everything is still parked. */
@@ -90,7 +94,7 @@ static void watchdog_dump(unsigned report, double stalled_s)
 
             /* Classify stack values by executable-page membership before
              * presenting them as return addresses. */
-            for (sp = (uint32_t)ctx.Esp; sp < (uint32_t)ctx.Esp + 512 && found < 10;
+            for (sp = (uint32_t)ctx.Esp; sp < (uint32_t)ctx.Esp + 4096 && found < 40;
                  sp += 4) {
                 MEMORY_BASIC_INFORMATION mbi;
                 char mn[MAX_PATH];
@@ -129,7 +133,7 @@ static void watchdog_dump(unsigned report, double stalled_s)
                 LOGE("watchdog: stack scan (code = a plausible return address, "
                      "DATA = an object; a DATA address repeated around an ntdll "
                      "wait is what is being waited ON):%s", line);
-            ResumeThread(s_render_thread);
+            ResumeThread(th);
             return;
         }
 
@@ -153,7 +157,15 @@ static void watchdog_dump(unsigned report, double stalled_s)
             LOGE("watchdog: return chain:%s  (resolve with "
                  "scripts/p1-symbols.py --lookup)", line);
     }
-    ResumeThread(s_render_thread);
+    ResumeThread(th);
+}
+
+static void watchdog_dump(unsigned report, double stalled_s)
+{
+    AcquireSRWLockExclusive(&s_render_lock);
+    if (s_render_thread)
+        watchdog_dump_thread(s_render_thread, report, stalled_s);
+    ReleaseSRWLockExclusive(&s_render_lock);
 }
 
 static DWORD WINAPI watchdog(LPVOID arg)
@@ -258,6 +270,28 @@ static void watchdog_start(void)
  * top of the swap hook and there is no reason for the caller to know that. */
 void wd_note_swap(uint64_t swap_qpc)
 {
+    static volatile DWORD s_swap_tid;
+    DWORD me = GetCurrentThreadId();
+
     InterlockedExchange64(&s_last_swap_qpc_atomic, (LONG64)swap_qpc);
     watchdog_start();
+    /* Watch the thread that presents, not the one that armed: Offroad runs its
+     * logic on a thread of its own, and a freeze report sampling the thread
+     * that started the game shows only that thread waiting for it. */
+    if (s_swap_tid != me && s_render_thread) {
+        HANDLE h, old;
+
+        if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+                            GetCurrentProcess(), &h,
+                            THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT,
+                            FALSE, 0)) {
+            AcquireSRWLockExclusive(&s_render_lock);
+            old = s_render_thread;
+            s_render_thread = h;
+            ReleaseSRWLockExclusive(&s_render_lock);
+            if (old)
+                CloseHandle(old);
+            s_swap_tid = me;
+        }
+    }
 }

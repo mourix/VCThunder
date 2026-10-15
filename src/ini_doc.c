@@ -335,6 +335,10 @@ int ini_doc_set(ini_doc_t *doc, const char *section, const char *key,
 {
     char current[96] = "", given[INI_VALUE_CAP];
     size_t i, last = (size_t)-1, section_end = (size_t)-1;
+    /* The section's last assignment, and its header: a new key goes right
+     * after the one, or the other when the section has no keys, never after
+     * the blank lines and comments that lead into the NEXT section. */
+    size_t last_key = (size_t)-1, header = (size_t)-1;
 
     /* Every reader trims the blanks around a value, so none are written. */
     snprintf(given, sizeof given, "%s", value ? value : "");
@@ -346,13 +350,17 @@ int ini_doc_set(ini_doc_t *doc, const char *section, const char *key,
             if (!_stricmp(current, section) && section_end == (size_t)-1)
                 section_end = i;
             snprintf(current, sizeof current, "%s", name);
+            if (!_stricmp(name, section))
+                header = i;
             continue;
         }
         if (!_stricmp(current, section)) {
             section_end = i + 1;
-            if (doc_key_value(doc->line[i], k, sizeof k, old, sizeof old) &&
-                !_stricmp(k, key))
-                last = i;
+            if (doc_key_value(doc->line[i], k, sizeof k, old, sizeof old)) {
+                last_key = i;
+                if (!_stricmp(k, key))
+                    last = i;
+            }
         }
     }
     /* OUR SECTION'S HEADER WAS THE FILE'S LAST LINE: the header branch only
@@ -365,6 +373,9 @@ int ini_doc_set(ini_doc_t *doc, const char *section, const char *key,
      * compiled default in the game. */
     if (section_end == (size_t)-1 && !_stricmp(current, section))
         section_end = doc->count;
+    if (section_end != (size_t)-1)
+        section_end = last_key != (size_t)-1 ? last_key + 1 :
+                      header != (size_t)-1   ? header + 1 : section_end;
 
     if (last != (size_t)-1) {
         char *changed = replace_value(doc->line[last], value);

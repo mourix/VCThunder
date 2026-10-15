@@ -18,7 +18,7 @@ One pack, one file, both cabinets:
 built-in defaults  ->  [section]  ->  [<title>.section]  ->  command line
 ```
 
-So `[offroad.audio] output = front` leaves Hydro alone; anything a title section does not name
+So `[offroad.audio] output = cabinet` leaves Hydro alone; anything a title section does not name
 falls through to the plain one. There is no flat `[offroad]` section.
 
 - **The log names where each value came from.** An illegal value is refused with a reason and
@@ -29,24 +29,30 @@ falls through to the plain one. There is no flat `[offroad]` section.
 
 > **Never paste a second copy of a section or a key**; edit the one that is there. In `[analog]`,
 > `[ffb]`, the bindings and `[devices]` the game reads only the **first** block and the **first**
-> copy of a key, silently. The launcher lists both on *Troubleshooting*.
+> copy of a key, silently. The launcher lists both on *Help*.
 
 ### 1.1 The launcher
 
 - **Apply writes only what changed**, keeping ordering, comments, unknown keys and line endings.
   Every save first copies the old file to `vcthunder.ini.bak`.
-- **`vcthunder.ini.good` is your known-good copy**, updated only by *Save these as known-good* on
-  *Troubleshooting*; *Revert to known-good* puts it back.
-- **Per-title values are shown, not edited**, except control bindings. A key set in
-  `[<title>.<section>]` says so on its row, as the shipped `[hydro.ffb]` rumble trims do.
-- ***Troubleshooting* lists lines nothing reads** (unknown keys, duplicate sections) and never
+- **Restore default settings**, on *Help*, replaces `vcthunder.ini` with a clean copy
+  of the shipped one, the file a fresh download starts with, keeping the old file as
+  `vcthunder.ini.bak`. Deleting `vcthunder.ini` does the same on the next start.
+- **Per-title values are shown, not edited**, except control bindings and the controller each
+  game uses (§4.1.4). A key set in `[<title>.<section>]` says so on its row, as the shipped
+  `[hydro.ffb]` rumble trims do.
+- ***Help* lists lines nothing reads** (unknown keys, duplicate sections) and never
   changes them.
 - **Set up... measures your axes**: move each control when asked. It listens on **every**
   DirectInput controller, so the accelerator can be a pedal on the wheel or a throttle lever on
   another controller; an axis on another controller is written `<label>:<axis>` (§4.1.3). A lever
   counts once it has moved and stays put. **Skip step** leaves that row as it was. Nothing is
   written until you confirm what it measured and press Apply.
-- **Show advanced settings on every page** (on *Troubleshooting*) reveals the rest of the keys.
+- **Show advanced settings on every page** (on *Help*) reveals the rest of the keys, and three
+  pages that are not listed without it: *Game System*, *Files & Logging* and *Link Play* (which
+  stays listed while `[link] link` is not `off`).
+- **Show the log files**, on *Help*, opens Explorer on `vcthunder.log`, the file a problem report
+  needs.
 
 ### 1.2 The command line and the shipped file
 
@@ -105,9 +111,40 @@ The cabinet's picture is 512x400. Keep `raster_height = 400` and `video_mode = a
   mode never changes; exclusive fullscreen would hang the game.
 - `aspect`: `raster` keeps the game's own shape, `4:3` and `16:9` force that ratio, `stretch` fills
   the screen. The others add black bars.
-- `window_scale` sizes the window as a multiple of the raster; it cannot be resized.
+- `window_scale` sizes the window as a multiple of the raster; it cannot be resized. `auto`, the
+  default, takes the largest multiple that fits the screen.
 - `render_scale` renders the 3D scene at a higher resolution on the GPU. HUD and menus stay native
   and are scaled up. It costs GPU time and does nothing on the CPU renderer.
+- `upscale_2d` is how HUD and menus are scaled up when `render_scale` is above 1: `bilinear`
+  (smooth), `catmull_rom` (slightly sharper, the default) or `fsr1` (AMD FSR 1: sharper edges, no
+  halos).
+- `texmag` is how 3D textures are drawn where they are stretched, which at `render_scale` 3 is
+  most of the 3D: `bilinear` (as the cabinet) or `catmull_rom` (sharper, rounder texels; the
+  default). Above `render_scale` 1 only.
+- The launcher shows those two as on/off boxes, where off is `bilinear` and on is `catmull_rom`;
+  *Show advanced settings* turns them back into the full choice, `fsr1` included.
+- `bezel` frames the picture with bezel art: a PNG with a transparent screen hole, the kind made
+  for MAME and RetroArch at 1920x1080. **Off by default.** The launcher's Graphics page has a
+  Bezel box with a switch and **Choose...** for each game; Apply copies the chosen file into the
+  pack's `bezels` folder and writes the line. By hand it is one line per title:
+
+  ```ini
+  [hydro.graphics]
+  bezel = bezels/hydro.png
+  [offroad.graphics]
+  bezel = bezels/offroad.png
+  ```
+
+  The hole is found from the art itself: the transparent area around its centre. The art keeps
+  its own shape and is fitted to the window or screen, with black outside it. The picture keeps
+  its shape too: the cabinet's 4:3 grows until it fills the hole (what passes the hole's edge
+  lies under the frame), and a `widescreen` picture spans the hole's width with black above and
+  below it, inside the frame. `aspect` is not used while a bezel is on. The window takes the
+  art's shape, with the hole as tall as the cabinet's picture at `window_scale` (a widescreen
+  picture spans the hole's width, so it is shorter than that, at a scale that is not a whole
+  number). A file that cannot be used is named in the log with the reason, and the game runs
+  without it; so is art that frames nothing, a transparent area that reaches both sides of the
+  image or three of its edges.
 
 ### 3.3 Widescreen
 
@@ -115,10 +152,23 @@ The cabinet's picture is 512x400. Keep `raster_height = 400` and `video_mode = a
 default raster it gives a 711x400 picture, with the HUD and menus left where the game put them.
 A title missing an address it needs, or `aspect = 4:3`, turns it off with a warning.
 
+`widescreen_hud` says where the HUD goes under `widescreen`. `centre` (the default) leaves it in
+the cabinet's 4:3 field. `edges` moves what sits in the left or right third of that field out to
+the widescreen's edges, at the distance the cabinet kept from its own: in a race the dials, the
+map, the lap time and the place and lap text; in attract the logo and web address (Hydro) or the
+demo logo (Offroad; its credit line stays put). The centre group stays put, and so does anything
+drawn over a full-screen 4:3 page, menus and high-score tables included.
+
 ### 3.4 Frame rate
 
-**There is no frame-rate setting.** Both titles run locked at 30 fps, and one frame is one game
-tick, so more frames would speed the game up.
+`frame_rate` is `30` (the cabinet) or `60`. The game always runs at 30 ticks a second, one picture
+per tick, so its speed and its handling are the cabinet's whatever this says. At `60` an extra
+picture is drawn between each two of the game's own: the game's own draw, run on a copy of its
+state interpolated halfway between the two ticks and put back afterwards. Nothing is blended as an
+image. Real frames reach the screen about 17 ms later. When an
+in-between would make the game's tick late it is skipped, so a machine that cannot keep up shows
+30 fps rather than slowing the game. Some motion stays at 30: particles, the water's own animation,
+HUD animation.
 
 ### 3.5 GPU or CPU
 
@@ -132,7 +182,9 @@ GPU and CPU pictures match closely, not pixel for pixel, by design.
 
 ### 3.6 Captures and frame dumps
 
-`glide_capture` and `glide_frames` are slow diagnostics: never time a run with one on.
+`glide_capture` and `glide_frames` are slow diagnostics: never time a run with one on. Under
+`frame_rate = 60` a capture's own cost leaves no room for in-between pictures, so a capture holds
+only the real frames.
 
 ## 4. Controls
 
@@ -266,6 +318,49 @@ dinput_throttle_invert = false  ; facts about the TWCS's own axis
   `io: axis roles: steering x on "FANATEC Wheel", accelerator twcs:z on "TWCS Throttle", ...`.
   `--dry-run` prints it without starting a race.
 
+#### 4.1.4 A different controller for each game
+
+Tick **Separate controller per game** on the launcher's *Controls* page and the
+**Game** row at the top of the page picks whose controller the list shows, as it always picks whose
+buttons. Each game then keeps its own controller and its own steering, accelerator and brake axes.
+In the file:
+
+```ini
+[devices]
+tmx = dinput:Thrustmaster TMX
+pad = xinput:0
+
+[hydro.analog]
+dinput_name = Thrustmaster TMX   ; the wheel and its force feedback in Hydro
+provider    = dinput
+
+[offroad.analog]
+provider = xinput                ; the Xbox pad and its rumble in Offroad
+
+[hydro.analog.tmx]
+dinput_throttle_axis = twcs:z    ; Hydro only: accelerate with a lever
+```
+
+- **Per game**: `provider`, `dinput_name`, `xinput_device`, `winmm_device` and the
+  `*_steering_axis`, `*_throttle_axis`, `*_brake_axis` keys. The selectors go in
+  `[<title>.analog]`; an axis goes in **`[<title>.analog.<label>]`**, because the controller's own
+  `[analog.<label>]` beats `[<title>.analog]` (§4.1.1's lookup order).
+- **Shared by both games**: everything else about a controller (invert, deadzone, steering range,
+  pedal mode), so a wheel is calibrated once. A line like that in a `[<title>.analog...]` section
+  still works, and its row says which game sets it.
+- **The file is split when any of those keys sits in a `[<title>.analog...]` section with a value.**
+  Unticking the box **moves** `provider` and the device choice out of `[analog]` into both games;
+  ticking it again keeps the shown game's choice as the shared one and comments out every per-game
+  line.
+- **An empty per-game value means "not set"**: the game falls through to `[analog]`, then the
+  default. So a game cannot say "no wheel name" while `[analog]` names one; the launcher refuses that
+  on Apply. A device choice under a controller's label (`[hydro.analog.tmx] provider`) is read by
+  nothing and is listed on *Help*.
+- `[devices]` stays shared, so every listed controller is opened in both games; only the driving
+  one changes. A bare button number means the driving controller, which can now differ per game.
+- The log says when a game made its own choice:
+  `io: provider = xinput, from [offroad.analog]: this game has its own controller`.
+
 ### 4.2 The two control panels
 
 Hydro has a throttle lever, three views, and Boost as start. Offroad has pedals, START, NITRO,
@@ -324,10 +419,11 @@ That is two separate speakers, not stereo, and played faithfully it sounds wrong
 |---|---|
 | `mix` | **Default.** Both channels to both speakers. |
 | `cabinet` | The real wiring: front left, seat woofer right. |
-| `front` | Front channel only, on both speakers. |
 
-`balance` only turns things down. `50` is equal; below it the seat woofer gets quieter, above it
-the front. **The default, 15, suits desk speakers; a cabinet wants 50.**
+`balance` turns one bus down. `50` is equal; below it the seat woofer gets quieter, above it
+the front. **The default, 15, suits desk speakers; a cabinet wants 50.** The launcher's slider
+labels its two ends with the level each plays at. In `mix` the two buses keep the same total
+level, so `0` plays the front alone on both speakers at full level and `100` the seat woofer.
 
 ## 6. Diagnostics
 
@@ -378,10 +474,15 @@ trims (§4.3.1).
 | `vcglide_threads` | `0` | CPU renderer threads; 0 = one per physical core, 1 = off |
 | `vcglide_log` / `vcglide_verbose` | `vcglide.log` / `false` | the renderer's log |
 | `fullscreen` | `false` | borderless; Alt+Enter toggles |
-| `window_scale` | `1` | 1..8 or `auto` |
+| `window_scale` | `auto` | 1..8 or `auto` |
 | `render_scale` | `1` | 1..8, GPU only |
+| `upscale_2d` | `catmull_rom` | `bilinear` \| `catmull_rom` \| `fsr1`; above `render_scale` 1 (§3.2) |
+| `texmag` | `catmull_rom` | `bilinear` \| `catmull_rom`; 3D textures above `render_scale` 1 (§3.2) |
+| `frame_rate` | `30` | `30` \| `60`; 60 draws an interpolated picture between the game's own (§3.4) |
 | `aspect` | `raster` | `raster` \| `4:3` \| `16:9` \| `stretch`; `4:3` turns `widescreen` off |
+| `bezel` | `off` | a PNG path, relative to the pack; usually per title (§3.2) |
 | `widescreen` | `false` | 711x400 Hor+ (§3.3) |
+| `widescreen_hud` | `centre` | `centre` \| `edges`; race HUD and attract overlay under `widescreen` (§3.3) |
 | `raster_height` | `400` | `auto` gives 512x384 and **cuts the top off full-screen bitmaps** |
 | `video_mode` | `auto` | **`2` is 640x480 and may damage an original monitor** |
 | `glide_capture` / `glide_frames` | empty | a call-stream capture / a PNG per frame (§3.6) |
@@ -400,7 +501,7 @@ trims (§4.3.1).
 |---|---|---|
 | `audio` | `true` | sound on |
 | `volume` | `100` | percent |
-| `output` | `mix` | `mix` \| `cabinet` \| `front` (§5) |
+| `output` | `mix` | `mix` \| `cabinet` (§5) |
 | `balance` | `15` | 0..100; 50 is equal (§5) |
 | `dcs_us` | `5400` | 1000..100000, the sound thread's period in microseconds; 5400 is the cabinet's, and the game's fades are sized for it |
 

@@ -66,7 +66,7 @@ BINDING_AXIS(steer_right,  "RIGHT",  "RIGHT",
  * move off the arrows onto Ctrl and Alt. That frees the modifiers Hydro used
  * for its views, which is why the two cabinets disagree from here down. */
 BINDING_AXIS(throttle,     "UP",     "LCTRL",
-             "Throttle",    "Throttle")
+             "Accelerator", "Accelerator")
 BINDING_AXIS(brake,        "DOWN",   "LALT",
              "Brake",       "Brake")
 

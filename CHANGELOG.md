@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3
+
+### Download and play
+
+- **A ready-to-run download.** Unzip the release and run `VCThunder.exe`; nothing to compile.
+- **CHD Import**: press **Import...**, drop chd files onto `VCThunder.exe`, or leave them beside it.
+- **Building from source no longer needs the games**: the address tables are in the repository.
+
+### Graphics
+
+- **60 fps.** `frame_rate = 60` draws a picture between each two of the game's own.
+- **A tenth of the processor time.** The game sleeps between ticks instead of spinning.
+- **Sharper scaling**: HUD and menus are drawn at 1x and scaled up in one pass (`upscale_2d`),
+  and stretched 3D textures are sharper (`texmag`).
+- **Bezel art.** The Graphics page's Bezel box takes a PNG with a transparent screen opening.
+- **The widescreen HUD can sit at the screen's edges** (`widescreen_hud = edges`).
+- **The window opens at the largest size that fits the screen.**
+- **Hydro's race map shows the land**, where only the boats drew.
+- **With the CPU renderer, `aspect = 4:3` keeps the window 4:3.**
+
+### Sound
+
+- **`output = front` is gone**: the balance slider does it.
+
+### Launcher
+
+- **Five pages in plain words**: the rest appear with *Show advanced settings*.
+- **Sliders** for volume, balance, force-feedback strength and the rumble trims.
+- **Each game's Play card says "Ready to play." or says why it's not.**
+- **Help has Restore default settings, Show the log files and an About box.**
+- **Settings that can stop a game working are now advanced mode**
+
+### Controllers
+
+- **Two slots per control** instead of Add and Clear: click a slot and press, and only that slot
+  changes. **Reset to defaults** puts every control back.
+- **A different controller for each game**: tick *Separate controller per game*.
+- **Started from a console window, VCThunder no longer takes the console for the game window.**
+
 ## 0.2
 
 ### Controllers

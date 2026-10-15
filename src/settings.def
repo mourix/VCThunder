@@ -36,41 +36,78 @@
 
 
 /* ---- PAGE_GRAPHICS: the picture. [graphics] ---------------------------- */
-SETTING("graphics", "vcglide_renderer",
-        STORE(VCT_STORE_ENUM, vcglide_renderer, "auto", "auto|gpu|cpu", 0, 0),
-        SHOW(PAGE_GRAPHICS, "Renderer", ST_ENUM, SF_UNSHIPPED, WARNING_NONE,
-             "Automatic tries the GPU and safely falls back to the CPU renderer."))
-SETTING("graphics", "vcglide_threads",
-        STORE(VCT_STORE_UINT, vcglide_threads, "0", NULL, 0, 16),
-        SHOW(PAGE_GRAPHICS, "CPU renderer workers", ST_UINT, SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
-             "0 uses one worker per physical core; 1 disables threading."))
+/* GROUP_GFX_DISPLAY: the window. */
+SETTING("graphics", "window_scale",
+        STORE(VCT_STORE_UINT_AUTO, window_scale, "auto", NULL, 1, 8),
+        SHOW(GROUP_GFX_DISPLAY, "Window size", ST_AUTO_UINT, SF_NONE, WARNING_NONE,
+             "Automatic picks the biggest size that fits your screen."))
 SETTING("graphics", "fullscreen",
         STORE(VCT_STORE_BOOL, fullscreen, "false", NULL, 0, 0),
-        SHOW(PAGE_GRAPHICS, "Start borderless fullscreen", ST_BOOL,
+        SHOW(GROUP_GFX_DISPLAY, "Start borderless fullscreen", ST_BOOL,
              SF_NONE, WARNING_NONE, NULL))
-SETTING("graphics", "window_scale",
-        STORE(VCT_STORE_UINT_AUTO, window_scale, "1", NULL, 1, 8),
-        SHOW(PAGE_GRAPHICS, "Window scale", ST_AUTO_UINT, SF_NONE, WARNING_NONE,
-             "Automatic selects the largest fitting integer scale."))
-SETTING("graphics", "render_scale",
-        STORE(VCT_STORE_UINT, render_scale, "1", NULL, 1, 8),
-        SHOW(PAGE_GRAPHICS, "3D resolution scale", ST_UINT, SF_NONE, WARNING_NONE,
-             "GPU renderer only; software HUD and menus remain native resolution."))
 SETTING("graphics", "aspect",
         STORE(VCT_STORE_ENUM, aspect, "raster", "raster|4:3|16:9|stretch", 0, 0),
-        SHOW(PAGE_GRAPHICS, "Aspect ratio", ST_ENUM,
+        SHOW(GROUP_GFX_DISPLAY, "Aspect ratio", ST_ENUM,
              SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
+/* Bezel art around the picture: a PNG path, per title in [hydro.graphics] /
+ * [offroad.graphics]. Not a row: the Graphics page's Bezel box edits it per
+ * cabinet (launcher.c, docs/configuration.md §3.2). */
+SETTING_DEV("graphics", "bezel",
+        STORE(VCT_STORE_STR, bezel, "off", NULL, 0, 0))
+/* GROUP_GFX_PICTURE: how the picture is drawn. */
+SETTING("graphics", "vcglide_renderer",
+        STORE(VCT_STORE_ENUM, vcglide_renderer, "auto", "auto|gpu|cpu", 0, 0),
+        SHOW(GROUP_GFX_PICTURE, "Renderer", ST_ENUM, SF_UNSHIPPED, WARNING_NONE,
+             "Automatic uses the graphics card, and the processor if that fails."))
+SETTING("graphics", "vcglide_threads",
+        STORE(VCT_STORE_UINT, vcglide_threads, "0", NULL, 0, 16),
+        SHOW(GROUP_GFX_PICTURE, "CPU renderer workers", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER, WARNING_NONE,
+             "0 uses one worker per physical core; 1 disables threading."))
+SETTING("graphics", "render_scale",
+        STORE(VCT_STORE_UINT, render_scale, "1", NULL, 1, 8),
+        SHOW(GROUP_GFX_PICTURE, "3D resolution scale", ST_UINT,
+             SF_NONE, WARNING_NONE,
+             "Higher is sharper but needs a faster graphics card. The processor "
+             "renderer always draws at 1x."))
+SETTING("graphics", "frame_rate",
+        STORE(VCT_STORE_ENUM, frame_rate, "30", "30|60", 0, 0),
+        SHOW(GROUP_GFX_PICTURE, "Frame rate", ST_ENUM, SF_UNSHIPPED, WARNING_NONE,
+             "30 Hz is the original game. 60 Hz is smoother."))
+/* GROUP_GFX_WIDESCREEN: Hor+ widescreen. */
+SETTING("graphics", "texmag",
+        STORE(VCT_STORE_ENUM, texmag, "catmull_rom", "bilinear|catmull_rom", 0, 0),
+        SHOW(GROUP_GFX_PICTURE, "3D texture upscaling", ST_ENUM,
+             SF_UNSHIPPED | SF_TOGGLE, WARNING_NONE,
+             "Smooths the 3D picture's textures when the 3D scale is above 1x. Off "
+             "is a plain stretch."))
+SETTING("graphics", "upscale_2d",
+        STORE(VCT_STORE_ENUM, upscale_2d, "catmull_rom", "bilinear|catmull_rom|fsr1",
+              0, 0),
+        SHOW(GROUP_GFX_PICTURE, "HUD and menu upscaling", ST_ENUM,
+             SF_UNSHIPPED | SF_TOGGLE, WARNING_NONE,
+             "Smooths the dials, text and menus when the 3D scale is above 1x. Off "
+             "is a plain stretch."))
 SETTING("graphics", "widescreen",
         STORE(VCT_STORE_BOOL, widescreen, "false", NULL, 0, 0),
-        SHOW(PAGE_GRAPHICS, "Widescreen hack", ST_BOOL, SF_NONE, WARNING_NONE,
-             "Widens the 3D viewport to 16:9 if enabled."))
+        SHOW(GROUP_GFX_WIDESCREEN, "Widescreen (16:9)", ST_BOOL,
+             SF_NONE, WARNING_NONE,
+             "Shows more of the course at the sides, for a wide screen."))
+SETTING("graphics", "widescreen_hud",
+        STORE(VCT_STORE_ENUM, widescreen_hud, "centre", "centre|edges", 0, 0),
+        SHOW(GROUP_GFX_WIDESCREEN, "Widescreen HUD", ST_ENUM,
+             SF_UNSHIPPED, WARNING_NONE,
+             "With widescreen on, the side dials and text can sit out at the "
+             "edges of the screen."))
+/* GROUP_GFX_CABINET: what the game is asked to draw. */
 SETTING("graphics", "raster_height",
         STORE(VCT_STORE_UINT_AUTO, raster_height, "400", NULL, 1, 4096),
-        SHOW(PAGE_GRAPHICS, "Cabinet raster height", ST_AUTO_UINT, SF_ADVANCED, WARNING_NONE,
+        SHOW(GROUP_GFX_CABINET, "Cabinet raster height", ST_AUTO_UINT,
+             SF_ADVANCED, WARNING_NONE,
              "400 preserves the cabinet's full artwork; automatic crops 400-row pages."))
 SETTING("graphics", "video_mode",
         STORE(VCT_STORE_MODE, video_mode, "auto", "auto|0|1|2", 0, 2),
-        SHOW(PAGE_GRAPHICS, "Game video-mode table entry", ST_ENUM,
+        SHOW(GROUP_GFX_CABINET, "Game video-mode table entry", ST_ENUM,
              SF_ADVANCED, WARNING_DANGER,
              "Mode 2 is a bench/emulator mode and can damage an original arcade monitor."))
 
@@ -80,16 +117,20 @@ SETTING("audio", "audio",
         SHOW(PAGE_AUDIO, "Enable audio", ST_BOOL, SF_NONE, WARNING_NONE, NULL))
 SETTING("audio", "volume",
         STORE(VCT_STORE_UINT, audio_volume, "100", NULL, 0, 400),
-        SHOW(PAGE_AUDIO, "Host volume (%)", ST_UINT, SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_AUDIO, "Volume", ST_UINT, SF_SLIDER | SF_PERCENT, WARNING_NONE,
+             "100 is the game's own level."))
 SETTING("audio", "output",
-        STORE(VCT_STORE_ENUM, audio_routing, "mix", "mix|cabinet|front", 0, 0),
-        SHOW(PAGE_AUDIO, "Output routing", ST_ENUM, SF_NONE, WARNING_NONE,
-             "Cabinet keeps the front-speaker and seat-woofer buses on separate channels."))
+        STORE(VCT_STORE_ENUM, audio_routing, "mix", "mix|cabinet", 0, 0),
+        SHOW(PAGE_AUDIO, "Speakers", ST_ENUM, SF_NONE, WARNING_NONE,
+             "The arcade sends its front speakers on the left channel and the "
+             "subwoofer in its seat on the right."))
 SETTING("audio", "balance",
         STORE(VCT_STORE_UINT, audio_balance, "15", NULL, 0, 100),
-        SHOW(PAGE_AUDIO, "Audio balance", ST_UINT, SF_NONE, WARNING_NONE,
-             "50 is both buses at unity; below it attenuates the seat woofer, "
-             "above it the front speakers. Never adds gain."))
+        SHOW(PAGE_AUDIO, "Front and subwoofer balance", ST_UINT,
+             SF_SLIDER, WARNING_NONE,
+             "Slide toward a speaker to turn the other one down; the mark in "
+             "the middle plays both at full. The default suits desk "
+             "speakers."))
 SETTING("audio", "dcs_us",
         /* The cabinet's 5.4 ms, which the game's fades are sized for. The
          * ceiling keeps the fallback sleep inside audio_shutdown()'s 500 ms. */
@@ -122,7 +163,8 @@ SETTING("analog", "provider",
              "see and only one can read."))
 SETTING("analog", "deadzone_percent",
         STORE_ELSEWHERE("12", NULL, 0, 49),
-        SHOW(PAGE_CONTROLS, "Gamepad: ignore near centre (%)", ST_UINT, SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+        SHOW(PAGE_CONTROLS, "Gamepad: ignore near centre", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
              "A thumbstick does not return exactly to centre; this is how much "
              "of the middle counts as not moved. A wheel has its own below."))
 /* `auto` ASKS THE OPENED DEVICE. `true` sends a hat press to full lock, which
@@ -139,7 +181,7 @@ SETTING("analog", "pov_digital",
 SETTING("analog", "xinput_device",
         STORE_ELSEWHERE("0", NULL, 0, 3),
         SHOW(PAGE_CONTROLS, "Gamepad: which XInput pad", ST_UINT,
-             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER, WARNING_NONE, NULL))
 SETTING("analog", "xinput_steering_axis",
         STORE_ELSEWHERE("lx", "lx|ly|rx|ry|lt|rt|none", 0, 0),
         SHOW(PAGE_CONTROLS, "Gamepad: steering axis", ST_ENUM,
@@ -184,8 +226,8 @@ SETTING("analog", "winmm_pedal_mode",
         STORE_ELSEWHERE("combined", "combined|separate", 0, 0),
         SHOW(PAGE_CONTROLS, "Legacy joystick: pedals", ST_ENUM,
              SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
-             "Combined is one axis carrying both pedals, which is what most "
-             "wheels report unless their driver is set otherwise."))
+             "Most wheels report both pedals on one axis unless their driver "
+             "is set otherwise."))
 SETTING("analog", "winmm_steering_invert",
         STORE_ELSEWHERE("false", NULL, 0, 0),
         SHOW(PAGE_CONTROLS, "Legacy joystick: steering runs the other way",
@@ -206,7 +248,8 @@ SETTING("analog", "dinput_name",
              "finds it whatever order things are plugged in."))
 SETTING("analog", "dinput_deadzone_percent",
         STORE_ELSEWHERE("0", NULL, 0, 49),
-        SHOW(PAGE_CONTROLS, "Wheel: ignore near centre (%)", ST_UINT, SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+        SHOW(PAGE_CONTROLS, "Wheel: ignore near centre", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
              "Zero on a wheel, which centres itself. Raise it only if the car "
              "drifts with your hands off."))
 SETTING("analog", "dinput_steering_axis",
@@ -225,7 +268,8 @@ SETTING("analog", "dinput_pedal_mode",
         STORE_ELSEWHERE("separate", "combined|separate", 0, 0),
         SHOW(PAGE_CONTROLS, "Wheel: pedals", ST_ENUM,
              SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
-             "Combined is both pedals on one axis. Separate is one axis each."))
+             "Set up measures this; choose by hand only for pedals it cannot "
+             "measure."))
 SETTING("analog", "dinput_steering_invert",
         STORE_ELSEWHERE("false", NULL, 0, 0),
         SHOW(PAGE_CONTROLS, "Wheel: steering runs the other way", ST_BOOL,
@@ -276,31 +320,33 @@ SETTING("ffb", "direction",
              "instead of resisting."))
 SETTING("ffb", "strength_percent",
         STORE_ELSEWHERE("100", NULL, 0, 200),
-        SHOW(PAGE_FFB, "Game-force scale (%)", ST_UINT,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_FFB, "Strength", ST_UINT,
+             SF_SLIDER | SF_PERCENT, WARNING_NONE,
+             "100 is how strong the arcade wheel was. Lower it if your wheel "
+             "is too strong to hold, raise it if you can barely feel it."))
 SETTING("ffb", "device_gain_percent",
         STORE_ELSEWHERE("100", NULL, 0, 100),
-        SHOW(PAGE_FFB, "Device gain (%)", ST_UINT,
-             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
+        SHOW(PAGE_FFB, "Device gain", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_NONE, NULL))
 SETTING("ffb", "rumble",
         STORE_ELSEWHERE("true", NULL, 0, 0),
-        SHOW(PAGE_FFB, "Gamepad rumble (derived)", ST_BOOL,
+        SHOW(PAGE_FFB, "Gamepad rumble", ST_BOOL,
              SF_NONE, WARNING_NONE,
-             "The cabinet had a force-feedback wheel and the game knows nothing about gamepads, so this derives a rumble signal from its own forces and sends it to the pad's motors. XInput controllers only."))
+             "Shakes an Xbox-style controller during a race."))
 SETTING("ffb", "rumble_strength_percent",
         STORE_ELSEWHERE("100", NULL, 0, 200),
-        SHOW(PAGE_FFB, "Rumble strength (%)", ST_UINT,
-             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+        SHOW(PAGE_FFB, "Rumble strength", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
              "Scales both motors together; the two below set what each one answers to."))
 SETTING("ffb", "rumble_sustain_percent",
         STORE_ELSEWHERE("100", NULL, 0, 200),
-        SHOW(PAGE_FFB, "Rumble: swell (%)", ST_UINT,
-             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+        SHOW(PAGE_FFB, "Rumble: swell", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
              "The heavy motor, following the slow half of what the force is doing: the body of a corner, the swell, big undulations."))
 SETTING("ffb", "rumble_impact_percent",
         STORE_ELSEWHERE("100", NULL, 0, 200),
-        SHOW(PAGE_FFB, "Rumble: impacts (%)", ST_UINT,
-             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+        SHOW(PAGE_FFB, "Rumble: impacts", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
              "The light motor, following how fast the force changes: kerbs, walls, chop and landings."))
 SETTING("ffb", "rumble_events",
         STORE_ELSEWHERE("true", NULL, 0, 0),
@@ -309,28 +355,28 @@ SETTING("ffb", "rumble_events",
              "Takes impacts, terrain and suspension from the game's force-feedback code instead of from the single byte they are summed into. Off falls back to filtering that byte."))
 SETTING("ffb", "rumble_texture_percent",
         STORE_ELSEWHERE("50", NULL, 0, 400),
-        SHOW(PAGE_FFB, "Rumble: surface and engine bed (%)", ST_UINT,
-             SF_ADVANCED, WARNING_NONE,
+        SHOW(PAGE_FFB, "Rumble: surface and engine bed", ST_UINT,
+             SF_ADVANCED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
              "The continuous layer a driver sits on all race: road surface and engine. Boost and nitro have their own control. Trimmed below the impacts on purpose, so a hit still stands out from the ground it happens on."))
 SETTING("ffb", "rumble_texture_curve_percent",
         STORE_ELSEWHERE("35", NULL, 2, 100),
-        SHOW(PAGE_FFB, "Rumble: surface range compression (%)", ST_UINT,
-             SF_ADVANCED, WARNING_NONE,
+        SHOW(PAGE_FFB, "Rumble: surface range compression", ST_UINT,
+             SF_ADVANCED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
              "A rough surface can be many times a smooth one, which is wider than two motors can express. Lower compresses that range so tarmac is felt without dirt overwhelming; 100 is no compression."))
 SETTING("ffb", "rumble_boost_percent",
         STORE_ELSEWHERE("100", NULL, 0, 200),
-        SHOW(PAGE_FFB, "Rumble: boost and nitro (%)", ST_UINT,
-             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+        SHOW(PAGE_FFB, "Rumble: boost and nitro", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
              "A spark on both motors when the boost catches, then a buzz on the light motor while it runs. Separate from the surface bed, so trimming the bed does not mute it."))
 SETTING("ffb", "rumble_spring_percent",
         STORE_ELSEWHERE("0", NULL, 0, 100),
-        SHOW(PAGE_FFB, "Rumble: add held force back (%)", ST_UINT,
-             SF_ADVANCED | SF_UNSHIPPED, WARNING_CAUTION,
+        SHOW(PAGE_FFB, "Rumble: add held force back", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_CAUTION,
              "A held force reaches the motors as a drone, so it is removed and only changes are sent. This adds some of it back for a driver who wants the corner present; it is also the one control here that can bring the buzz back."))
 SETTING("ffb", "rumble_agc_percent",
         STORE_ELSEWHERE("100", NULL, 100, 800),
-        SHOW(PAGE_FFB, "Rumble: boost quiet stretches to (%)", ST_UINT,
-             SF_ADVANCED | SF_UNSHIPPED, WARNING_CAUTION,
+        SHOW(PAGE_FFB, "Rumble: boost quiet stretches to", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_CAUTION,
              "Scales quiet stretches up against a slowly decaying peak, never down. Off by default: a race trace showed the signal is not quiet, and boosting it pinned both motors at full scale, which reads as one constant buzz."))
 /* `rumble_pulse_hz` IS RETIRED AND MUST NOT COME BACK. It chopped the heavy
  * motor at 4..20 Hz to invent road grain, which is a square wave this transport
@@ -352,12 +398,17 @@ SETTING("timing", "cpu_hz",
              "This identifies the emulated Celeron; it does not control game speed."))
 SETTING("timing", "speed_percent",
         STORE(VCT_STORE_UINT, speed_percent, "100", NULL, 25, 400),
-        SHOW(PAGE_SYSTEM, "Game-clock speed (%)", ST_UINT,
-             SF_UNSHIPPED, WARNING_NONE, NULL))
+        SHOW(PAGE_SYSTEM, "Game-clock speed", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
+             "100 is the cabinet's own speed; anything else runs the whole game "
+             "faster or slower."))
+SETTING_DEV("timing", "limiter_idle",
+        STORE(VCT_STORE_BOOL, limiter_idle, "true", NULL, 0, 0))
 SETTING("controls", "dip_switches",
         STORE(VCT_STORE_UINT, dip_switches, "0xFF", NULL, 0, 255),
         SHOW(PAGE_SYSTEM, "DIP switch byte", ST_UINT,
-             SF_HEX | SF_UNSHIPPED, WARNING_NONE, NULL))
+             SF_HEX | SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "The cabinet's DIP switches, as one byte. 0xFF is the default."))
 SETTING("controls", "io_ms",
         STORE(VCT_STORE_UINT, io_ms, "16", NULL, 1, 60000),
         SHOW(PAGE_SYSTEM, "I/O board poll period (ms)", ST_UINT,
@@ -378,8 +429,7 @@ SETTING("controls", "input_background",
 SETTING("link", "link",
         STORE(VCT_STORE_ENUM, link, "off", "off|lan|local", 0, 0),
         SHOW(PAGE_LINK, "Arcade link", ST_ENUM, SF_NONE, WARNING_CAUTION,
-             "Local is two instances on this machine; lan is a second machine, "
-             "which has never been measured."))
+             "Two computers has not been tested yet."))
 SETTING("link", "link_rx_budget",
         STORE(VCT_STORE_UINT, link_rx_budget, "64", NULL, 1, 4096),
         SHOW(PAGE_LINK, "Receive budget (datagrams per frame)", ST_UINT,
@@ -390,23 +440,28 @@ SETTING("link", "link_rx_budget",
 SETTING("paths", "data_dir",
         STORE(VCT_STORE_STR, data_dir, "data", NULL, 0, 0),
         SHOW(PAGE_FILES, "Game data folder", ST_TEXT,
-             SF_REQUIRED | SF_DIR, WARNING_NONE, NULL))
+             SF_REQUIRED | SF_DIR | SF_ADVANCED, WARNING_NONE,
+             "Where imported games are. A folder without them shows Import "
+             "again on Play."))
 SETTING("paths", "save_dir",
         STORE(VCT_STORE_STR, save_dir, "save", NULL, 0, 0),
         SHOW(PAGE_FILES, "Save-data folder", ST_TEXT,
-             SF_REQUIRED | SF_DIR, WARNING_NONE, NULL))
+             SF_REQUIRED | SF_DIR | SF_ADVANCED, WARNING_NONE,
+             "High scores and the games' own operator settings. Another "
+             "folder starts them from scratch."))
 SETTING("diagnostics", "log_file",
         STORE(VCT_STORE_STR, log_file, "vcthunder.log", NULL, 0, 0),
-        SHOW(PAGE_FILES, "Host log file", ST_TEXT,
-             SF_REQUIRED | SF_SAVE_FILE, WARNING_NONE, NULL))
+        SHOW(PAGE_FILES, "Log file", ST_TEXT,
+             SF_REQUIRED | SF_SAVE_FILE | SF_ADVANCED, WARNING_NONE, NULL))
 SETTING("diagnostics", "log_level",
         STORE(VCT_STORE_LEVEL, log_level, "info", "error|warn|info|trace", 0, 0),
-        SHOW(PAGE_FILES, "Host log level", ST_ENUM,
-             SF_NONE, WARNING_NONE, NULL))
+        SHOW(PAGE_FILES, "Log detail", ST_ENUM,
+             SF_ADVANCED, WARNING_NONE, NULL))
 SETTING("graphics", "vcglide_log",
         STORE(VCT_STORE_STR, vcglide_log, "vcglide.log", NULL, 0, 0),
-        SHOW(PAGE_FILES, "Renderer log file", ST_TEXT,
-             SF_REQUIRED | SF_SAVE_FILE | SF_UNSHIPPED, WARNING_NONE, NULL))
+        SHOW(PAGE_FILES, "Graphics log file", ST_TEXT,
+             SF_REQUIRED | SF_SAVE_FILE | SF_UNSHIPPED | SF_ADVANCED,
+             WARNING_NONE, NULL))
 
 /* ---- PAGE_TROUBLE: the switches that are safe to leave on -------------- */
 SETTING("diagnostics", "stall_ms",
@@ -483,6 +538,24 @@ SETTING_DEV("diagnostics", "null_fog",
         STORE(VCT_STORE_BOOL, null_fog, "false", NULL, 0, 0))
 SETTING_DEV("diagnostics", "no_additive_light",
         STORE(VCT_STORE_BOOL, no_additive_light, "false", NULL, 0, 0))
+/* Draw replay's own check: draw, restore what the draw wrote, draw again, and
+ * compare. Hydro only. */
+SETTING_DEV("diagnostics", "draw_replay",
+        STORE(VCT_STORE_UINT, draw_replay, "0", NULL, 0, 100000))
+SETTING_DEV("diagnostics", "draw_replay_start",
+        STORE(VCT_STORE_UINT, draw_replay_start, "300", NULL, 0, 1000000))
+SETTING_DEV("diagnostics", "draw_replay_control",
+        STORE(VCT_STORE_BOOL, draw_replay_control, "false", NULL, 0, 0))
+SETTING_DEV("diagnostics", "draw_replay_watch",
+        STORE(VCT_STORE_UINT, draw_replay_watch, "0", NULL, 0, 0xFFFFFFFFul))
+SETTING_DEV("diagnostics", "draw_replay_watch_pages",
+        STORE(VCT_STORE_UINT, draw_replay_watch_pages, "0", NULL, 0, 256))
+SETTING_DEV("diagnostics", "draw_interp_trace",
+        STORE(VCT_STORE_UINT, draw_interp_trace, "0", NULL, 0, 0xFFFFFFFFul))
+SETTING_DEV("diagnostics", "draw_interp_trace_words",
+        STORE(VCT_STORE_UINT, draw_interp_trace_words, "0", NULL, 0, 64))
+SETTING_DEV("diagnostics", "draw_interp_profile",
+        STORE(VCT_STORE_BOOL, draw_interp_profile, "false", NULL, 0, 0))
 SETTING_DEV("diagnostics", "trace_draw_state",
         STORE(VCT_STORE_UINT, trace_draw_state, "0", NULL, 0, 86400))
 SETTING_DEV("diagnostics", "trace_lod",
@@ -493,7 +566,7 @@ SETTING_DEV("diagnostics", "sse_ftz",
         STORE(VCT_STORE_BOOL, sse_ftz, "false", NULL, 0, 0))
 /* Read by io_config.c through the profile API, not by config.c, so they are
  * STORE_ELSEWHERE. They are here so the launcher knows them: a switch in
- * neither table was listed on Troubleshooting as a line nothing reads, and
+ * neither table is listed on Help as a line nothing reads, and
  * ffb_trace is the one docs/configuration.md tells a wheel owner to turn on.
  * mark1..mark4 label the four trace marker keys. */
 SETTING_DEV("diagnostics", "ffb_trace",

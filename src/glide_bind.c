@@ -6,6 +6,8 @@
  */
 #include "vcthunder.h"
 #include "glide_int.h"
+#include "bezel.h"
+#include "ini.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -509,6 +511,8 @@ static void vcglide_configure(void)
     SetEnvironmentVariableA("VCGLIDE_MARGIN_TRACE", n);
     SetEnvironmentVariableA("VCGLIDE_RENDERER", g_cfg.vcglide_renderer);
     SetEnvironmentVariableA("VCGLIDE_ASPECT", g_cfg.aspect);
+    SetEnvironmentVariableA("VCGLIDE_UPSCALE_2D", g_cfg.upscale_2d);
+    SetEnvironmentVariableA("VCGLIDE_TEXMAG", g_cfg.texmag);
     snprintf(n, sizeof n, "%u", g_cfg.render_scale > 0 ? g_cfg.render_scale : 1);
     SetEnvironmentVariableA("VCGLIDE_RENDER_SCALE", n);
     /* Its window is its own, so it needs the scale the host would have used.
@@ -517,6 +521,43 @@ static void vcglide_configure(void)
      * allocate its offscreen colour/depth targets. */
     snprintf(n, sizeof n, "%d", g_cfg.window_scale > 0 ? g_cfg.window_scale : 1);
     SetEnvironmentVariableA("VCGLIDE_SCALE", n);
+}
+
+/* Bezel art, read once here and handed to the provider, which keeps it
+ * across every surface open. A file that cannot be used costs the bezel and
+ * says why; it never stops the game. */
+static void bezel_init(void)
+{
+    typedef int (__stdcall *set_bezel_fn)(const void *, int, int, int, int,
+                                          int, int);
+    set_bezel_fn set = (set_bezel_fn)(void *)GetProcAddress(s_glide,
+                                                           "vglSetBezel@28");
+    char full[MAX_PATH], why[160];
+    bezel_t b;
+
+    if (!g_cfg.bezel[0] || !_stricmp(g_cfg.bezel, "off"))
+        return;
+    ini_resolve_path(g_cfg.bezel, full, sizeof full);
+    if (!set) {
+        LOGW("bezel: this vcglide.dll does not export vglSetBezel@28; '%s' is "
+             "not drawn", full);
+        return;
+    }
+    if (!bezel_load(full, &b, why, sizeof why)) {
+        LOGW("bezel: '%s' is not used: %s", full, why);
+        return;
+    }
+    /* The window takes the art's shape only if the provider kept the art. */
+    if (!set(b.rgba, b.w, b.h, b.hole_x, b.hole_y, b.hole_w, b.hole_h)) {
+        LOGW("bezel: the provider did not keep '%s' (vcglide.log says why); "
+             "no bezel", full);
+        bezel_free(&b);
+        return;
+    }
+    window_set_bezel(b.w, b.h, b.hole_h);
+    LOGI("bezel: '%s', %dx%d, screen hole %d,%d %dx%d", full, b.w, b.h,
+         b.hole_x, b.hole_y, b.hole_w, b.hole_h);
+    bezel_free(&b);
 }
 
 static void vcglide_init(void)
@@ -541,6 +582,7 @@ static void vcglide_init(void)
          g_cfg.glide_capture[0] ? ", capturing to " : "",
          g_cfg.glide_capture[0] ? g_cfg.glide_capture : "");
     init();
+    bezel_init();
 }
 
 /* Must run before game_map(): mapping the game destroys this process's PE
@@ -911,6 +953,9 @@ static void report_geometry_once(void)
 
 static void report_frame_periods(void);
 
+/* drawreplay_idle_ms() at the last pacing report. */
+static double s_idle_ms;
+
 static void report_frame_timing(uint64_t swap_ticks, int interval)
 {
     LARGE_INTEGER now;
@@ -922,6 +967,8 @@ static void report_frame_timing(uint64_t swap_ticks, int interval)
     const float *win = (const float *)(uintptr_t)G->gameloop_win_seconds;
     double frame_sum = 0.0, draw_sum = 0.0, work_sum = 0.0;
     double net_sum = 0.0, win_sum = 0.0;
+    double idle_ms, idle_latest;
+    unsigned idle_past;
     unsigned samples = 0, i;
 
     if (!s_perf_freq.QuadPart) {
@@ -941,13 +988,18 @@ static void report_frame_timing(uint64_t swap_ticks, int interval)
         elapsed < (uint64_t)s_perf_freq.QuadPart * s_perf_interval_seconds)
         return;
 
+    idle_ms = drawreplay_idle_ms(&idle_latest, &idle_past);
     LOGI("pacing: %.2f presented fps over %.1f s; swap wait %.3f ms/frame; "
+         "limiter idle %.3f ms/frame (latest wake +%.3f ms, %u past "
+         "the deadline); "
          "game target %.2f fps (%.2f fields, %.3f ms), last interval %d",
          (double)s_presented_frames * (double)s_perf_freq.QuadPart / (double)elapsed,
          (double)elapsed / (double)s_perf_freq.QuadPart,
          s_presented_frames ?
              1000.0 * (double)s_swap_ticks /
              ((double)s_perf_freq.QuadPart * (double)s_presented_frames) : 0.0,
+         s_presented_frames ? (idle_ms - s_idle_ms) / s_presented_frames : 0.0,
+         idle_latest, idle_past,
          rdf_opt(G->gameloop_target_fps, 0.0),
          rdf_opt(G->gameloop_target_fields, 0.0),
          1000.0 * rdf_opt(G->gameloop_target_frame_time, 0.0),
@@ -1021,6 +1073,7 @@ static void report_frame_timing(uint64_t swap_ticks, int interval)
     profile_report();
     net_link_report(s_presented_frames);
     s_perf_start = now;
+    s_idle_ms = idle_ms;
     s_presented_frames = 0;
     s_swap_ticks = 0;
     s_perf_interval_seconds = 30u;
@@ -1416,6 +1469,7 @@ static void gl_buffer_swap(int interval)
         }
         s_real_swap(interval);
         QueryPerformanceCounter(&after);
+        drawreplay_swapped((uint64_t)before.QuadPart, (uint64_t)after.QuadPart);
         /* The provider's own verdict on the frame it just presented. A hung
          * GPU device does not stop the frames; it stops the pictures, which
          * is why the watchdog cannot see it and why this is asked here rather
@@ -1474,6 +1528,9 @@ static void gl_buffer_swap(int interval)
     report_geometry_once();
     report_runtime_once();
     report_frame_timing((uint64_t)(after.QuadPart - before.QuadPart), interval);
+    /* Last: everything above is the frame's, and what follows the swap in
+     * the game's loop is only its limiter's spin. */
+    drawreplay_idle(interval);
 }
 
 /* Diagnostic-only bisection that suppresses primitive submission while leaving
@@ -1676,6 +1733,16 @@ int glide_bind(void)
 }
 
 /* ---- the seam (src/glide_int.h) ----------------------------------------- */
+
+const uint32_t *glide_call_counts(void)
+{
+    return s_glide_calls;
+}
+
+void *glide_provider_proc(const char *decorated)
+{
+    return s_glide ? (void *)GetProcAddress(s_glide, decorated) : NULL;
+}
 
 int glide_view_width(void)
 {

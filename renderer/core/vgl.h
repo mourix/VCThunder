@@ -129,7 +129,7 @@ typedef struct {
     int      dec_kind;
     int      lut_fmt;                   /* format the tables hold, -1 = none */
     unsigned lut_pal_ver;               /* palette generation they were built from */
-    unsigned pal_ver;                   /* bumped by every grTexDownloadTable */
+    unsigned pal_ver;                   /* bumped when a palette download changes it */
     unsigned mem_ver;                   /* bumped by every texture-memory write */
 
     /* state */
@@ -359,6 +359,10 @@ void vgl_tex_download_partial(int tmu, uint32_t start, int this_lod,
                               int even_odd, const void *data, int from, int to);
 void vgl_tex_source(int tmu, uint32_t start, int even_odd, const void *info);
 void vgl_tex_table(int tmu, int type, const void *data);
+/* Journal texture-memory and palette writes from here, and undo them all at
+ * the end: the host's discarded in-between pictures (tex.c). */
+void vgl_spec_begin(void);
+void vgl_spec_end(void);
 void vgl_tex_init(void);
 void vgl_tex_free(void);
 int  vgl_tex_export_rgba(int tmu, int lod, uint8_t *dst, unsigned pitch);

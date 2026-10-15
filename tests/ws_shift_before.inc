@@ -1,4 +1,5 @@
 /* ws_shift_before.inc -- the FROZEN reference implementation of ws_shift().
+ * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * Checked in verbatim and never edited, because a regression test whose
  * reference implementation can drift is not a regression test. Only the name

@@ -33,6 +33,7 @@ static unsigned s_ws_repair_reported;
 #define WS_REPAIR_RACER_TAG  0x08u
 #define WS_REPAIR_RACE_FOV   0x10u
 #define WS_REPAIR_FLAG_FOV   0x20u
+#define WS_REPAIR_TRACK      0x40u
 /* Both sky-quad builders are hooked, so the backdrop reaching the seam is
  * already the raster and must not take the origin. Declared here because the
  * primitive wrappers sit above the mode's own section. */
@@ -40,6 +41,75 @@ static int   s_ws_sky_wide;
 /* Nonzero while the game is inside its ortho 2D path, where every primitive is
  * 2D by construction and the native field is the whole of the picture. */
 static int   s_ws_ortho_depth;
+static int   s_ws_raster_width;   /* the visible raster the origin centres in */
+/* [graphics] widescreen_hud = edges. Inside one race-HUD element every
+ * primitive takes one more whole-pixel offset on top of the origin, so the
+ * element keeps its cabinet distance from the nearer screen edge; see
+ * ws_hud_side(). Zero outside an element, and in the element until its first
+ * primitive has said where it is. */
+static int   s_hud_armed;
+static int   s_hud_bias;
+static int   s_hud_pending;
+/* What the element in progress is called in the log, and the key its
+ * decisions are deduplicated under. */
+static uint32_t    s_hud_key;
+static const char *s_hud_name;
+static uint32_t    s_hud_ra;
+/* Inside an overlay whose every _mesh3d_DrawOrtho is an element: its table
+ * entry, else NULL. */
+static const game_hud_t *s_hud_overlay;
+/* Did the widened world reach a side strip since the last buffer clear, this
+ * frame or the last? An edge is only an edge when the world fills the screen:
+ * over a full-screen 4:3 page (pillarboxed), or a page drawn after the game
+ * wiped the world away (Hydro's finish screen), the same pieces belong to the
+ * page's own centred composition. */
+static int   s_ws_world_now, s_ws_world_prev;
+/* Hydro prints its race text AND its result screen from _hud_text_Draw. The
+ * result screen is one centred composition (your time, best time, place, new
+ * high score) and opens over the race picture fading out, dials included, so
+ * nothing about the frame tells it apart: the text pass's own flags word does
+ * (hud_finish_flags/bit, set by _hud_text_SetupFinishStats). */
+static int   s_hud_text_depth;
+/* Nonzero while moved HUD text is being drawn, which must not count: it lies
+ * past the native field by construction and would keep a page "wide". */
+static int   s_hud_text_drawing;
+/* The report key of Offroad's flag icon, whose hook is not in the table. */
+#define WS_HUD_FLAG  (VCT_MAX_HUD_ELEMS + 1u)
+
+/* One element is one call of a function that draws exactly one HUD element
+ * (gen-gamedefs.py d_hud_elements). Scopes nest, so a saved state is put back
+ * rather than cleared. */
+typedef struct ws_hud_scope {
+    int pending, bias;
+    uint32_t key, ra;
+    const char *name;
+} ws_hud_scope_t;
+
+static void ws_hud_enter(ws_hud_scope_t *s, uint32_t key, const char *name,
+                         uint32_t ra)
+{
+    s->pending = s_hud_pending;
+    s->bias = s_hud_bias;
+    s->key = s_hud_key;
+    s->name = s_hud_name;
+    s->ra = s_hud_ra;
+    if (!s_hud_armed || s_ws_dx <= 0.0f)
+        return;
+    s_hud_pending = 1;
+    s_hud_bias = 0;
+    s_hud_key = key;
+    s_hud_name = name;
+    s_hud_ra = ra;
+}
+
+static void ws_hud_leave(const ws_hud_scope_t *s)
+{
+    s_hud_pending = s->pending;
+    s_hud_bias = s->bias;
+    s_hud_key = s->key;
+    s_hud_name = s->name;
+    s_hud_ra = s->ra;
+}
 
 
 /* Widescreen preserves the game's native 2D coordinate system and expands only
@@ -368,6 +438,7 @@ static void __cdecl gl_ws_race_update(void)
 static void __cdecl gl_ws_flag_icon(uint32_t a0, uint32_t a1)
 {
     ws_fov_scope_t scope;
+    ws_hud_scope_t hud;
     int report;
 
     if (!s_real_ws_flag_icon)
@@ -375,7 +446,9 @@ static void __cdecl gl_ws_flag_icon(uint32_t a0, uint32_t a1)
     ws_fov_enter(&scope);
     report = scope.active &&
              !(s_ws_repair_reported & WS_REPAIR_FLAG_FOV);
+    ws_hud_enter(&hud, WS_HUD_FLAG, "__hud_DrawFlagIcon", 0);
     s_real_ws_flag_icon(a0, a1);
+    ws_hud_leave(&hud);
     if (report) {
         s_ws_repair_reported |= WS_REPAIR_FLAG_FOV;
         LOGI("geometry: widescreen repair; Offroad CTF flag icon saved and "
@@ -443,7 +516,14 @@ static void ws_shift(void *dst, const void *src, unsigned count)
      * they save is per vertex. */
     const int census = ws_census_wanted();
     const int clamp  = s_ws_ortho_depth;
-    const float dx   = s_ws_dx;
+    /* A scope that runs at the raster's width (a fade, a repair) has the
+     * origin at 0 and owns its own placement: no element offset there. */
+    const float dx   = s_ws_dx > 0.0f ? s_ws_dx + (float)s_hud_bias : s_ws_dx;
+    /* Only the game's own geometry at the normal origin says the world is
+     * wide: a raster-width draw (a fade, a repair), an element sliding in past
+     * the edge and moved HUD text would all say so over a 4:3 page too. */
+    const int watch  = s_hud_armed && !s_ws_world_now && s_ws_dx > 0.0f &&
+                       !s_hud_name && !s_hud_text_drawing;
     unsigned i;
 
     memcpy(dst, src, (size_t)count * WS_VSIZE);
@@ -472,6 +552,8 @@ static void ws_shift(void *dst, const void *src, unsigned count)
             if (*x < 0.0f)                            s_ws_left_verts++;
             else if (*x > (float)s_ws_native_width)   s_ws_right_verts++;
         }
+        if (watch && (*x < 0.0f || *x > (float)s_ws_native_width))
+            s_ws_world_now = 1;
         *x += dx;
     }
     if (!census)
@@ -568,6 +650,118 @@ static void ws_margin_tick(void)
     s_ws_margin_used = 0;
 }
 
+/* ---- widescreen HUD at the edges: where an element goes ----------------- */
+
+/* The offset, on top of the origin, for something spanning game x0..x1. The
+ * cabinet's HUD rests in three groups: dials and text against the left 4:3
+ * edge, a centre group, and the same against the right. Measured centres at
+ * rest, both titles: 45..140 left, 221..281 centre, 351..440 right. So the
+ * left third moves to the raster's left edge (-dx: game x 0 lands on raster
+ * 0), the right third to its right edge (game x N on the raster's last
+ * column), and the middle sixth keeps the centred field. Between them the
+ * offset ramps, because Offroad's HUD slides in across the screen and a hard
+ * boundary would make every sliding element jump twice. */
+static int ws_hud_side(float x0, float x1)
+{
+    const float n = (float)s_ws_native_width;
+    const float c = (x0 + x1) * 0.5f;
+    const float left = -s_ws_dx;
+    const float right = (float)(s_ws_raster_width - s_ws_native_width) - s_ws_dx;
+    const float ramp = n / 12.0f;
+
+    if (!s_ws_world_now && !s_ws_world_prev)
+        return 0;
+    if (s_hud_text_depth && G->hud_finish_flags &&
+        (*(const uint32_t *)(uintptr_t)G->hud_finish_flags & G->hud_finish_bit))
+        return 0;
+    if (c <= 4.0f * ramp)
+        return (int)left;
+    if (c >= 8.0f * ramp)
+        return (int)right;
+    if (c < 5.0f * ramp)
+        return (int)lroundf(left * (5.0f * ramp - c) / ramp);
+    if (c > 7.0f * ramp)
+        return (int)lroundf(right * (c - 7.0f * ramp) / ramp);
+    return 0;
+}
+
+/* Only a resting place is worth a log line; a slide passes through every
+ * offset between two of them. */
+static int ws_hud_at_rest(int bias)
+{
+    return bias == 0 || bias == -(int)s_ws_dx ||
+           bias == s_ws_raster_width - s_ws_native_width - (int)s_ws_dx;
+}
+
+static const char *ws_hud_side_name(int bias)
+{
+    return bias < 0 ? "to the left edge" : bias > 0 ? "to the right edge"
+                                                   : "centred";
+}
+
+/* One line per element, overlay mesh or string the first time it rests on
+ * each side: enough to read a screen's layout out of the log without a line
+ * per frame. Elements are keyed by table index, an overlay's meshes by the
+ * call site of their _mesh3d_DrawOrtho, strings by call site or object. */
+#define WS_HUD_SEEN 48u
+static struct { uint32_t key; int bias; } s_hud_seen[WS_HUD_SEEN];
+static unsigned s_hud_seen_used;
+
+static int ws_hud_first_time(uint32_t key, int bias)
+{
+    unsigned i;
+
+    if (!ws_hud_at_rest(bias))
+        return 0;
+    for (i = 0; i < s_hud_seen_used; i++)
+        if (s_hud_seen[i].key == key && s_hud_seen[i].bias == bias)
+            return 0;
+    if (s_hud_seen_used >= WS_HUD_SEEN)
+        return 0;
+    s_hud_seen[s_hud_seen_used].key = key;
+    s_hud_seen[s_hud_seen_used].bias = bias;
+    s_hud_seen_used++;
+    return 1;
+}
+
+static void ws_hud_decide(const float *xs, unsigned n)
+{
+    float lo = 1e30f, hi = -1e30f;
+    unsigned i;
+
+    for (i = 0; i < n; i++) {
+        if (xs[i] < lo) lo = xs[i];
+        if (xs[i] > hi) hi = xs[i];
+    }
+    s_hud_pending = 0;
+    s_hud_bias = ws_hud_side(lo, hi);
+    if (ws_hud_first_time(s_hud_key, s_hud_bias)) {
+        if (s_hud_ra)
+            LOGI("geometry: widescreen HUD; %s, mesh drawn from 0x%08X at x "
+                 "%.1f..%.1f, goes %s (%+d)", s_hud_name ? s_hud_name : "?",
+                 s_hud_ra, (double)lo, (double)hi,
+                 ws_hud_side_name(s_hud_bias), s_hud_bias);
+        else
+            LOGI("geometry: widescreen HUD; %s, first drawn at x %.1f..%.1f, "
+                 "goes %s (%+d)", s_hud_name ? s_hud_name : "?", (double)lo,
+                 (double)hi, ws_hud_side_name(s_hud_bias), s_hud_bias);
+    }
+}
+
+/* The first primitive inside an element decides for all of it, so a dial and
+ * its needle can never be split between two sides. */
+static void ws_hud_first(const void *a, const void *b, const void *c)
+{
+    float xs[3];
+    unsigned n = 0;
+
+    xs[n++] = *(const float *)a;
+    xs[n++] = *(const float *)b;
+    if (c)
+        xs[n++] = *(const float *)c;
+    ws_hud_decide(xs, n);
+}
+
 static void __cdecl ws_draw_triangle(const void *a, const void *b,
                                        const void *c)
 {
@@ -579,6 +773,8 @@ static void __cdecl ws_draw_triangle(const void *a, const void *b,
         s_ws_real_tri(a, b, c);
         return;
     }
+    if (s_hud_pending)
+        ws_hud_first(a, b, c);
     ws_batch_begin();
     ws_shift(v, a, 1);
     ws_shift(v + WS_VSIZE, b, 1);
@@ -599,6 +795,8 @@ static void __cdecl ws_aa_draw_triangle(const void *a, const void *b,
         s_ws_real_aatri(a, b, c, ab, bc, ca);
         return;
     }
+    if (s_hud_pending)
+        ws_hud_first(a, b, c);
     ws_shift(v, a, 1);
     ws_shift(v + WS_VSIZE, b, 1);
     ws_shift(v + 2 * WS_VSIZE, c, 1);
@@ -615,6 +813,8 @@ static void __cdecl ws_draw_line(const void *a, const void *b)
         s_ws_real_line(a, b);
         return;
     }
+    if (s_hud_pending)
+        ws_hud_first(a, b, NULL);
     ws_shift(v, a, 1);
     ws_shift(v + WS_VSIZE, b, 1);
     s_ws_real_line(v, v + WS_VSIZE);
@@ -630,6 +830,8 @@ static void __cdecl ws_aa_draw_line(const void *a, const void *b)
         s_ws_real_aaline(a, b);
         return;
     }
+    if (s_hud_pending)
+        ws_hud_first(a, b, NULL);
     ws_shift(v, a, 1);
     ws_shift(v + WS_VSIZE, b, 1);
     s_ws_real_aaline(v, v + WS_VSIZE);
@@ -662,6 +864,14 @@ static void ws_vlist(ws_vlist_fn real, int count, const void *verts)
         }
         real(count, verts);
         return;
+    }
+    if (s_hud_pending) {
+        float xs[WS_VLIST_MAX];
+        int i;
+
+        for (i = 0; i < count; i++)
+            xs[i] = *(const float *)((const char *)verts + (size_t)i * WS_VSIZE);
+        ws_hud_decide(xs, (unsigned)count);
     }
     ws_shift(v, verts, (unsigned)count);
     real(count, v);
@@ -839,6 +1049,31 @@ static void __cdecl gl_sky_init(uint32_t a0, uint32_t a1, uint32_t a2,
     ws_sky_build(s_real_sky_init, "_sky_Init", a0, a1, a2, a3);
 }
 
+/* Hydro's tracking cards mark a boat beside or behind the camera on the
+ * screen's edge: x = +-253 up the lower half of each side, and along the bottom
+ * x = the rival's sideways direction times 245 (track_spread), all about the
+ * field's centre and none of it read from the viewport, so the seam would
+ * leave them on the 4:3 field's edges. Offroad's racer tags are projected and
+ * clamped against the viewport and reach the raster's edges through the
+ * ws_racer_tag repair; this gives Hydro's the same: the bottom spreads over the
+ * raster's width and each side goes to the raster's edge, keeping the
+ * cabinet's distance from it. A whole-pixel offset at the seam, as for a HUD
+ * element, so the game still clips the card to its own field first. */
+static int ws_track_bias(uint32_t x_bits)
+{
+    const float spread = rd_f(G->track_spread);
+    const float right = (float)(s_ws_raster_width - s_ws_native_width) - s_ws_dx;
+    float x, t;
+
+    memcpy(&x, &x_bits, sizeof x);
+    if (!(spread > 0.0f))
+        return 0;
+    t = x / spread;
+    if (t > 1.0f)  t = 1.0f;
+    if (t < -1.0f) t = -1.0f;
+    return (int)lroundf(t >= 0.0f ? t * right : t * s_ws_dx);
+}
+
 /* Clamp Hydro's oversize ortho coordinates to the native 2D field before the
  * host substitutes a wide raster clip. Offroad's flat-2D path clips itself. */
 typedef void (__cdecl *ortho_fn)(uint32_t, uint32_t, uint32_t, uint32_t,
@@ -849,6 +1084,8 @@ static void __cdecl gl_draw_ortho(uint32_t a0, uint32_t a1, uint32_t a2,
                                   uint32_t a3, uint32_t a4, uint32_t a5,
                                   uint32_t a6, uint32_t a7)
 {
+    uint32_t ra = (uint32_t)(uintptr_t)__builtin_return_address(0);
+
     if (!s_real_drawortho)
         return;
     if (s_ws_dx <= 0.0f) {
@@ -856,8 +1093,365 @@ static void __cdecl gl_draw_ortho(uint32_t a0, uint32_t a1, uint32_t a2,
         return;
     }
     s_ws_ortho_depth++;
-    s_real_drawortho(a0, a1, a2, a3, a4, a5, a6, a7);
+    if (s_hud_overlay && ra >= s_hud_overlay->ra_lo &&
+        ra <= s_hud_overlay->ra_hi) {
+        ws_hud_scope_t scope;
+
+        ws_hud_enter(&scope, ra, s_hud_overlay->name, ra);
+        s_real_drawortho(a0, a1, a2, a3, a4, a5, a6, a7);
+        ws_hud_leave(&scope);
+    } else if (G->track_ra_lo && ra >= G->track_ra_lo &&
+               ra <= G->track_ra_hi) {
+        ws_hud_scope_t scope;
+
+        /* Placed here rather than by the first primitive, and named so the
+         * world detector does not count a card it moved past the field. */
+        ws_hud_enter(&scope, ra, "_boats_DrawAllTrackingNumbers", ra);
+        s_hud_pending = 0;
+        s_hud_bias = ws_track_bias(a1);
+        s_hud_name = "_boats_DrawAllTrackingNumbers";
+        if (!(s_ws_repair_reported & WS_REPAIR_TRACK)) {
+            s_ws_repair_reported |= WS_REPAIR_TRACK;
+            LOGI("geometry: widescreen repair; Hydro's tracking cards spread "
+                 "to the %d-wide raster's edges (first offset %+d)",
+                 s_ws_raster_width, s_hud_bias);
+        }
+        s_real_drawortho(a0, a1, a2, a3, a4, a5, a6, a7);
+        ws_hud_leave(&scope);
+    } else {
+        s_real_drawortho(a0, a1, a2, a3, a4, a5, a6, a7);
+    }
     s_ws_ortho_depth--;
+}
+
+/* ---- widescreen HUD at the edges: the elements and the text ------------- */
+
+/* Every hooked function is cdecl and takes at most eight dwords; the extra
+ * slots read the caller's frame and are ignored by the callee, as the fade's
+ * pass-through does. The bias is an int so nothing here touches a register a
+ * float return could be in. */
+typedef uint32_t (__cdecl *ws_pass_fn)(uint32_t, uint32_t, uint32_t, uint32_t,
+                                       uint32_t, uint32_t, uint32_t, uint32_t);
+static ws_pass_fn s_real_hud_elem[VCT_MAX_HUD_ELEMS];
+
+static uint32_t ws_hud_element(unsigned i, uint32_t a0, uint32_t a1,
+                               uint32_t a2, uint32_t a3, uint32_t a4,
+                               uint32_t a5, uint32_t a6, uint32_t a7)
+{
+    ws_hud_scope_t scope;
+    const game_hud_t *saved = s_hud_overlay;
+    uint32_t r;
+
+    if (G->hud_elem[i].kind == GAME_HUD_EACH_ORTHO) {
+        s_hud_overlay = &G->hud_elem[i];
+        r = s_real_hud_elem[i](a0, a1, a2, a3, a4, a5, a6, a7);
+        s_hud_overlay = saved;
+        return r;
+    }
+    ws_hud_enter(&scope, i + 1u, G->hud_elem[i].name, 0);
+    r = s_real_hud_elem[i](a0, a1, a2, a3, a4, a5, a6, a7);
+    ws_hud_leave(&scope);
+    return r;
+}
+
+#define WS_HUD_ELEM(i)                                                        \
+    static uint32_t __cdecl gl_hud_elem_##i(uint32_t a0, uint32_t a1,         \
+            uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5, uint32_t a6,  \
+            uint32_t a7)                                                      \
+    { return ws_hud_element(i, a0, a1, a2, a3, a4, a5, a6, a7); }
+WS_HUD_ELEM(0)  WS_HUD_ELEM(1)  WS_HUD_ELEM(2)  WS_HUD_ELEM(3)
+WS_HUD_ELEM(4)  WS_HUD_ELEM(5)  WS_HUD_ELEM(6)  WS_HUD_ELEM(7)
+WS_HUD_ELEM(8)  WS_HUD_ELEM(9)  WS_HUD_ELEM(10) WS_HUD_ELEM(11)
+WS_HUD_ELEM(12) WS_HUD_ELEM(13) WS_HUD_ELEM(14) WS_HUD_ELEM(15)
+static void *const s_hud_elem_wrap[VCT_MAX_HUD_ELEMS] = {
+    (void *)gl_hud_elem_0,  (void *)gl_hud_elem_1,  (void *)gl_hud_elem_2,
+    (void *)gl_hud_elem_3,  (void *)gl_hud_elem_4,  (void *)gl_hud_elem_5,
+    (void *)gl_hud_elem_6,  (void *)gl_hud_elem_7,  (void *)gl_hud_elem_8,
+    (void *)gl_hud_elem_9,  (void *)gl_hud_elem_10, (void *)gl_hud_elem_11,
+    (void *)gl_hud_elem_12, (void *)gl_hud_elem_13, (void *)gl_hud_elem_14,
+    (void *)gl_hud_elem_15,
+};
+
+/* Text is not an element: both titles buffer a string's glyphs and draw every
+ * buffered glyph in one flush, where strings can no longer be told apart. So a
+ * string is moved where its position still lives, and decided by its own
+ * extent. One line per call site or object and side, the first time. */
+static void ws_hud_text_report(uint32_t key, const char *str, float lo,
+                               float hi, int bias)
+{
+    char text[25];
+    unsigned i;
+
+    if (!ws_hud_first_time(key, bias))
+        return;
+    for (i = 0; str && str[i] && i < sizeof text - 1; i++)
+        text[i] = (str[i] >= 0x20 && str[i] < 0x7F) ? str[i] : '.';
+    text[i] = '\0';
+    LOGI("geometry: widescreen HUD; text \"%s\" at x %.1f..%.1f goes %s (%+d)",
+         text, (double)lo, (double)hi, ws_hud_side_name(bias), bias);
+}
+
+/* Hydro: `_text_PrintStr` appends one record per glyph, pen x included, when
+ * the string is buffered (every HUD string is); the flush draws them with no
+ * clip. So the records it just appended are the string, at its final,
+ * aligned position, and moving them moves it. */
+static ws_pass_fn s_real_hud_text_draw, s_real_text_printstr;
+
+static uint32_t __cdecl gl_hud_text_draw(uint32_t a0, uint32_t a1, uint32_t a2,
+                                         uint32_t a3, uint32_t a4, uint32_t a5,
+                                         uint32_t a6, uint32_t a7)
+{
+    uint32_t r;
+
+    s_hud_text_depth++;
+    s_hud_text_drawing++;
+    r = s_real_hud_text_draw(a0, a1, a2, a3, a4, a5, a6, a7);
+    s_hud_text_drawing--;
+    s_hud_text_depth--;
+    return r;
+}
+
+static uint32_t __cdecl gl_text_printstr(uint32_t a0, uint32_t a1, uint32_t a2,
+                                         uint32_t a3, uint32_t a4, uint32_t a5,
+                                         uint32_t a6, uint32_t a7)
+{
+    const volatile uint16_t *count =
+        (const volatile uint16_t *)(uintptr_t)G->text_glyph_count;
+    unsigned c0, c1, i;
+    float lo = 1e30f, hi = -1e30f;
+    uint32_t r;
+    int bias;
+
+    if (!s_hud_text_depth || s_ws_dx <= 0.0f)
+        return s_real_text_printstr(a0, a1, a2, a3, a4, a5, a6, a7);
+    c0 = *count;
+    r = s_real_text_printstr(a0, a1, a2, a3, a4, a5, a6, a7);
+    c1 = *count;
+    if (c1 <= c0)                       /* drawn at once, or not at all */
+        return r;
+    for (i = c0; i < c1; i++) {
+        float x = *(const float *)(uintptr_t)(G->text_glyph_buf +
+                      i * G->text_glyph_stride + G->text_glyph_x);
+
+        if (x < lo) lo = x;
+        if (x > hi) hi = x;
+    }
+    bias = ws_hud_side(lo, hi);
+    if (bias)
+        for (i = c0; i < c1; i++)
+            *(float *)(uintptr_t)(G->text_glyph_buf + i * G->text_glyph_stride +
+                                  G->text_glyph_x) += (float)bias;
+    ws_hud_text_report((uint32_t)(uintptr_t)__builtin_return_address(0),
+                       (const char *)(uintptr_t)a2, lo, hi, bias);
+    return r;
+}
+
+/* Offroad: HUD strings are gametext objects; `__GameTextPrint(obj)` prints one
+ * at the object's own x, and its 2D clipper keeps x inside
+ * `_Viewport_screen_limit` BEFORE the seam, so a moved string also needs the
+ * clip widened for as long as it is being drawn: while it is printed (an
+ * unbuffered object draws there) and in the next flush. The clipper keeps
+ * x >= -limit[0] and x <= limit[1]. Only the race HUD's own objects move. */
+typedef int (__cdecl *ws_obj_fn)(uint32_t);
+static ws_obj_fn s_real_gametext_print, s_gametext_width;
+static ws_pass_fn s_real_text_flush;
+/* Which sides the next flush has to open: a string moved left needs the left
+ * limit, one moved right the right limit. Opening only those keeps any other
+ * string the game parks just past the far edge where the cabinet clipped it. */
+#define WS_CLIP_LEFT  1
+#define WS_CLIP_RIGHT 2
+static int s_hud_text_pending;
+
+typedef struct { int active; float l0, l1; } ws_clip_scope_t;
+
+static void ws_clip_widen(ws_clip_scope_t *s, int sides)
+{
+    float *lim = (float *)(uintptr_t)G->viewport_screen_limit;
+
+    s->active = 1;
+    s->l0 = lim[0];
+    s->l1 = lim[1];
+    if (sides & WS_CLIP_LEFT)
+        lim[0] = s->l0 + s_ws_dx;
+    if (sides & WS_CLIP_RIGHT)
+        lim[1] = s->l1 + (float)(s_ws_raster_width - s_ws_native_width) -
+                 s_ws_dx;
+}
+
+static void ws_clip_restore(const ws_clip_scope_t *s)
+{
+    float *lim = (float *)(uintptr_t)G->viewport_screen_limit;
+
+    if (!s->active)
+        return;
+    lim[0] = s->l0;
+    lim[1] = s->l1;
+}
+
+static int ws_hud_owns_text(uint32_t obj)
+{
+    unsigned i;
+
+    for (i = 0; i < G->hud_text_var_count; i++)
+        if (*(const uint32_t *)(uintptr_t)G->hud_text_var[i] == obj)
+            return 1;
+    if (G->hud_lap_texts && G->hud_num_laps) {
+        const uint32_t *laps =
+            (const uint32_t *)(uintptr_t)*(const uint32_t *)(uintptr_t)G->hud_lap_texts;
+        int n = *(const int *)(uintptr_t)G->hud_num_laps;
+
+        if (laps && n > 0 && n <= 64)
+            for (i = 0; i < (unsigned)n; i++)
+                if (laps[i] == obj)
+                    return 1;
+    }
+    return 0;
+}
+
+static int __cdecl gl_gametext_print(uint32_t obj)
+{
+    ws_clip_scope_t clip;
+    float *px, saved, x0, w;
+    uint32_t style;
+    int bias, r;
+
+    if (!s_hud_armed || s_ws_dx <= 0.0f || !obj || !ws_hud_owns_text(obj))
+        return s_real_gametext_print(obj);
+    px = (float *)(uintptr_t)(obj + G->gametext_x);
+    style = *(const uint32_t *)(uintptr_t)(obj + G->gametext_style);
+    w = (float)s_gametext_width(obj);
+    x0 = *px;
+    if (style & 4u)
+        x0 -= w * 0.5f;                 /* centred on x */
+    else if (style & 2u)
+        x0 -= w;                        /* printed leftwards from x */
+    bias = ws_hud_side(x0, x0 + w);
+    ws_hud_text_report(obj, *(const char *const *)(uintptr_t)obj, x0, x0 + w,
+                       bias);
+    if (!bias)
+        return s_real_gametext_print(obj);
+    saved = *px;
+    *px = saved + (float)bias;
+    ws_clip_widen(&clip, bias < 0 ? WS_CLIP_LEFT : WS_CLIP_RIGHT);
+    s_hud_text_drawing++;
+    r = s_real_gametext_print(obj);
+    s_hud_text_drawing--;
+    ws_clip_restore(&clip);
+    *px = saved;
+    s_hud_text_pending |= bias < 0 ? WS_CLIP_LEFT : WS_CLIP_RIGHT;
+    return r;
+}
+
+static uint32_t __cdecl gl_text_flush(uint32_t a0, uint32_t a1, uint32_t a2,
+                                      uint32_t a3, uint32_t a4, uint32_t a5,
+                                      uint32_t a6, uint32_t a7)
+{
+    ws_clip_scope_t clip;
+    uint32_t r;
+    int sides = s_hud_text_pending;
+
+    if (!sides)
+        return s_real_text_flush(a0, a1, a2, a3, a4, a5, a6, a7);
+    s_hud_text_pending = 0;
+    ws_clip_widen(&clip, sides);
+    s_hud_text_drawing++;
+    r = s_real_text_flush(a0, a1, a2, a3, a4, a5, a6, a7);
+    s_hud_text_drawing--;
+    ws_clip_restore(&clip);
+    return r;
+}
+
+/* Install what the title has. Hooks cannot be taken back, so each piece is
+ * independent: an element or a text family that cannot be hooked stays where
+ * the cabinet put it, and the log says which. */
+static void ws_hud_arm(void)
+{
+    unsigned i, hooked = 0;
+    const char *text = "none";
+
+    s_hud_armed = 0;
+    s_hud_bias = 0;
+    s_hud_pending = 0;
+    s_hud_text_depth = 0;
+    s_hud_text_pending = 0;
+    s_hud_seen_used = 0;
+    s_hud_overlay = NULL;
+    s_ws_world_now = s_ws_world_prev = 0;
+    s_hud_text_drawing = 0;
+    memset(s_real_hud_elem, 0, sizeof s_real_hud_elem);
+    s_real_hud_text_draw = s_real_text_printstr = s_real_text_flush = NULL;
+    s_real_gametext_print = s_gametext_width = NULL;
+    if (strcmp(g_cfg.widescreen_hud, "edges") != 0)
+        return;
+
+    for (i = 0; i < G->hud_elem_count && i < VCT_MAX_HUD_ELEMS; i++) {
+        s_real_hud_elem[i] = (ws_pass_fn)hook_call_through(
+            G->hud_elem[i].va, s_hud_elem_wrap[i], G->hud_elem[i].hook);
+        if (s_real_hud_elem[i])
+            hooked++;
+        else
+            LOGW("geometry: widescreen HUD; %s could not be hooked and stays "
+                 "centred", G->hud_elem[i].name);
+    }
+
+    if (G->text_glyph_count) {
+        if (game_require("widescreen_hud", "Hydro's HUD text and its glyph "
+                         "records",
+                         G->hud_text_draw && G->hook_hud_text_draw &&
+                         G->text_printstr && G->hook_text_printstr &&
+                         G->text_glyph_buf && G->text_glyph_stride &&
+                         G->text_glyph_x)) {
+            s_real_text_printstr = (ws_pass_fn)hook_call_through(
+                G->text_printstr, (void *)gl_text_printstr,
+                G->hook_text_printstr);
+            if (s_real_text_printstr)
+                s_real_hud_text_draw = (ws_pass_fn)hook_call_through(
+                    G->hud_text_draw, (void *)gl_hud_text_draw,
+                    G->hook_hud_text_draw);
+            if (s_real_hud_text_draw)
+                text = "glyph records";
+        }
+    } else if (G->gametext_print) {
+        if (game_require("widescreen_hud", "Offroad's HUD gametext objects and "
+                         "the clip their flush draws through",
+                         G->hook_gametext_print && G->gametext_width &&
+                         G->gametext_x && G->gametext_style &&
+                         G->hud_text_var_count &&
+                         G->text_flush && G->hook_text_flush &&
+                         G->viewport_screen_limit)) {
+            s_gametext_width = (ws_obj_fn)(uintptr_t)G->gametext_width;
+            s_real_text_flush = (ws_pass_fn)hook_call_through(
+                G->text_flush, (void *)gl_text_flush, G->hook_text_flush);
+            if (s_real_text_flush)
+                s_real_gametext_print = (ws_obj_fn)hook_call_through(
+                    G->gametext_print, (void *)gl_gametext_print,
+                    G->hook_gametext_print);
+            if (s_real_gametext_print)
+                text = "gametext objects";
+        }
+    }
+    if (!hooked && !strcmp(text, "none")) {
+        LOGW("geometry: widescreen HUD = edges, but %s has nothing it could "
+             "hook; the HUD stays centred", G->id);
+        return;
+    }
+    s_hud_armed = 1;
+    LOGI("geometry: widescreen HUD at the edges; %u of %u element(s) hooked, "
+         "text moved by %s. What rests in the cabinet screen's left or right "
+         "third keeps its distance from that edge of the raster.",
+         hooked, G->hud_elem_count, text);
+}
+
+/* A clear wipes whatever world was drawn: what follows is a page. */
+typedef void (__stdcall *ws_clear_fn)(uint32_t, uint32_t, uint32_t);
+static ws_clear_fn s_ws_real_clear;
+
+static void __cdecl ws_buffer_clear(uint32_t color, uint32_t alpha,
+                                    uint32_t depth)
+{
+    s_ws_world_now = 0;
+    if (s_ws_real_clear)
+        s_ws_real_clear(color, alpha, depth);
 }
 
 /* Returns nonzero when this entry point has been taken over by the origin.
@@ -885,6 +1479,9 @@ int ws_claim_primitive(const char *name, void *real, uint32_t va)
     } else if (strcmp(name, "grDrawPlanarPolygonVertexList") == 0) {
         s_ws_real_planar_vlist = (ws_vlist_fn)real;
         patch_jmp(va, (void *)ws_draw_planar_vertex_list);
+    } else if (s_hud_armed && strcmp(name, "grBufferClear") == 0) {
+        s_ws_real_clear = (ws_clear_fn)real;
+        patch_jmp(va, (void *)ws_buffer_clear);
     } else {
         return 0;
     }
@@ -1099,6 +1696,7 @@ static void widescreen_arm(void)
         LOGW("geometry: widescreen margin census is ON; it names every game "
              "call site that draws outside the native field, and costs four "
              "float compares per submitted vertex");
+    ws_hud_arm();
     s_ws_armed = 1;
     LOGI("geometry: widescreen armed; the game keeps its own 2D coordinate "
          "system and the seam carries the origin; the raster settles it at "
@@ -1115,11 +1713,13 @@ static void widescreen_settle(int native_width, int raster_width)
         s_ws_dx = 0.0f;
         s_ws_native_width = 0;
         s_ws_cull_width = 0;
+        s_ws_raster_width = 0;
         LOGI("geometry: widescreen is inert; the game's own raster is not "
              "narrower than the visible one");
         return;
     }
     s_ws_native_width = native_width;
+    s_ws_raster_width = raster_width;
     /* Use an integer seam origin. Rounding down matches the LFB field offset and
      * keeps integer 2D coordinates away from ambiguous half-pixel tile seams. */
     s_ws_dx = (float)((raster_width - native_width) / 2);
@@ -1152,12 +1752,48 @@ void ws_settle(int native_width, int raster_width)
 
 void ws_frame_boundary(void)
 {
+    s_ws_world_prev = s_ws_world_now;
+    s_ws_world_now = 0;
     ws_margin_tick();
 }
 
 float ws_origin(void)
 {
     return s_ws_dx;
+}
+
+void ws_scopes_save(ws_scopes_t *s)
+{
+    s->dx = s_ws_dx;
+    s->ortho_depth = s_ws_ortho_depth;
+    s->lensflare_depth = s_ws_lensflare_depth;
+    s->fade_depth = s_ws_fade_depth;
+    s->hud_text_depth = s_hud_text_depth;
+    s->hud_text_drawing = s_hud_text_drawing;
+    s->hud_text_pending = s_hud_text_pending;
+    s->hud_pending = s_hud_pending;
+    s->hud_bias = s_hud_bias;
+    s->hud_key = s_hud_key;
+    s->hud_ra = s_hud_ra;
+    s->hud_name = s_hud_name;
+    s->hud_overlay = s_hud_overlay;
+}
+
+void ws_scopes_restore(const ws_scopes_t *s)
+{
+    s_ws_dx = s->dx;
+    s_ws_ortho_depth = s->ortho_depth;
+    s_ws_lensflare_depth = s->lensflare_depth;
+    s_ws_fade_depth = s->fade_depth;
+    s_hud_text_depth = s->hud_text_depth;
+    s_hud_text_drawing = s->hud_text_drawing;
+    s_hud_text_pending = s->hud_text_pending;
+    s_hud_pending = s->hud_pending;
+    s_hud_bias = s->hud_bias;
+    s_hud_key = s->hud_key;
+    s_hud_ra = s->hud_ra;
+    s_hud_name = s->hud_name;
+    s_hud_overlay = s->hud_overlay;
 }
 
 unsigned ws_lfb_read_offset(int lock_type, unsigned stride)

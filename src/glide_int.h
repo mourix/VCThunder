@@ -30,6 +30,9 @@ static inline int rd_opt(uint32_t va, int absent)
  * surface, which may be wider. Its reports name it and its origin is computed
  * against it. */
 int  glide_view_width(void);
+/* Per-entry call counts through the forwarding thunks, and a provider export. */
+const uint32_t *glide_call_counts(void);
+void *glide_provider_proc(const char *decorated);
 /* Have the provider black both side strips at the next swap, even where the
  * frame drew into them. A no-op on a provider without vglBlackMargins. */
 void glide_black_margins(void);
@@ -52,6 +55,20 @@ void ws_frame_boundary(void);
 
 /* The seam origin in pixels, 0 when Hor+ is off or inert. */
 float ws_origin(void);
+/* The engine's scope state: what each hook's leave step puts back. A draw
+ * abandoned by a longjmp (drawreplay.c) skips those steps, so it saves this
+ * before the draw and restores it after. */
+typedef struct {
+    float dx;
+    int ortho_depth, lensflare_depth, fade_depth;
+    int hud_text_depth, hud_text_drawing, hud_text_pending;
+    int hud_pending, hud_bias;
+    uint32_t hud_key, hud_ra;
+    const char *hud_name;
+    const game_hud_t *hud_overlay;
+} ws_scopes_t;
+void ws_scopes_save(ws_scopes_t *s);
+void ws_scopes_restore(const ws_scopes_t *s);
 /* The byte offset a READ_ONLY LFB lock should be displaced by, or 0.
  *
  * Hydro projects a lens flare in the game's native field and the primitive seam

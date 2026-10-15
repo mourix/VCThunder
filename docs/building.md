@@ -2,29 +2,27 @@
 
 ## Layout
 
-**A clone of this repository needs nothing beside it.** Everything the build writes goes
-inside the clone, the run directory included, and every input except your own game CHDs
-is either here already or fetched by `make deps`:
+**A clone of this repository needs nothing beside it, and building needs no game data.**
+Everything the build writes goes inside the clone, the run directory included, and every input
+is either here already or fetched by `make deps`. Your own game CHDs are needed to *play*:
 
 ```
 VCThunder/                     ← the clone; this is the whole of it
-├─ chd/                        ← YOU put your two CHDs here
-├─ data/                       written by tools/ingest-chd.py: the unpacked games
-├─ generated/                  written by `make defs`: the address tables, from YOUR dump
-├─ build/                      objects, the three binaries, and build/deps/SDL3
-└─ run/vcthunder/              written by `make pack`: the playable pack
+├─ chd/                        optional: somewhere to keep your CHDs
+├─ generated/                  committed: the address tables, derived by `make defs`
+├─ build/                      objects, the three binaries, and build/deps/ (SDL3, zlib, LZMA)
+└─ run/vcthunder/              written by `make pack`: the playable pack, games imported into it
 ```
 
-Four of those five are generated, and every one of them is git-ignored, so `make setup` from
-a fresh clone is the whole story:
+`build/` and `run/` are written by tools and git-ignored, so from a fresh clone:
 
 ```sh
-python3 tools/ingest-chd.py --auto      # chd/ -> data/
-make setup                              # deps, defs, all, pack
+make setup                              # deps, all, pack
+run/vcthunder/VCThunder.exe             # with your CHDs beside it: it imports them
 ```
 
-`make clean` removes objects and binaries only; it does not touch `data/`, `generated/` or
-`run/`, because re-deriving those means having the CHDs to hand again.
+`make clean` removes objects and binaries only; it does not touch `run/`, because that holds
+the games you imported, your settings and your saves.
 
 ## Where to build: WSL or MSYS2
 
@@ -107,13 +105,13 @@ and WSL is the one that is not on anyone else's schedule.
 
 ```sh
 make            # -> host/provider binaries + staged build/SDL3.dll
-make setup      # deps, defs, all, pack: everything, from a fresh clone
-make deps       # fetch and SHA-256-verify SDL 3.4.10's official x86 MinGW SDK
+make setup      # deps, all, pack: everything, from a fresh clone
+make deps       # fetch and SHA-256-verify SDL3's x86 SDK and the CHD decoders
 make renderer   # just build/vcglide.dll, the Glide 2.x provider
 make tools      # build/glide-replay.exe, the capture replay / golden-frame harness
 make check      # the local CI: scans, link check, build, tests, generated/ vs the dumps
 make check-full # the same, ignoring the stamps on the two checks that cache
-make defs       # regenerate generated/ from ALL titles
+make defs       # maintainer: regenerate generated/ from ALL titles' dumps
 make pack       # deliver the binaries into run/vcthunder/
 make pack-ini   # overwrite the run directory's ini with the shipped defaults
 make pack-cfg   # the pack's ini and launchers only: seeds them, never overwrites
@@ -123,32 +121,35 @@ make clean      # objects, the three binaries, and staged SDL3.dll only
 `make check` is the one to reach for. Underneath, each check is also a target of its own, in the
 order `check` runs them: `ini-doc-test`, `launcher-model-test`, `config-test`,
 `round-trip-test`, `emitter-test`, `widescreen-test`, `net-link-test`, `rumble-test`,
-`button-test` and `conformance`. `make conformance` on its own builds only the renderer and the
-replay harness, so it is the one check that runs on a clone with no dumps at all. A failing
-check prints what to do about it: accepting a legitimately changed picture is
-`make conformance-frames`, looking at the PNGs it writes, then `make conformance-accept`.
+`button-test`, `di-role-test`, `import-test` and `conformance`. None of them needs game data;
+`conformance` replays a synthetic scene through the renderer. A failing check prints what to do
+about it: accepting a legitimately changed picture is `make conformance-frames`, looking at the
+PNGs it writes, then `make conformance-accept`.
 
-Two of the checks read inputs that cannot change between runs: every CHD the ingest finds,
-against its own checksums, and `generated/` against the two dumps. Each records a key when it
+After them, `make check` compares `generated/` with the two dumps, and reports SKIPPED where
+there are none. Those inputs cannot change between runs, so the check records a key when it
 passes and re-reads only when something it depends on has moved, reporting `NOT RE-READ` rather
-than a pass when it skips. **`make check-full` ignores both**, and `make clean` removes the stamps.
+than a pass when it skips.
+**`make check-full` ignores every such key**, and `make clean` removes them.
 
-
-`make deps` downloads `SDL3-devel-3.4.10-mingw.tar.gz` from SDL's official GitHub release and
-requires SHA-256 `39dd2ac3…22639a8`. No SDL source or binary is vendored into this repository.
+`make deps` (`tools/fetch-deps.py`) downloads three pinned archives and refuses any whose
+SHA-256 differs: `SDL3-devel-3.4.10-mingw.tar.gz` from SDL's GitHub release, `zlib-1.3.2.tar.gz`
+from zlib's, and `7z2603-src.tar.xz` from 7-Zip's, of which only the six public-domain files
+around `LzmaDec.c` are extracted. No third-party source or binary is vendored into this
+repository.
 
 **`make defs` must be run without `--title`**, or `generated/span.h` is not updated: that file
 carries the largest span across every title and is what the stub reserves at link time.
 
-**A dump is required to build.** There is no dumpless fallback: `generated/span.h` carries the
-address span the stub reserves at link time, and without a dump that number cannot be derived.
-`make check` runs its contraband scan and settings audit without a dump and stops at the build.
-`generated/` is **not committed**, and `make defs` refuses a dump whose SHA-256 is not the
-registered one.
+**A dump is required to play, not to build.** `generated/` is committed: it is derived from the
+registered dumps by `make defs`, which refuses a dump whose SHA-256 is not the registered one,
+and **never edited by hand**. Where a dump is present, `make check` regenerates it in memory and
+compares it **byte for byte** with the committed files; with no dump that check reports SKIPPED.
+A changed table therefore only ever arrives as a `make defs` diff, reviewed like code.
 
 **The release version is `src/resource.h`**, three macros and no other definition. `windres`
 and the compiler both read that file, so the DLL's Windows file properties, the log's first
-line (`VCThunder 0.2: ...`) and the settings launcher's title bar cannot disagree. It is a
+line (`VCThunder 0.3: ...`) and the settings launcher's title bar cannot disagree. It is a
 version, not a build stamp: it moves when a release does and never because a build ran.
 
 `make` twice on unchanged source produces byte-identical binaries, and so does a rebuild from
@@ -165,58 +166,40 @@ swept in the same step.
 
 ## From a MAME CHD to a running game
 
-**You supply the game. This repository contains no game material and never will.** Your two
-CHDs go in `chd/`; [`../chd/README.md`](../chd/README.md) is the whole of what you need to put
-there, including why **`chdman` is not required**.
+**You supply the game. This repository contains no game material and never will.** VCThunder
+imports it from your own MAME CHD itself, four ways:
 
-```sh
-python3 tools/ingest-chd.py --auto
-```
+- CHDs next to `VCThunder.exe`: the launcher imports them as it opens, one per game not
+  imported yet, the supported build first; a game already there is never touched;
+- the launcher: **Import...** on a game's card (which looks next to the exe first), or
+  **Import from CHD...** on *Files & Logging* (listed once *Show advanced settings* is on);
+- dropping one or more `.chd` files onto `VCThunder.exe`, which opens the launcher and imports;
+- `VCThunder.exe import [--replace] [--data DIR] [FILE.chd...]` from a command line, which prints
+  what it does and exits non-zero on any refusal; with no file, the CHDs next to the exe.
 
-`--auto` works out which game each CHD is from what is inside it rather than from its name,
-and when a directory holds more than one CHD of a title it hashes the executable in each and
-uses the build this host has tables for, reporting the ones it passes over and why. **A CHD
-of a build this host has no tables for is refused before anything is written**, in about a
-second, and so is a `data/<title>/` that is already there and holds one. `--any-build` unpacks
-it anyway, which is the first step of registering a new build and not a way to play it. Naming
-them yourself does the same thing:
+The importer (`src/chd.c`, `src/fat.c`, `src/ingest.c`) reads a CHD version 5 directly and
+decodes only the hunks the game's files occupy: no chdman, no MAME, no unpacked disk image.
+In order:
 
-```sh
-python3 tools/ingest-chd.py --title hydro   --chd chd/hydrthnd.chd --out data
-python3 tools/ingest-chd.py --title offroad --chd chd/offrthnd.chd --out data
-```
+1. **Which game, and which build, is decided by what is on the disk**, never by the file name:
+   the executable is found and hashed where it lies, in about a second. **A CHD of a build this
+   host has no tables for is refused before anything is written**, saying which build it holds.
+2. **Every FAT partition is read and merged flat** into `data/<title>/`, the cabinets' logical
+   drives included. `fs_map_path()` strips any drive specifier, so `C:\HYDRO.EXE` and
+   `D:\SAMAZAA0.CSH` belong in one directory. **A partition it cannot read fails the import**,
+   because the executable's hash says nothing about the rest of the disk.
+3. Every hunk is checked against the CRC-16 the CHD carries for it; a damaged CHD fails by hunk
+   number.
+4. The files go to `data/<title>.part/`, and **only once the executable written there verifies
+   is it renamed into place**. A failure, a cancel or a full disk leaves nothing behind.
 
-It reads the CHD itself, reads every FAT partition inside it, and merges them into
-`data/<title>/`. The merge is not a simplification: `fs_map_path()` strips any drive specifier,
-so `C:\HYDRO.EXE` and `D:\SAMAZAA0.CSH` both land in the same directory, which is why one flat
-directory per title is the correct shape. It then hashes what it extracted against the
-registered build, and **a mismatch is reported as an unsupported build, not as a corrupt
-download**; the README's *Supported builds* says what to do with one.
+A title folder that already holds the supported build is left alone; one that holds something
+else is replaced only with `--replace`, or when the launcher's prompt is answered yes. A folder
+that cannot be written, such as one under Program Files, is refused with a sentence saying so.
+A CHD older than version 5, or one with a parent, is declined by name: MAME's `chdman copy`
+makes a whole version 5 CHD of either.
 
-`chd/` is gitignored and the contraband scanner skips it. `make check` runs `chd.py --check` on
-every CHD the ingest can find, and reports SKIPPED when there is none.
-
-**Building from WSL with a Windows `chdman` works** and is handled: a Windows binary cannot open
-a `/mnt/c/...` path (it fails as though the file did not exist), so the script translates paths
-through `wslpath`. It is also why the image is never staged in `/tmp`, which a Windows binary
-cannot see at all.
-
-If you already have the image or an extracted drive tree, start further along:
-
-| You have | Use |
-|---|---|
-| a CHD | `--chd game.chd` |
-| a raw disk image | `--img game.img` |
-| an extracted tree (`<dir>/C`, `<dir>/D`) | `--tree <dir>` |
-
-If your dump lives somewhere else entirely, point the build at it:
-
-```sh
-VCT_DUMPS=$PWD/data make defs
-```
-
-`titles.py` also honours `VCT_DUMP_HYDRO` / `VCT_DUMP_OFFROAD` if you need to name a single
-executable directly.
+Both games together are about 1.4 GB written, in a few seconds on a recent machine.
 
 ## The run directory
 
@@ -244,7 +227,9 @@ their `[devices]` table, their axis section and every binding. `$(RES)` depends 
 would hand out the previous one. Deleting the file and starting VCThunder again is the whole of
 "give me the shipped defaults back", for a user and for a test pack alike.
 
-**`make pack` copies your game data into the pack**: each title in the clone's `data/` that
+**Import your games into the pack itself** (above); that is where its `data/` is read from.
+A clone that has a `data/` of its own, from an older build, still works:
+**`make pack` copies that game data into the pack**: each title in the clone's `data/` that
 `run/vcthunder/data/` does not have yet, while the ini's `data_dir` is the default `data`. The
 pack then stands alone, and moving or deleting the clone does not break it. That costs the
 data's size a second time (1.4 GB for both titles); `make pack LINK_DATA=1` on the first pack

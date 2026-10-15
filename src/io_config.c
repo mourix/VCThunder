@@ -444,7 +444,10 @@ static int ini_analog_bool(const char *path, const char *label,
 static input_provider_t ini_provider(const char *path)
 {
     char text[32];
-    ini_read_scoped(path, "analog", "provider", "auto", text, sizeof text);
+    if (ini_read_scoped(path, "analog", "provider", "auto", text,
+                        sizeof text))
+        LOGI("io: provider = %s, from [%s.analog]: this game has its own "
+             "controller", text, G->id);
     if (!_stricmp(text, "auto")) return PROVIDER_AUTO;
     if (!_stricmp(text, "xinput")) return PROVIDER_XINPUT;
     if (!_stricmp(text, "winmm") || !_stricmp(text, "joystick"))

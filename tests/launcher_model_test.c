@@ -253,6 +253,8 @@ static void test_ini_problems(void)
             "render_scale = 3\r\n"              /* a row can say this       */
             "[hydro.analog]\r\n"
             "dinput_steering_range_percent = 50\r\n"  /* nothing can        */
+            "[offroad.graphics]\r\n"
+            "bezel = bezels/offroad.png\r\n"  /* per cabinet by design    */
             "[gamepad]\r\n"
             "boost = 1\r\n"
             "[graphics]\r\n"                    /* the duplicate section    */
@@ -274,6 +276,8 @@ static void test_ini_problems(void)
           "to be said");
     check(!problem_mentions("boost"),
           "a binding is not a setting and is not unknown");
+    check(!problem_mentions("bezel"),
+          "bezel art set per cabinet is how it is meant to be set");
     check(model_problem_total() >= model_problem_count(),
           "the total counts what the list could not hold");
     model_close();
@@ -713,6 +717,303 @@ static void test_save_writes_only_what_changed(void)
     model_close();
 }
 
+/* ---- one controller per cabinet ------------------------------------------
+ *
+ * The host reads [<title>.analog] and [<title>.analog.<label>] first, so each
+ * cabinet can choose its own controller and axes; facts about a controller
+ * stay shared. The model shows one cabinet at a time and Apply writes both. */
+static int doc_says(const char *section, const char *key, const char *want)
+{
+    char have[INI_VALUE_CAP];
+
+    return ini_doc_get(model_doc(), section, key, have, sizeof have) &&
+           !strcmp(have, want);
+}
+
+static int doc_has(const char *section, const char *key)
+{
+    char have[INI_VALUE_CAP];
+
+    return ini_doc_get(model_doc(), section, key, have, sizeof have);
+}
+
+static void slot_set(const char *key, const char *value)
+{
+    snprintf(model_slot((unsigned)setting_find("analog", key)), INI_VALUE_CAP,
+             "%s", value);
+}
+
+static const char *section_of(const char *key)
+{
+    return setting_section((unsigned)setting_find("analog", key));
+}
+
+static void test_per_cabinet_controls(void)
+{
+    char path[MAX_PATH], why[512], *before, *after;
+    int changed = -1;
+    unsigned k;
+
+    check(open_model("cabinets.ini",
+            "[analog]\r\n"
+            "provider = dinput\r\n"
+            "dinput_name = TMX\r\n"
+            "[devices]\r\n"
+            "tmx = dinput:TMX\r\n"
+            "pad = xinput:0\r\n"
+            "[analog.tmx]\r\n"
+            "dinput_throttle_axis = rz\r\n"
+            "dinput_throttle_invert = true\r\n"
+            "[offroad.analog]\r\n"
+            "provider = xinput\r\n",
+            path, sizeof path), "the scratch ini opened");
+
+    check(model_controls_split(), "a choice in [offroad.analog] splits the "
+          "file");
+    check(model_controls_title() == 0, "Hydro is shown first");
+    check(!strcmp(model_value("analog", "provider"), "dinput") &&
+          !strcmp(model_profile(), "tmx"),
+          "Hydro inherits the shared wheel");
+    check(!strcmp(model_value("analog", "dinput_throttle_axis"), "rz"),
+          "and its axis map");
+    check(!strcmp(section_of("provider"), "hydro.analog"),
+          "a cabinet's choice of controller is written under its title");
+    check(!strcmp(section_of("dinput_throttle_axis"), "hydro.analog.tmx"),
+          "AN AXIS GOES TO [hydro.analog.tmx], NOT [hydro.analog]: the "
+          "device's own section beats the title's, so [analog.tmx] would win");
+    check(!strcmp(section_of("dinput_throttle_invert"), "analog.tmx"),
+          "a fact about the controller stays shared");
+    check(!strcmp(section_of("deadzone_percent"), "analog"),
+          "and so does a key that chooses nothing");
+
+    check(model_controls_show(1), "Offroad can be shown");
+    check(!strcmp(model_value("analog", "provider"), "xinput") &&
+          !strcmp(model_profile(), "pad"),
+          "Offroad reads its own provider, and the pad's profile with it");
+    slot_set("xinput_steering_axis", "rx");
+    check(model_controls_show(0), "back to Hydro");
+    check(doc_says("offroad.analog.pad", "xinput_steering_axis", "rx"),
+          "Offroad's edit went into the document on the way past");
+    check(!strcmp(model_value("analog", "provider"), "dinput"),
+          "and Hydro is shown again as it was");
+    slot_set("dinput_throttle_axis", "z");
+
+    before = read_bytes(path);
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK,
+          "Apply succeeds");
+    check(changed == 2, "both cabinets' edits are counted");
+    check(doc_says("hydro.analog.tmx", "dinput_throttle_axis", "z") &&
+          doc_says("analog.tmx", "dinput_throttle_axis", "rz"),
+          "Hydro's axis is its own; the shared map is untouched");
+    check(!doc_has("hydro.analog", "provider"),
+          "a choice Hydro still inherits is not written down");
+
+    check(model_reopen(), "the file reads back");
+    model_load();
+    check(model_controls_split() && model_controls_title() == 0,
+          "it is still split, and the cabinet shown is kept");
+    check(!strcmp(model_value("analog", "dinput_throttle_axis"), "z"),
+          "Hydro's axis comes back from [hydro.analog.tmx]");
+    model_controls_show(1);
+    check(!strcmp(model_value("analog", "xinput_steering_axis"), "rx"),
+          "and Offroad's from [offroad.analog.pad]");
+
+    free(before);
+    before = read_bytes(path);
+    changed = -1;
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK &&
+          changed == 0, "R4: an Apply after switching and changing nothing "
+          "writes nothing");
+    after = read_bytes(path);
+    check(before && after && !strcmp(before, after),
+          "...and the file is byte-identical");
+    free(after);
+    free(before);
+
+    scan_ini_problems();
+    for (k = 0; k < model_problem_count(); k++)
+        if (strstr(model_problem(k), "offroad.analog"))
+            break;
+    check(k == model_problem_count(),
+          "a cabinet's own choices are not reported as lines nothing shows");
+
+    /* Join from Offroad: its pad becomes everybody's. */
+    check(model_controls_join(), "join succeeds");
+    check(!model_controls_split(), "and the file is no longer split");
+    changed = -1;
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK,
+          "Apply after join succeeds");
+    check(doc_says("analog", "provider", "xinput"),
+          "the shown cabinet's controller is now the shared one");
+    check(!doc_has("offroad.analog", "provider") &&
+          !doc_has("hydro.analog.tmx", "dinput_throttle_axis") &&
+          !doc_has("offroad.analog.pad", "xinput_steering_axis"),
+          "every per-cabinet choice is commented out");
+    check(doc_says("analog.pad", "xinput_steering_axis", "rx"),
+          "the shown cabinet's axis is now the pad's shared one");
+    check(model_reopen(), "the joined file reads back");
+    model_load();
+    check(!model_controls_split(), "and reads as shared");
+    model_close();
+}
+
+static void test_per_cabinet_split_on(void)
+{
+    char path[MAX_PATH], why[512];
+    int changed = -1, i;
+
+    check(open_model("split-on.ini",
+            "[analog]\r\n"
+            "provider = auto\r\n",
+            path, sizeof path), "the scratch ini opened");
+    check(!model_controls_split(), "a file with no cabinet section is shared");
+    i = setting_find("analog", "provider");
+    snprintf(model_slot((unsigned)i), INI_VALUE_CAP, "%s", "dinput");
+    check(model_controls_split_on(), "split succeeds");
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK,
+          "Apply succeeds");
+    check(doc_says("hydro.analog", "provider", "dinput") &&
+          doc_says("offroad.analog", "provider", "dinput"),
+          "what the page held when it split is both cabinets' starting point, "
+          "and the provider in both is what makes the file read as split");
+    check(!doc_has("analog", "provider"),
+          "THE SELECTOR MOVES OUT OF [analog]: a copy left there is what a "
+          "cabinet that clears its own would fall through to");
+    check(model_reopen(), "the file reads back");
+    model_load();
+    check(model_controls_split(), "and it does");
+    model_close();
+
+    /* The cabinet shown survives a reload, as the launcher's tab does. */
+    model_controls_show(0);
+    check(open_model("hydro-own.ini",
+            "[analog]\r\n"
+            "provider = dinput\r\n"
+            "[hydro.analog]\r\n"
+            "provider = xinput\r\n"
+            "xinput_device = 1\r\n",
+            path, sizeof path), "the scratch ini opened");
+    check(!strcmp(model_value("analog", "provider"), "xinput") &&
+          !strcmp(model_value("analog", "xinput_device"), "1"),
+          "the cabinet shown at load reads its own choice, not the shared one");
+    model_controls_show(1);
+    check(!strcmp(model_value("analog", "provider"), "dinput") &&
+          !strcmp(model_value("analog", "xinput_device"), "0"),
+          "and the other cabinet falls through to [analog] and the default");
+    model_close();
+
+    check(open_model("fact-scoped.ini",
+            "[devices]\r\n"
+            "tmx = dinput:TMX\r\n"
+            "[hydro.analog.tmx]\r\n"
+            "dinput_throttle_invert = true\r\n",
+            path, sizeof path), "the scratch ini opened");
+    check(!model_controls_split(), "a fact is not a choice and splits nothing");
+    scan_ini_problems();
+    check(model_problem_count() == 0,
+          "a fact set for one cabinet is said by its own row "
+          "(setting_title_override), not twice");
+    model_close();
+
+    check(open_model("selector-under-label.ini",
+            "[devices]\r\n"
+            "tmx = dinput:TMX\r\n"
+            "[hydro.analog.tmx]\r\n"
+            "provider = xinput\r\n"
+            "[hydro.analog]\r\n"
+            "dinput_name =\r\n",
+            path, sizeof path), "the scratch ini opened");
+    check(!model_controls_split(),
+          "A SELECTOR UNDER A CONTROLLER'S LABEL IS READ BY NOTHING, and an "
+          "empty one is read as absent: neither splits the file");
+    scan_ini_problems();
+    check(model_problem_count() == 1 &&
+          strstr(model_problem(0), "chooses a controller") != NULL,
+          "the dead selector is listed on Help");
+    model_close();
+}
+
+/* The four review findings on the per-cabinet controls, one case each. */
+static void test_per_cabinet_review(void)
+{
+    char path[MAX_PATH], why[512], long_key[128], text[512];
+    int changed = -1, page = -1;
+
+    /* An emptied choice falls through to the default, in the game and here. */
+    model_controls_show(0);
+    check(open_model("empty-choice.ini",
+            "[analog]\r\n"
+            "provider = dinput\r\n"
+            "dinput_name = TMX\r\n",
+            path, sizeof path), "the scratch ini opened");
+    check(model_controls_split_on(), "split succeeds");
+    check(!doc_has("analog", "dinput_name") &&
+          doc_says("hydro.analog", "dinput_name", "TMX") &&
+          doc_says("offroad.analog", "dinput_name", "TMX"),
+          "the shared wheel name moved into both cabinets");
+    slot_set("dinput_name", "");
+    check(validate_settings(why, sizeof why, &page),
+          "an empty name with nothing shared under it is legal");
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK,
+          "Apply succeeds");
+    check(!doc_has("hydro.analog", "dinput_name"),
+          "AN EMPTIED CHOICE IS TAKEN OUT, NOT WRITTEN EMPTY: the host reads "
+          "`dinput_name =` as absent and falls through");
+    check(doc_says("offroad.analog", "dinput_name", "TMX"),
+          "and the other cabinet keeps its own");
+    check(model_reopen(), "the file reads back");
+    model_load();
+    check(!strcmp(model_value("analog", "dinput_name"), ""),
+          "Hydro shows the default the game will use");
+    model_close();
+
+    /* A hand-split file still sharing a name cannot express "none". */
+    model_controls_show(0);
+    check(open_model("empty-over-shared.ini",
+            "[analog]\r\n"
+            "dinput_name = TMX\r\n"
+            "[hydro.analog]\r\n"
+            "provider = dinput\r\n",
+            path, sizeof path), "the scratch ini opened");
+    check(!strcmp(model_value("analog", "dinput_name"), "TMX"),
+          "Hydro inherits the shared name");
+    slot_set("dinput_name", "");
+    check(!validate_settings(why, sizeof why, &page) &&
+          page == PAGE_CONTROLS && strstr(why, "Hydro Thunder") != NULL,
+          "CLEARING IT WOULD CHANGE NOTHING THE GAME READS, so Apply refuses "
+          "and says which game");
+    model_close();
+
+    /* The cabinet not shown is validated from the document. */
+    model_controls_show(0);
+    check(open_model("hidden-invalid.ini",
+            "[hydro.analog]\r\n"
+            "provider = xinput\r\n"
+            "[offroad.analog]\r\n"
+            "provider = xinput\r\n",
+            path, sizeof path), "the scratch ini opened");
+    slot_set("xinput_device", "9");
+    check(model_controls_show(1), "switch to Offroad");
+    check(!validate_settings(why, sizeof why, &page) &&
+          strstr(why, "Hydro Thunder") != NULL,
+          "A VALUE LEFT BEHIND ON THE OTHER TAB IS STILL VALIDATED, and the "
+          "message names that game");
+    model_close();
+
+    /* Join ends on a key it cannot classify the way it removes it. */
+    memset(long_key, 'a', 84);
+    snprintf(long_key + 84, sizeof long_key - 84, "_brake_axiszz");
+    snprintf(text, sizeof text,
+             "[hydro.analog]\r\nprovider = xinput\r\n%s = x\r\n",
+             long_key);
+    model_controls_show(0);
+    check(open_model("join-long-key.ini", text, path, sizeof path),
+          "the scratch ini opened");
+    check(model_controls_join(), "JOIN ENDS, whatever a key's length");
+    check(!doc_has("hydro.analog", "provider"), "and did its job");
+    model_close();
+}
+
 static void test_binding_save(void)
 {
     char path[MAX_PATH], why[512], *after;
@@ -741,42 +1042,141 @@ static void test_binding_save(void)
     model_close();
 }
 
-/* ---- the known-good copy -------------------------------------------------- */
-
-static void test_known_good_round_trip(void)
+/* A BINDING ROW AS TWO SLOTS: its inputs in order, keys first; a row rebuilt
+ * from them; and the restore behind Reset to defaults, which puts back what
+ * the row inherits and lets the save take the title's line out again. */
+static void test_binding_slots(void)
 {
-    char path[MAX_PATH], good[MAX_PATH], why[512], *text;
+    char path[MAX_PATH], why[512], *after;
+    binding_item_t row[8];
     int changed = -1;
 
-    check(open_model("good.ini", "[graphics]\r\nrender_scale = 2\r\n",
+    check(open_model("slots.ini",
+                     "[digital]\r\nview_high = B\r\n"
+                     "[hydro.digital]\r\nboost = SPACE\r\n",
                      path, sizeof path), "the scratch ini opened");
-    known_good_path(good, sizeof good);
-    check(strstr(good, ".good") != NULL, "the copy is named beside the ini");
-    DeleteFileA(good);
-    check(!model_known_good_exists(), "there is no copy yet");
 
-    seed_known_good();
-    check(model_known_good_exists(),
-          "the file as this window found it is seeded once");
+    check(model_binding_items(0, VCT_ACTION_view_high, row, 8) == 2,
+          "a key and a button are two inputs");
+    check(!row[0].pad && !strcmp(row[0].value, "B") && row[1].pad &&
+          !strcmp(row[1].value, "2"), "keys first, then buttons");
+    check(model_binding_is_default(0, VCT_ACTION_view_high),
+          "a row the title section does not mention is on its default");
+    model_binding_default(0, VCT_ACTION_view_high, 0, why, sizeof why);
+    check(!strcmp(why, "B"), "the shared section beats the table");
+    check(model_binding_items(0, VCT_ACTION_coin2, row, 8) == 1,
+          "a button 0 is not an input");
 
-    snprintf(model_slot((unsigned)setting_find("graphics", "render_scale")),
-             INI_VALUE_CAP, "%s", "8");
+    check(model_binding_default_items(0, VCT_ACTION_boost, row, 8) == 2 &&
+          !row[0].pad && !strcmp(row[0].value, "LCTRL") && row[1].pad &&
+          !strcmp(row[1].value, "1"),
+          "Backspace's default for a row its title section changed is the "
+          "table's, slot by slot");
+
+    check(!model_binding_is_default(0, VCT_ACTION_boost),
+          "a title line that differs is not the default");
+    row[0].pad = 0;
+    snprintf(row[0].value, sizeof row[0].value, "LCTRL");
+    row[1] = row[0];
+    snprintf(row[1].value, sizeof row[1].value, "SPACE");
+    check(model_binding_set_items(0, VCT_ACTION_boost, row, 2),
+          "two keys fit in two slots");
+    check(!strcmp(model_key_binding(0, VCT_ACTION_boost), "LCTRL, SPACE"),
+          "and are written as one keyboard list");
+    check(!strcmp(model_pad_binding(0, VCT_ACTION_boost), "0"),
+          "and the controller half with nothing in it is 0");
+
+    row[0].pad = 1;
+    snprintf(row[0].value, sizeof row[0].value, "th8:3");
+    check(!model_binding_set_items(0, VCT_ACTION_steer_left, row, 1),
+          "a button on a keys-only control is refused");
+    check(!strcmp(model_key_binding(0, VCT_ACTION_steer_left), "LEFT"),
+          "and the refusal changed nothing");
+
+    model_binding_restore(0, VCT_ACTION_boost);
+    check(!strcmp(model_key_binding(0, VCT_ACTION_boost), "LCTRL") &&
+          !strcmp(model_pad_binding(0, VCT_ACTION_boost), "1"),
+          "Default puts back the table's two halves");
+    check(model_binding_is_default(0, VCT_ACTION_boost),
+          "and the row then reads as default");
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK,
+          "saving the restored row succeeds");
+    after = read_bytes(path);
+    check(after && !strstr(after, "\nboost = SPACE"),
+          "the title's line is out: the file says nothing about the row");
+    check(after && strstr(after, "view_high = B") != NULL,
+          "and the shared line is left alone");
+    free(after);
+    model_close();
+}
+
+/* ONE ANSWER TO "IS THIS THE DEFAULT": a shared line spelled without spaces
+ * and the same list rebuilt by the slots with them are one value, to the
+ * Reset button and to Apply alike. */
+static void test_binding_default_spacing(void)
+{
+    char path[MAX_PATH], why[512], *after;
+    int changed = -1;
+
+    check(open_model("spacing.ini", "[digital]\r\nboost = LCTRL,SPACE\r\n",
+                     path, sizeof path), "the scratch ini opened");
+    snprintf(model_key_binding(0, VCT_ACTION_boost), MODEL_BINDING_CAP, "%s",
+             "LCTRL, SPACE");
+    check(model_binding_is_default(0, VCT_ACTION_boost),
+          "the respaced list is the inherited one");
     check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK &&
-          changed == 1, "the settings are changed and saved");
+          changed == 0, "and Apply has nothing to write for it");
+    after = read_bytes(path);
+    check(after && !strstr(after, "[hydro.digital]"),
+          "no title line pins what the shared line already says");
+    free(after);
+    model_close();
+}
 
-    check(model_known_good_restore(why, sizeof why),
-          "reverting puts the copy back");
+/* ---- restoring the defaults ---------------------------------------------- */
+
+/* RESTORE DEFAULTS WRITES THE SHIPPED INI WHOLE, and keeps the file it
+ * replaces under a name Apply never writes: it is the only way back. */
+static void test_defaults_restore(void)
+{
+    static const char shipped[] = "[graphics]\r\nwindow_scale = auto\r\n";
+    char path[MAX_PATH], other[MAX_PATH], why[512], *text;
+
+    check(open_model("defaults.ini", "[graphics]\r\nrender_scale = 3\r\n",
+                     path, sizeof path), "the scratch ini opened");
+
+    check(model_defaults_restore(shipped, sizeof shipped - 1, why, sizeof why),
+          "restoring the defaults succeeds");
+    text = read_bytes(path);
+    check(text && !strcmp(text, shipped),
+          "the ini is exactly the shipped bytes");
+    free(text);
     check(model_reopen(), "and the restored file reads back");
     model_load();
-    check(!strcmp(model_value("graphics", "render_scale"), "2"),
-          "the value from the known-good copy is what the model now holds");
+    check(!strcmp(model_value("graphics", "render_scale"), "1"),
+          "a key the shipped ini lacks is its default again");
 
-    snprintf(good, sizeof good, "%s.bak", path);
-    text = read_bytes(good);
-    check(text && strstr(text, "= 8") != NULL,
-          "AND THE FILE AS IT WAS IS KEPT AS .bak: a revert a user did not "
-          "mean has to be recoverable too");
+    snprintf(other, sizeof other, "%s" MODEL_RESTORE_SUFFIX, path);
+    text = read_bytes(other);
+    check(text && strstr(text, "render_scale = 3") != NULL,
+          "the file as it was is kept beside it");
     free(text);
+    /* AND AN APPLY AFTERWARDS DOES NOT TOUCH IT: Apply's own backup is .bak,
+     * and it would otherwise hold the defaults after the first one. */
+    snprintf(model_slot((unsigned)setting_find("graphics", "render_scale")),
+             INI_VALUE_CAP, "%s", "2");
+    {
+        int changed = 0;
+        check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK &&
+              changed == 1, "an Apply after the restore writes");
+    }
+    text = read_bytes(other);
+    check(text && strstr(text, "render_scale = 3") != NULL,
+          "and the user's own file is still there after it");
+    free(text);
+    snprintf(other, sizeof other, "%s.new", path);
+    check(GetFileAttributesA(other) == INVALID_FILE_ATTRIBUTES,
+          "no temporary file is left behind");
     model_close();
 }
 
@@ -784,6 +1184,97 @@ static void test_known_good_round_trip(void)
  * passes through, and a form that refuses what the host accepts cannot edit a
  * file somebody hand-wrote: a Pro DD's button 40 is visible in the live preview
  * and must not be rejected by the form beside it. */
+/* ---- the Bezel box -------------------------------------------------------- */
+
+static int count_of(const char *text, const char *needle)
+{
+    int n = 0;
+    const char *at = text;
+    while (at && (at = strstr(at, needle)) != NULL) {
+        n++;
+        at += strlen(needle);
+    }
+    return n;
+}
+
+static void test_bezel_rows(void)
+{
+    char path[MAX_PATH], why[256], art[MAX_PATH], dest[MAX_PATH], dir[MAX_PATH];
+    char value[INI_VALUE_CAP], shown[MAX_PATH], *text;
+    int changed = 0;
+
+    check(open_model("bezel.ini",
+            "[graphics]\r\n"
+            "widescreen = true\r\n"
+            "[hydro.graphics]\r\n"
+            "bezel = bezels/hydro.png\r\n",
+            path, sizeof path), "the bezel ini opened");
+    check(model_bezel_get(0, shown, sizeof shown) &&
+          !strcmp(shown, "bezels/hydro.png"),
+          "bezel: a cabinet's line is its row, on, naming its file");
+    check(!model_bezel_get(1, shown, sizeof shown) && !shown[0],
+          "bezel: a cabinet with no line and no file is off with no art");
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK && !changed,
+          "bezel: an untouched box writes nothing");
+
+    snprintf(art, sizeof art, "%s\\art.png", s_folder);
+    check(write_bytes(art, "the chosen art"), "bezel: scratch art written");
+    model_bezel_choose(1, art);
+    check(model_bezel_get(1, shown, sizeof shown) && !strcmp(shown, art),
+          "bezel: a choice is shown, and on, before Apply");
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK && changed == 1 &&
+          model_bezel_copied() == 1, "bezel: a choice is one key changed and one copy");
+    model_bezel_destination(1, dest, sizeof dest);
+    text = read_bytes(dest);
+    check(text && !strcmp(text, "the chosen art"),
+          "bezel: Apply copied the choice to bezels\\offroad.png");
+    free(text);
+    check(ini_doc_get(model_doc(), "offroad.graphics", "bezel", value,
+                      sizeof value) && !strcmp(value, "bezels/offroad.png"),
+          "bezel: the line names the copy, relative to the pack");
+
+    /* A new file under the line that already names its copy: no key, one copy. */
+    check(write_bytes(art, "newer art"), "bezel: scratch art rewritten");
+    model_bezel_choose(1, art);
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK && !changed &&
+          model_bezel_copied() == 1,
+          "bezel: replacing the art under an unchanged line is a copy, not a key");
+    text = read_bytes(dest);
+    check(text && !strcmp(text, "newer art"), "bezel: and the copy is the new art");
+    free(text);
+
+    model_bezel_set_enabled(0, 0);
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK && changed == 1 &&
+          ini_doc_get(model_doc(), "hydro.graphics", "bezel", value,
+                      sizeof value) && !_stricmp(value, "off"),
+          "bezel: turning a cabinet off writes off in its own section");
+    text = read_bytes(path);
+    check(text && count_of(text, "[hydro.graphics]") == 1 &&
+          count_of(text, "[offroad.graphics]") == 1,
+          "bezel: each cabinet's line goes in its one section");
+    free(text);
+
+    check(model_reopen(), "bezel: the saved file reopened");
+    model_load();
+    check(model_bezel_get(1, shown, sizeof shown) &&
+          !strcmp(shown, "bezels/offroad.png"), "bezel: the choice survives a reload");
+    model_bezel_set_enabled(1, 0);
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK && changed == 1,
+          "bezel: turning the other off saves");
+    check(model_reopen(), "bezel: reopened again");
+    model_load();
+    check(!model_bezel_get(1, shown, sizeof shown) &&
+          !strcmp(shown, "bezels/offroad.png"),
+          "bezel: art left off is still named, so it can be turned back on");
+    model_close();
+
+    DeleteFileA(dest);
+    snprintf(dir, sizeof dir, "%s", dest);
+    *strrchr(dir, '\\') = '\0';
+    RemoveDirectoryA(dir);
+    DeleteFileA(art);
+}
+
 int main(void)
 {
     char root[MAX_PATH];
@@ -799,13 +1290,19 @@ int main(void)
     test_validation_names_a_page();
     test_unsafe_video_mode();
     test_ini_problems();
+    test_bezel_rows();
     test_duplicate_keys();
     test_device_scope();
     test_device_labels();
     test_configured_device();
     test_save_writes_only_what_changed();
+    test_per_cabinet_controls();
+    test_per_cabinet_split_on();
+    test_per_cabinet_review();
     test_binding_save();
-    test_known_good_round_trip();
+    test_binding_slots();
+    test_binding_default_spacing();
+    test_defaults_restore();
 
     if (failures) {
         fprintf(stderr, "launcher model tests: %d failure(s)\n", failures);

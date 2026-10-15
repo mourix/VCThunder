@@ -14,8 +14,9 @@
 # under WOW64, and on ARM64 Windows under x86 emulation.
 #
 # make            build build/VCThunder.exe + build/VCThunder.dll
-# make defs       regenerate generated/ from the game binaries
-# make deps       fetch the pinned SDL3 development package
+# make defs       regenerate generated/ from the game binaries (maintainer only:
+#                 generated/ is committed, and building needs no game data)
+# make deps       fetch the pinned SDL3 SDK and the CHD importer's decoders
 # make pack       deliver the binaries into the run directory
 # (run/vcthunder/, inside this tree, always)
 # make clean
@@ -125,6 +126,8 @@ WS_SHIFT_TEST     := build/tests/ws-shift-test.exe
 NET_LINK_TEST     := build/tests/net-link-test.exe
 RUMBLE_TEST       := build/tests/rumble-model-test.exe
 BUTTON_TEST       := build/tests/button-mask-test.exe
+IMPORT_TEST       := build/tests/import-test.exe
+BEZEL_TEST        := build/tests/bezel-test.exe
 DI_ROLE_TEST      := build/tests/di-role-test.exe
 LAUNCHER_MODEL_TEST := build/tests/launcher-model-test.exe
 CONFIG_TEST       := build/tests/config-test.exe
@@ -247,8 +250,43 @@ $(VGL_DEF): renderer/api/entries.def Makefile
 	   echo "    vglInit@0 = vglInit@0"; \
 	   echo "    vglHealth@0 = vglHealth@0"; \
 	   echo "    vglBlackMargins@0 = vglBlackMargins@0"; \
+	   echo "    vglSpecBegin@0 = vglSpecBegin@0"; \
+	   echo "    vglSpecEnd@0 = vglSpecEnd@0"; \
+	   echo "    vglSetBezel@28 = vglSetBezel@28"; \
 	   echo "    _grLfbReadRegion@28 = grLfbReadRegion@28"; } > $@
-	@echo "generated $@ ($$(grep -c '^VGL_ENTRY' $<) game entry points + 4)"
+	@echo "generated $@ ($$(grep -c '^VGL_ENTRY' $<) game entry points + 7)"
+
+# THE CHD IMPORTER'S TWO THIRD-PARTY DECODERS, fetched by `make deps` like SDL3
+# and never committed: zlib's inflate (zlib licence) for a CHD's `zlib` hunks,
+# and 7-Zip's public-domain LzmaDec.c for its `lzma` hunks. Compiled as they
+# come, so their warnings are not ours to fix (-w), and at -O2: they are compute
+# code with no patched entry point. src/chd.c is the only file that includes
+# them.
+ZLIB_DIR := build/deps/zlib/zlib-1.3.2
+LZMA_DIR := build/deps/lzma/C
+DEC_SRC  := $(addprefix $(ZLIB_DIR)/,inflate.c inftrees.c inffast.c zutil.c \
+                                     adler32.c crc32.c) \
+            $(LZMA_DIR)/LzmaDec.c
+DEC_OBJ  := $(patsubst build/deps/%.c,build/obj/deps/%.o,$(DEC_SRC))
+DEC_HDR  := $(ZLIB_DIR)/zlib.h $(LZMA_DIR)/LzmaDec.h
+
+build/obj/deps/%.o: build/deps/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -std=gnu11 -O2 -g -w -msse2 -mfpmath=sse -c -o $@ $<
+
+build/obj/src/chd.o: CFLAGS += -O2 -fno-strict-aliasing -I$(ZLIB_DIR) -I$(LZMA_DIR)
+build/obj/src/chd.o: $(DEC_HDR)
+build/obj/src/bezel.o: CFLAGS += -O2 -I$(ZLIB_DIR)
+build/obj/src/bezel.o: $(DEC_HDR)
+
+$(DEC_HDR) $(DEC_SRC):
+	@echo "The CHD importer's decoders are missing: $@"
+	@echo
+	@echo "    make deps"
+	@echo
+	@echo "downloads the pinned zlib and LZMA sources into build/deps and checks"
+	@echo "their SHA-256."
+	@exit 1
 
 # Missing SDK: refuse by name, the way generated/ does, rather than leaving the
 # compiler to report a missing include. Nothing regenerates this file, so once
@@ -376,10 +414,9 @@ conformance-accept: conformance-frames
 	@cat $(CONF_GOLDEN)
 
 
-
 .PHONY: all check check-full defs deps pack pack-cfg pack-ini clean renderer tools ini-doc-test \
         launcher-model-test \
-        config-test round-trip-test emitter-test button-test di-role-test \
+        config-test round-trip-test emitter-test button-test di-role-test import-test bezel-test \
         FORCE \
         conformance conformance-frames conformance-accept widescreen-test net-link-test \
         probe-dll
@@ -406,7 +443,7 @@ renderer: $(VGL_DLL) $(SDL3_RUNTIME_OUT)
 tools: $(REPLAY)
 
 deps:
-	$(PYTHON) tools/fetch-sdl3.py --into $(SDL3_HOME)
+	$(PYTHON) tools/fetch-deps.py --into build/deps
 
 $(EXE): src/stub.c $(SPAN)
 	@mkdir -p $(dir $@)
@@ -426,9 +463,9 @@ $(EXE): src/stub.c $(SPAN)
 	@echo "built $@ (span-reserving stub, base 0x100000)"
 	@sha256sum $@
 
-$(DLL): $(DLL_OBJ) $(RES) $(SRC_LIST)
+$(DLL): $(DLL_OBJ) $(DEC_OBJ) $(RES) $(SRC_LIST)
 	@mkdir -p $(dir $@)
-	$(CC) $(DLL_LDFLAGS) -o $@ $(DLL_OBJ) $(RES) $(LIBS)
+	$(CC) $(DLL_LDFLAGS) -o $@ $(DLL_OBJ) $(DEC_OBJ) $(RES) $(LIBS)
 	@echo "built $@ (all logic, loaded outside the span)"
 	@sha256sum $@
 
@@ -490,7 +527,7 @@ build/obj/%.o: %.c src/vcthunder.h src/game.h $(SPAN)
 # sourceless. A new kind of object added without being added here would be
 # pruned on every build, which is noisy rather than silent, and that is the
 # intended failure.
-KEEP_OBJ := $(DLL_OBJ) $(VGL_OBJ) $(RES)
+KEEP_OBJ := $(DLL_OBJ) $(VGL_OBJ) $(DEC_OBJ) $(RES)
 
 FORCE:
 
@@ -513,14 +550,12 @@ $(SRC_LIST): FORCE
 # Deliberately ordered cheapest-first: the scan takes milliseconds and is the one
 # whose failure is unrecoverable once published.
 #
-# TWO OF THESE READ INPUTS THAT CANNOT CHANGE BETWEEN RUNS: verifying the CHDs
-# against their own checksums, and generated/ against the dumps. They dominate
-# the loop, so each records a key when it passes (tools/stamp.py) and re-reads
-# only when something it depends on has moved. The key is content for the
-# checker and its outputs, size+mtime for the gigabytes, which is a cache key
-# and not evidence, so the skip prints as a skip and `make check-full` ignores
-# every stamp. What each key covers is spelled out rather than derived:
-# forgetting an input here buys a stale pass.
+# A CHECK THAT RE-READS GIGABYTES WHICH CANNOT CHANGE BETWEEN RUNS records a key
+# when it passes (tools/stamp.py) and re-reads only when something it depends
+# on has moved. The key is content for the checker and its outputs, size+mtime
+# for the gigabytes, which is a cache key and not evidence, so the skip prints
+# as a skip and `make check-full` ignores every stamp. What each key covers is
+# spelled out rather than derived: forgetting an input here buys a stale pass.
 STAMPS := build/.stamps
 
 # generated/ is checked against the dumps by the generator, so the key is: the
@@ -531,26 +566,16 @@ GAMEDEFS_STAMP_IN = --hash $(wildcard scripts/*.py) renderer/api/entries.def \
                            $(wildcard generated/*) \
                     --stat $$($(PYTHON) scripts/titles.py --stamp-inputs)
 
-# The CHD reader against the CHDs, so: the reader, the module that finds them,
-# and every CHD found. A CHD appearing or vanishing moves the key, because
-# tools/stamp.py treats a missing file as a state rather than as nothing.
-CHD_STAMP_IN = --hash tools/chd.py tools/ingest-chd.py \
-               --stat $$($(PYTHON) tools/ingest-chd.py --list-chds 2>/dev/null)
-
-# CHECK_FORCE=1 ignores both stamps. `make check-full` is the spelling.
+# CHECK_FORCE=1 ignores every stamp. `make check-full` is the spelling.
 check-full:
 	@$(MAKE) --no-print-directory check CHECK_FORCE=1
 
 check:
 	@echo "== contraband scan =="
 	@$(PYTHON) tools/scan-contraband.py
-	@# EVERY PYTHON TOOL PARSES. The C is checked by being compiled; nothing
-	@# checked the Python until a tree-wide comment edit turned four blank
-	@# lines in tools/chd.py into a bare `,` and the ingest stopped importing.
-	@# It reached a staged public tree, because the one check that reads a CHD
-	@# SKIPS when there is no CHD to read, and a stranger's first command is
-	@# the one that broke. Parsing costs milliseconds and moves the finding to
-	@# the commit that broke it.
+	@# EVERY PYTHON TOOL PARSES. The C is checked by being compiled; a Python
+	@# tool whose own check SKIPS without game data would otherwise break
+	@# unseen. Parsing costs milliseconds.
 	@for f in tools/*.py scripts/*.py; do \
 	   $(PYTHON) -c "import ast,sys; ast.parse(open(sys.argv[1]).read())" $$f \
 	     || { echo "$$f does not parse"; exit 1; }; \
@@ -594,6 +619,12 @@ check:
 	@echo "== steering, gas and brake from different controllers =="
 	@$(MAKE) --no-print-directory di-role-test
 	@echo
+	@echo "== the CHD importer, on a disk built in memory =="
+	@$(MAKE) --no-print-directory import-test
+	@echo
+	@echo "== bezel art: PNG decoding, the screen hole, the layout =="
+	@$(MAKE) --no-print-directory bezel-test
+	@echo
 	@echo "== renderer conformance (synthetic capture, CPU reference) =="
 	@$(MAKE) --no-print-directory conformance
 	@echo
@@ -632,32 +663,7 @@ check:
 	    || { echo "x86len.py: DISAGREES with capstone; run it directly"; exit 1; }; \
 	fi
 	@echo
-	@echo "== the CHD reader against a CHD's own checksums =="
-	@# tools/chd.py replaced chdman at the front door, so it needs a check that
-	@# is not "the ingest worked". A CHD carries a CRC-16 per hunk and a SHA-1
-	@# of the whole image: --check reads the map, then a spread of hunks of
-	@# every codec the file actually uses, in seconds. --verify does the whole
-	@# disk and is minutes, so it stays a hand-run tool. No CHD is a real skip.
-	@# Looked for wherever the ingest itself looks, not just in chd/: on this
-	@# machine the CHDs sit beside the repository, and a check that skips where
-	@# the inputs actually are is a check that never runs.
-	@chdlist="$$($(PYTHON) tools/ingest-chd.py --list-chds 2>/dev/null)"; \
-	if [ -z "$$chdlist" ]; then \
-	  echo "SKIPPED: no CHD where the ingest looks, so there is nothing to"; \
-	  echo "         read. This check did NOT run."; \
-	elif [ -z "$(CHECK_FORCE)" ] && \
-	     when=$$($(PYTHON) tools/stamp.py check $(STAMPS)/chd $(CHD_STAMP_IN)); then \
-	  echo "NOT RE-READ: no CHD has moved since they passed at $$when."; \
-	  echo "             This is a cache, not a result: 'make check-full' reads them."; \
-	else \
-	  echo "$$chdlist" | while IFS= read -r c; do \
-	    $(PYTHON) tools/chd.py --check "$$c" || exit 1; \
-	  done || exit 1; \
-	  $(PYTHON) tools/stamp.py write $(STAMPS)/chd $(CHD_STAMP_IN); \
-	fi
-	@echo
 	@echo "all checks passed"
-
 
 # The document model and the value grammar, and nothing else: the test file
 # #includes both .c files directly.
@@ -753,7 +759,7 @@ probe-dll: $(PROBE_DLL)
 # game computed is tested against its own previous implementation, checked in
 # verbatim as tests/ws_shift_before.inc.
 $(WS_SHIFT_TEST): tests/widescreen_shift_test.c tests/ws_shift_before.inc \
-                  src/glide_bind.c src/vcthunder.h
+                  src/widescreen.c src/glide_int.h src/game.h src/vcthunder.h
 	@mkdir -p $(dir $@)
 	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -Isrc -Itests -o $@ $< -lkernel32
 
@@ -799,6 +805,30 @@ $(BUTTON_TEST): tests/button_mask_test.c src/io.h src/vcthunder.h
 button-test: $(BUTTON_TEST)
 	@./$(BUTTON_TEST)
 
+# The CHD importer's pieces with no game: a cabinet-shaped disk built in
+# memory through src/fat.c, hand-assembled FLAC frames, CRC-16's check value.
+$(IMPORT_TEST): tests/import_test.c src/chd.c src/chd.h src/fat.c src/fat.h \
+                $(DEC_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) -I$(ZLIB_DIR) -I$(LZMA_DIR) $(LDFLAGS_REPRO) -o $@ \
+	  tests/import_test.c src/chd.c src/fat.c $(DEC_OBJ) -lkernel32
+
+import-test: $(IMPORT_TEST)
+	@./$(IMPORT_TEST)
+
+# Bezel art with no game and no window: PNGs assembled in memory in every
+# colour type, depth and filter, the screen-hole finder, and the layout both
+# presenters share (renderer/core/layout.c, which depends on nothing).
+$(BEZEL_TEST): tests/bezel_test.c src/bezel.c src/bezel.h \
+               renderer/core/layout.c renderer/core/layout.h $(DEC_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) -I$(ZLIB_DIR) $(LDFLAGS_REPRO) -o $@ \
+	  tests/bezel_test.c src/bezel.c renderer/core/layout.c $(DEC_OBJ) \
+	  -lkernel32 -lm
+
+bezel-test: $(BEZEL_TEST)
+	@./$(BEZEL_TEST)
+
 # Which controller each axis role is read from, and what it reads when that
 # controller does not answer. src/di_role.c
 # holds no DirectInput on purpose, so this drives it with a fake slot table
@@ -827,8 +857,6 @@ di-role-test: $(DI_ROLE_TEST)
 setup:
 	@$(MAKE) --no-print-directory deps
 	@echo
-	@$(MAKE) --no-print-directory defs
-	@echo
 	@$(MAKE) --no-print-directory all
 	@echo
 	@$(MAKE) --no-print-directory pack
@@ -842,33 +870,14 @@ defs:
 	done
 	$(PYTHON) scripts/gen-gamedefs.py
 
-# generated/ is derived from the user's own game dump and is not committed, so a
-# fresh clone does not have it. Make's own message for that is "No rule to make
-# target 'generated/span.h'", which tells a newcomer nothing at all. Say what is
-# actually missing and how to get it.
-#
-# There is deliberately no dumpless fallback. span.h carries the address span the
-# stub reserves at link time; without a dump that number cannot be derived, and
-# inventing one would be a constant with no provenance in a project whose whole
-# discipline is that addresses are per-title DATA.
+# generated/ is committed: the per-title address tables, derived from the
+# registered dumps by `make defs` and checked against them by `make check`
+# wherever a dump is present. Building needs no game data. Missing files mean
+# an incomplete checkout, not a missing step, and make's own "No rule to make
+# target" would not say so.
 $(SPAN) generated/profiles.c:
-	@if $(PYTHON) scripts/titles.py --have-dumps > /dev/null 2>&1; then \
-	  echo "generated/ is missing: it holds the per-title address tables,"; \
-	  echo "built from YOUR dump. Your game data IS here, so this is one step:"; \
-	  echo; \
-	  echo "    make defs"; \
-	  echo; \
-	  echo "or 'make setup' to do that, build, and stage a run directory."; \
-	else \
-	  echo "No game data yet. This repository ships none and never will."; \
-	  echo; \
-	  echo "  1. put your own game CHDs in this folder, then:"; \
-	  echo "       $(PYTHON) tools/ingest-chd.py --auto"; \
-	  echo "  2. then:"; \
-	  echo "       make setup"; \
-	  echo; \
-	  echo "docs/building.md has the long version."; \
-	fi
+	@echo "generated/ is incomplete: it is part of the repository, so this"
+	@echo "checkout is damaged. 'git checkout -- generated' restores it."
 	@false
 
 # Deliver the binaries into the user's run directory: ONE pack holding both
@@ -905,7 +914,7 @@ pack: $(EXE) $(DLL) $(VGL_DLL) $(SDL3_RUNTIME_OUT)
 	    ! grep -q "^data_dir = data$$" $(PACKDIR)/vcthunder.ini 2>/dev/null; then \
 	  printf 'its game data is%s\n' "$$(grep '^data_dir = ' $(PACKDIR)/vcthunder.ini | cut -d= -f2-)"; \
 	elif [ ! -d $(PACKDIR)/data/hydro ] || [ ! -d $(PACKDIR)/data/offroad ]; then \
-	  echo "it needs both dumps: $(PACKDIR)/data/hydro/, $(PACKDIR)/data/offroad/"; \
+	  echo "import your games into it: put your .chd files in $(PACKDIR)/ and run VCThunder.exe"; \
 	fi
 	@echo "run it as:  VCThunder.exe (launcher) | VCThunder.exe hydro | VCThunder.exe offroad"
 

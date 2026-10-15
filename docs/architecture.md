@@ -3,7 +3,7 @@
 How VCThunder is put together, and why.
 
 There is no CPU emulation here. The game's x86 code executes natively. Everything below is about the
-*boundaries* that code reaches through. The OS, graphics library, hardware and how each is replaced.
+*boundaries* that code reaches through: the OS, the graphics library, the hardware, and how each is replaced.
 
 ---
 
@@ -101,7 +101,7 @@ calls `ExitProcess`.
 | Path | Role |
 |---|---|
 | `src/game.h`, `src/game.c` | The multi-title contract: the profile type, the active profile `G`, title selection. Read the header comment before touching any installer. |
-| `generated/` | **Generated from your own dump; never edited.** Image layout, named anchors, the Glide/`__imp__`/Win32/hardware tables, and the span. Produced by `scripts/gen-gamedefs.py`. |
+| `generated/` | **Generated from the registered dumps and committed; never edited.** Building needs no game data; `make check` compares it byte for byte with what a present dump produces. Image layout, named anchors, the Glide/`__imp__`/Win32/hardware tables, and the span. Produced by `scripts/gen-gamedefs.py`. |
 | `src/stub.c` | `VCThunder.exe`. Reserves the span via its own `SizeOfImage`, verifies the loader honoured it, hands off to the DLL. |
 | `src/launcher.c` | The native no-argument launcher: settings, per-title bindings, live device testing. Its settings model is `launcher_model.c` (no window in it, so a test reaches it), Add/Detect/Set up are `launcher_capture.c`, and the palette and fonts are `launcher_theme.c`. |
 | `src/loader.c` | Maps the span, copies CODE, calls `__pl_unpackrom`, enters the game. |
@@ -110,15 +110,17 @@ calls `ExitProcess`.
 | `src/stubs.c` | Stubs for every boundary that would execute a privileged instruction. Not optional: the first four things `_main` touches all reach hardware. |
 | `src/glide_bind.c` | Binds the Glide entry points onto the provider; owns the mode/surface decision and the frame-pacing reports. |
 | `src/widescreen.c` | The Hor+ engine: seam origin, widened frustum, and the title-scoped repair hooks. |
+| `src/drawreplay.c` | `frame_rate = 60`: a picture between each two game ticks, drawn by the game's own draw code on a copy of its state interpolated halfway between the two ticks and restored afterwards, so the simulation stays at 30 Hz. |
 | `src/io_*.c`, `src/diego.c` | The cabinet I/O boundary, split along a seam a real board or a traffic replayer can drop into. |
 | `src/dinput.c`, `src/input_probe.c` | DirectInput wheels and the game's own force passed to them; `input_probe.c` is the launcher's non-exclusive device census. XInput and WinMM are read in `io_host.c`. |
 | `src/ffb_events.c`, `src/rumble.c` | Pad rumble, the one effect this host derives: the game's own force-feedback cells, read rather than the summed DAC byte, turned into two motor levels. |
 | `src/audio.c`, `src/audio_offroad.c` | The shared WASAPI transport and each title's own audio backend. |
 | `src/timebase.c` | Makes a modern CPU look like a 333 MHz Celeron. Without it the game hangs forever in its own sleep. |
+| `src/chd.c`, `src/fat.c`, `src/ingest.c` | The CHD importer: reads a MAME CHD v5 and the cabinet disk's FAT partitions inside it, checks the executable against the supported build, and writes `data/<title>/`. The launcher and `VCThunder.exe import` both call it. |
 | `src/settings.def` | **The one settings table**: every key the host reads, expanded by both the config parser and the launcher. |
 | `renderer/` | **A separate module and a separate DLL**, sharing no source or header with `src/`. `core/` is portable C99; `win32/` holds the CPU presenter/worker pool and the SDL3 GPU backend. |
-| `tools/` | The CHD ingest front door, the conformance harness (`glide-replay.c` and its synthetic capture), the audits `make check` runs, and the build's helpers. |
-| `tests/` | The checks that are programs rather than scripts, each `#include`ing the `.c` files it covers: the INI document model, the configuration parser, every setting round-tripped launcher -> file -> host, the runtime code emitter, the widescreen primitive shift, the link over real sockets, the launcher's settings model, the derived pad rumble on a pinned timeline, and the 128-button mask. `make check` runs all nine. |
+| `tools/` | The conformance harness (`glide-replay.c` and its synthetic capture), the audits `make check` runs, and the build's helpers. |
+| `tests/` | The checks that are programs rather than scripts, each `#include`ing the `.c` files it covers: the INI document model, the configuration parser, every setting round-tripped launcher -> file -> host, the runtime code emitter, the widescreen primitive shift, the link over real sockets, the launcher's settings model, the derived pad rumble on a pinned timeline, the 128-button mask, steering, gas and brake from different controllers, and the CHD importer on a disk built in memory. `make check` runs all eleven. |
 
 ---
 

@@ -30,6 +30,13 @@ static IDirect3DDevice9 *s_dev;
 static IDirect3DTexture9 *s_tex;
 static int       s_tex_w, s_tex_h;
 static int       s_back_w, s_back_h;
+/* The bezel art, managed so a device Reset keeps it; `s_bezel_gen` is the
+ * vgl_bezel generation it holds and s_bezel_u/v the art's share of a texture
+ * padded to powers of two on a device that needs them. */
+static IDirect3DTexture9 *s_bezel_tex;
+static unsigned  s_bezel_gen, s_bezel_failed_gen;
+static float     s_bezel_u, s_bezel_v;
+static int       s_bezel_mips;
 
 static int d3d_open(void);
 
@@ -137,24 +144,6 @@ static void make_dpi_aware(void)
     }
 }
 
-/* Size the client from the visible raster, excluding padded surface columns. */
-static void size_to_raster(void)
-{
-    RECT r;
-
-    if (!s_wnd || !s_owns_window || s_rw <= 0 || s_rh <= 0)
-        return;
-    r.left = 0; r.top = 0;
-    r.right = s_rw * s_scale; r.bottom = s_rh * s_scale;
-    AdjustWindowRect(&r, VGL_WINDOW_STYLE, FALSE);
-    SetWindowPos(s_wnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top,
-                 SWP_NOMOVE | SWP_NOZORDER);
-    vgl_log(0, "present: raster %dx%d at %dx -> client %dx%d (surface %dx%d, "
-               "pad not presented, edge extension L%d T%d R%d B%d)",
-            s_rw, s_rh, s_scale, s_rw * s_scale, s_rh * s_scale, s_w, s_h,
-            s_vx0, s_vy0, s_rw - s_vx1, s_rh - s_vy1);
-}
-
 static LRESULT CALLBACK wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (msg == WM_CLOSE) {
@@ -240,7 +229,12 @@ int vgl_present_open(void *caller_window, int w, int h, int scale,
                    "nothing is displayed", GetLastError());
         return 0;
     }
-    size_to_raster();
+    /* The window is made at the raster's size and never resized here again:
+     * the host sizes it after every open (src/window.c, for its aspect or
+     * bezel), as it does the GPU backend's adopted window. */
+    vgl_log(0, "present: raster %dx%d at %dx (surface %dx%d, pad not presented, "
+               "edge extension L%d T%d R%d B%d)", s_rw, s_rh, s_scale, s_w, s_h,
+            s_vx0, s_vy0, s_rw - s_vx1, s_rh - s_vy1);
     s_dc = GetDC(s_wnd);
     if (d3d_open())
         vgl_log(0, "present: %dx%d XRGB8888 through Direct3D 9 (GPU bilinear) "
@@ -276,7 +270,6 @@ void vgl_present_raster(int x, int y, int w, int h,
     s_rx = x; s_ry = y; s_rw = w; s_rh = h;
     s_vx0 = valid_x0; s_vy0 = valid_y0;
     s_vx1 = valid_x1; s_vy1 = valid_y1;
-    size_to_raster();
 }
 
 /* Extend nearest drawn texels across the undrawn top/right raster margin only
@@ -311,16 +304,25 @@ static int borderless_fullscreen(void)
     return (style & WS_POPUP) != 0 && (style & WS_CAPTION) == 0;
 }
 
-static void destination_rect(int cw, int ch, RECT *out)
+/* The picture's rectangle, and when the bezel art is drawn (`ready`) the
+ * art's (`canvas`, may be NULL). Returns 1 when the art is to be drawn. */
+static int destination_rect(int cw, int ch, int ready, RECT *out, RECT *canvas)
 {
-    int x, y, w, h;
+    vgl_rect_t pic, art;
+    int bezel = vgl_present_layout(borderless_fullscreen(), s_rw, s_rh, cw, ch,
+                                   ready, &pic, &art);
 
-    vgl_destination_rect(borderless_fullscreen(), s_rw, s_rh, cw, ch,
-                         &x, &y, &w, &h);
-    out->left = x;
-    out->top = y;
-    out->right = x + w;
-    out->bottom = y + h;
+    out->left = pic.x;
+    out->top = pic.y;
+    out->right = pic.x + pic.w;
+    out->bottom = pic.y + pic.h;
+    if (canvas) {
+        canvas->left = art.x;
+        canvas->top = art.y;
+        canvas->right = art.x + art.w;
+        canvas->bottom = art.y + art.h;
+    }
+    return bezel;
 }
 
 static int pow2_at_least(int n)
@@ -329,6 +331,73 @@ static int pow2_at_least(int n)
     while (p < n && p < 16384)
         p <<= 1;
     return p;
+}
+
+static void d3d_drop_bezel(void)
+{
+    if (s_bezel_tex)
+        IDirect3DTexture9_Release(s_bezel_tex);
+    s_bezel_tex = NULL;
+    s_bezel_gen = 0;
+}
+
+/* The host's art as a texture, with its mips where the device takes a
+ * texture of the art's own size; otherwise level 0 alone in a power-of-two
+ * texture. Swizzled to A8R8G8B8, which is B G R A in memory. */
+static int d3d_bezel(void)
+{
+    D3DCAPS9 caps;
+    D3DLOCKED_RECT lock;
+    int pow2, tw, th, levels, k, x, y;
+
+    if (!vgl_bezel.levels)
+        return 0;
+    if (s_bezel_tex && s_bezel_gen == vgl_bezel.generation)
+        return 1;
+    if (s_bezel_failed_gen == vgl_bezel.generation)
+        return 0;               /* tried once for this art; not per frame */
+    d3d_drop_bezel();
+    s_bezel_failed_gen = vgl_bezel.generation;
+    if (FAILED(IDirect3DDevice9_GetDeviceCaps(s_dev, &caps)))
+        return 0;
+    pow2 = (caps.TextureCaps & D3DPTEXTURECAPS_POW2) != 0;
+    tw = pow2 ? pow2_at_least(vgl_bezel.w[0]) : vgl_bezel.w[0];
+    th = pow2 ? pow2_at_least(vgl_bezel.h[0]) : vgl_bezel.h[0];
+    if ((DWORD)tw > caps.MaxTextureWidth || (DWORD)th > caps.MaxTextureHeight) {
+        VGL_LOG_ONCE("present: the bezel art (%dx%d) exceeds this device's "
+                     "%lux%lu texture limit; presented without it",
+                     vgl_bezel.w[0], vgl_bezel.h[0],
+                     (unsigned long)caps.MaxTextureWidth,
+                     (unsigned long)caps.MaxTextureHeight);
+        return 0;
+    }
+    levels = pow2 ? 1 : vgl_bezel.levels;
+    if (FAILED(IDirect3DDevice9_CreateTexture(s_dev, (UINT)tw, (UINT)th,
+               (UINT)levels, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED,
+               &s_bezel_tex, NULL)))
+        return 0;
+    for (k = 0; k < levels; k++) {
+        if (FAILED(IDirect3DTexture9_LockRect(s_bezel_tex, (UINT)k, &lock,
+                                              NULL, 0))) {
+            d3d_drop_bezel();
+            return 0;
+        }
+        for (y = 0; y < vgl_bezel.h[k]; y++) {
+            const uint8_t *src = vgl_bezel.px[k] + (size_t)y * vgl_bezel.w[k] * 4;
+            uint8_t *dst = (uint8_t *)lock.pBits + (size_t)y * lock.Pitch;
+            for (x = 0; x < vgl_bezel.w[k]; x++, src += 4, dst += 4) {
+                dst[0] = src[2]; dst[1] = src[1];
+                dst[2] = src[0]; dst[3] = src[3];
+            }
+        }
+        IDirect3DTexture9_UnlockRect(s_bezel_tex, (UINT)k);
+    }
+    s_bezel_gen = vgl_bezel.generation;
+    s_bezel_failed_gen = 0;
+    s_bezel_u = (float)vgl_bezel.w[0] / (float)tw;
+    s_bezel_v = (float)vgl_bezel.h[0] / (float)th;
+    s_bezel_mips = levels > 1;
+    return 1;
 }
 
 static void d3d_drop_texture(void)
@@ -418,9 +487,9 @@ static int d3d_present(int cw, int ch)
 {
     struct vertex { float x, y, z, rhw, u, v; } q[4];
     D3DLOCKED_RECT lock;
-    RECT dst;
+    RECT dst, art;
     float l, t, r, b, u, v;
-    int y;
+    int y, bezel;
     HRESULT hr;
 
     if (!d3d_ready(cw, ch) || !d3d_texture())
@@ -433,7 +502,7 @@ static int d3d_present(int cw, int ch)
                s_rgb + (size_t)y * s_rw, (size_t)s_rw * 4);
     IDirect3DTexture9_UnlockRect(s_tex, 0);
 
-    destination_rect(cw, ch, &dst);
+    bezel = destination_rect(cw, ch, d3d_bezel(), &dst, &art);
     l = (float)dst.left - 0.5f;  t = (float)dst.top - 0.5f;
     r = (float)dst.right - 0.5f; b = (float)dst.bottom - 0.5f;
     u = (float)s_rw / (float)s_tex_w;
@@ -470,6 +539,29 @@ static int d3d_present(int cw, int ch)
     IDirect3DDevice9_SetFVF(s_dev, D3DFVF_XYZRHW | D3DFVF_TEX1);
     hr = IDirect3DDevice9_DrawPrimitiveUP(s_dev, D3DPT_TRIANGLESTRIP, 2,
                                           q, sizeof q[0]);
+    if (SUCCEEDED(hr) && bezel) {
+        /* The art over the picture: premultiplied, ONE / INVSRCALPHA. */
+        l = (float)art.left - 0.5f;  t = (float)art.top - 0.5f;
+        r = (float)art.right - 0.5f; b = (float)art.bottom - 0.5f;
+        q[0] = (struct vertex){ l, t, 0.0f, 1.0f, 0.0f,      0.0f      };
+        q[1] = (struct vertex){ r, t, 0.0f, 1.0f, s_bezel_u, 0.0f      };
+        q[2] = (struct vertex){ l, b, 0.0f, 1.0f, 0.0f,      s_bezel_v };
+        q[3] = (struct vertex){ r, b, 0.0f, 1.0f, s_bezel_u, s_bezel_v };
+        IDirect3DDevice9_SetRenderState(s_dev, D3DRS_ALPHABLENDENABLE, TRUE);
+        IDirect3DDevice9_SetRenderState(s_dev, D3DRS_SRCBLEND, D3DBLEND_ONE);
+        IDirect3DDevice9_SetRenderState(s_dev, D3DRS_DESTBLEND,
+                                        D3DBLEND_INVSRCALPHA);
+        IDirect3DDevice9_SetTextureStageState(s_dev, 0, D3DTSS_ALPHAOP,
+                                              D3DTOP_SELECTARG1);
+        IDirect3DDevice9_SetTextureStageState(s_dev, 0, D3DTSS_ALPHAARG1,
+                                              D3DTA_TEXTURE);
+        IDirect3DDevice9_SetSamplerState(s_dev, 0, D3DSAMP_MIPFILTER,
+            s_bezel_mips ? D3DTEXF_LINEAR : D3DTEXF_NONE);
+        IDirect3DDevice9_SetTexture(s_dev, 0,
+                                    (IDirect3DBaseTexture9 *)s_bezel_tex);
+        hr = IDirect3DDevice9_DrawPrimitiveUP(s_dev, D3DPT_TRIANGLESTRIP, 2,
+                                              q, sizeof q[0]);
+    }
     IDirect3DDevice9_EndScene(s_dev);
     if (FAILED(hr))
         return 0;
@@ -526,7 +618,7 @@ void vgl_present_frame(const uint32_t *buf, int w, int h, int swap_interval)
     if (!GetClientRect(s_wnd, &rc) || rc.right <= 0 || rc.bottom <= 0)
         return;
     if (!d3d_present(rc.right, rc.bottom)) {
-        destination_rect(rc.right, rc.bottom, &dst);
+        destination_rect(rc.right, rc.bottom, 0, &dst, NULL);
         PatBlt(s_dc, 0, 0, rc.right, rc.bottom, BLACKNESS);
         SetStretchBltMode(s_dc, HALFTONE);
         SetBrushOrgEx(s_dc, 0, 0, NULL);
@@ -560,6 +652,8 @@ void vgl_present_pump(void)
 void vgl_present_close(void)
 {
     d3d_drop_texture();
+    d3d_drop_bezel();
+    s_bezel_failed_gen = 0;
     if (s_dev)
         IDirect3DDevice9_Release(s_dev);
     if (s_d3d)

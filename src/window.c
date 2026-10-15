@@ -8,6 +8,7 @@
  */
 #include "vcthunder.h"
 #include "resource.h"
+#include "bezel.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -444,10 +445,28 @@ int aspect_is_16_9(const char *aspect)
     return _stricmp(aspect, "16:9") == 0;
 }
 
+static int s_bezel_w, s_bezel_h, s_bezel_hole_h;
+
+void window_set_bezel(int art_w, int art_h, int hole_h)
+{
+    if (art_w <= 0 || art_h <= 0 || hole_h <= 0)
+        art_w = art_h = hole_h = 0;
+    s_bezel_w = art_w;
+    s_bezel_h = art_h;
+    s_bezel_hole_h = hole_h;
+}
+
 /* Compute client size from the visible raster and requested aspect. Preserve
- * an integer raster-height multiple for non-stretch windowed modes. */
+ * an integer raster-height multiple for non-stretch windowed modes. Under
+ * bezel art the client is the art's shape and its screen hole is the raster's
+ * height at this scale; the provider places the picture in it. */
 static void client_size_for(int scale, int *w, int *h)
 {
+    if (s_bezel_hole_h) {
+        bezel_client_size(s_bezel_w, s_bezel_h, s_bezel_hole_h, s_view_h,
+                          scale, w, h);
+        return;
+    }
     *h = s_view_h * scale;
     if (aspect_is_4_3(g_cfg.aspect))
         *w = (*h * 4 + 1) / 3;          /* the cabinet monitor's 4:3 */

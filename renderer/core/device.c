@@ -914,35 +914,48 @@ static void pipeline_save(vgl_pipeline_state_t *s)
 #define PIPE_LOAD_SCALAR(type, name)    vgl.name = s->name;
 #define PIPE_LOAD_ARRAY(type, name, n)  memcpy(vgl.name, s->name, sizeof vgl.name);
 
-/* A texture unit carries five members that belong to THIS session rather than
- * to the saved state: the memory it was given, its extent, the addresses the
- * game was told, and the generation the caches key on. Restoring a snapshot
- * must not roll any of them back; a state saved before a texture upload would
+/* A texture unit carries members that belong to THIS session rather than to
+ * the saved state: the memory it was given, its extent, the addresses the game
+ * was told, and the two generations the caches key on. Restoring a snapshot
+ * must not roll a generation back; a state saved before a texture upload would
  * otherwise hand the unit a stale mem_ver and the GPU would keep a texture the
- * game has already replaced. They are read out before the copy and put back
- * after it. */
+ * game has already replaced, and a stale pal_ver would let the GPU's palette
+ * key answer for a palette it saw under that number since. The palette itself
+ * is restored, so pal_ver moves on past the live one when the restore changes
+ * it, and the decode tables restored with it are current only if they were
+ * current in the snapshot. */
 static void pipeline_restore(const vgl_pipeline_state_t *s)
 {
-    struct { uint8_t *mem; uint32_t bytes, lo, hi; unsigned ver; }
+    struct { uint8_t *mem; uint32_t bytes, lo, hi; unsigned ver, pal_ver; }
         live[VGL_TMUS];
     int t;
 
     for (t = 0; t < VGL_TMUS; t++) {
-        live[t].mem   = vgl.tmu[t].mem;
-        live[t].bytes = vgl.tmu[t].mem_bytes;
-        live[t].lo    = vgl.tmu[t].min_addr;
-        live[t].hi    = vgl.tmu[t].max_addr;
-        live[t].ver   = vgl.tmu[t].mem_ver;
+        const vgl_tmu_t *u = &vgl.tmu[t], *was = &s->tmu[t];
+
+        live[t].mem     = u->mem;
+        live[t].bytes   = u->mem_bytes;
+        live[t].lo      = u->min_addr;
+        live[t].hi      = u->max_addr;
+        live[t].ver     = u->mem_ver;
+        live[t].pal_ver = u->pal_ver +
+            (u->palette_valid != was->palette_valid ||
+             memcmp(u->palette, was->palette, sizeof u->palette) != 0);
     }
 
     VGL_PIPELINE_MEMBERS(PIPE_LOAD_SCALAR, PIPE_LOAD_ARRAY)
 
     for (t = 0; t < VGL_TMUS; t++) {
-        vgl.tmu[t].mem       = live[t].mem;
-        vgl.tmu[t].mem_bytes = live[t].bytes;
-        vgl.tmu[t].min_addr  = live[t].lo;
-        vgl.tmu[t].max_addr  = live[t].hi;
-        vgl.tmu[t].mem_ver   = live[t].ver;
+        vgl_tmu_t *u = &vgl.tmu[t];
+        int tables_current = u->lut_pal_ver == u->pal_ver;
+
+        u->mem         = live[t].mem;
+        u->mem_bytes   = live[t].bytes;
+        u->min_addr    = live[t].lo;
+        u->max_addr    = live[t].hi;
+        u->mem_ver     = live[t].ver;
+        u->pal_ver     = live[t].pal_ver;
+        u->lut_pal_ver = tables_current ? u->pal_ver : u->pal_ver - 1u;
     }
 }
 

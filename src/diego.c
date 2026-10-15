@@ -446,8 +446,10 @@ static DWORD WINAPI poll_thread(LPVOID arg)
                 /* The fallback decoder executes game code as the UART interrupt
                  * and must honour the emulated interrupt-disable depth. */
                 game_thread_seen("the board's packet decoder");
+                game_side_thread_enter();
                 decode_frame(1);
                 dispatch_game_callbacks(1);
+                game_side_thread_leave();
             }
             SetEvent(s_poll_idle);
         }

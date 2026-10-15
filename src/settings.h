@@ -31,6 +31,21 @@ enum {
     PAGE_COUNT
 };
 
+/* A box of rows on one page, with its own outline and heading. A row's SHOW
+ * names either a bare page, which puts it in that page's one untitled box, or
+ * one of these, which carries its page in the low byte. Rows of a box are
+ * consecutive in settings.def; the launcher draws a box per run of them. */
+#define VCT_GROUP(page, n)    ((n) << 8 | (page))
+#define VCT_GROUP_PAGE(where) ((where) & 0xff)
+#define VCT_GROUP_ID(where)   ((where) >> 8)
+enum {
+    GROUP_GFX_DISPLAY    = VCT_GROUP(PAGE_GRAPHICS, 1),
+    GROUP_GFX_PICTURE    = VCT_GROUP(PAGE_GRAPHICS, 2),
+    GROUP_GFX_WIDESCREEN = VCT_GROUP(PAGE_GRAPHICS, 3),
+    GROUP_GFX_CABINET    = VCT_GROUP(PAGE_GRAPHICS, 4),
+    GROUP_COUNT          = 5            /* group ids 0..4; 0 is untitled */
+};
+
 /* What the launcher puts on screen for this key. */
 typedef enum {
     ST_TEXT,
@@ -70,7 +85,18 @@ enum {
     /* An SF_AXIS row whose value may name another controller, `twcs:z`
      * (vct_axis_choice_ok()). DirectInput's three roles only: the XInput and
      * WinMM readers take one device. */
-    SF_AXIS_REF  = 1 << 9
+    SF_AXIS_REF  = 1 << 9,
+    /* An ST_ENUM whose first choice is "off": a checkbox until advanced
+     * settings are shown, then the full dropdown. Ticking it writes the
+     * row's default, so the default must not be the first choice. */
+    SF_TOGGLE    = 1 << 10,
+    /* A NUMBER SET BY DRAGGING, not typed: a slider over [minimum, maximum]
+     * with the value beside it and a mark at the default. Only for a range a
+     * slider can hold at one-unit steps; wide technical ranges stay typed. */
+    SF_SLIDER    = 1 << 11,
+    /* The slider's value reads as a percentage, so the label carries no
+     * "(%)". */
+    SF_PERCENT   = 1 << 12
 };
 
 /* How config.c stores this key, which is a different question from how the
@@ -96,9 +122,9 @@ typedef enum {
  * the value lands in shim_config_t, how to parse it, what it must satisfy. It
  * also builds config_defaults() by feeding each `fallback` through the same
  * parser the ini goes through, so a default that cannot be spelled in the file
- * cannot exist. launcher.c takes the SHOW half: page, label, control type, help
- * and warning. tools/check-launcher-settings.py holds the table to the shipped
- * ini. */
+ * cannot exist. launcher.c takes the SHOW half: page and box, label, control
+ * type, help and warning. tools/check-launcher-settings.py holds the table to
+ * the shipped ini. */
 typedef struct {
     const char *section, *key;
 
@@ -116,6 +142,7 @@ typedef struct {
     unsigned        flags;
     warning_level_t warning;
     const char     *help;
+    int             group;              /* 0, or VCT_GROUP_ID() of its box   */
 } setting_desc_t;
 
 /* The two halves of a settings.def row. Both expand identically for every
@@ -132,13 +159,14 @@ typedef struct {
     VCT_STORE_NONE, 0u, 0u, dflt, choice_list,                               \
     (unsigned long)(lo), (unsigned long)(hi)
 
-#define SHOW(page_id, label, ctrl, flags, warning, help)                     \
-    page_id, label, ctrl, flags, warning, help
+#define SHOW(where, label, ctrl, flags, warning, help)                       \
+    VCT_GROUP_PAGE(where), label, ctrl, flags, warning, help,                \
+    VCT_GROUP_ID(where)
 
 /* A developer switch: parsed wherever it is found, shown nowhere, and absent
  * from the shipped ini on purpose (docs/configuration.md §6). */
 #define SHOW_NEVER                                                           \
-    -1, NULL, ST_TEXT, SF_HIDDEN, WARNING_NONE, NULL
+    -1, NULL, ST_TEXT, SF_HIDDEN, WARNING_NONE, NULL, 0
 
 /* Every entry, then every entry the launcher shows. Counted here so the
  * launcher's parallel value array can be a fixed-size static. */

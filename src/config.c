@@ -82,26 +82,34 @@ static DWORD s_unreadable_error;
  *
  * It says nothing HERE, because the log is not open yet; both outcomes are
  * notes for config_report_notes(). */
-int config_seed_ini(const char *path)
+int config_default_ini(const void **data, unsigned long *size)
 {
     HMODULE self = NULL;
     HRSRC found;
     HGLOBAL loaded;
-    const void *data;
-    HANDLE file;
-    DWORD size, wrote;
 
     if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                            (LPCSTR)(void *)&config_seed_ini, &self))
+                            (LPCSTR)(void *)&config_default_ini, &self))
         return 0;
     found = FindResourceA(self, MAKEINTRESOURCEA(IDR_DEFAULT_INI), RT_RCDATA);
     if (!found)
         return 0;
-    size = SizeofResource(self, found);
+    *size = SizeofResource(self, found);
     loaded = LoadResource(self, found);
-    if (!size || !loaded || !(data = LockResource(loaded)))
+    return *size && loaded && (*data = LockResource(loaded)) != NULL;
+}
+
+int config_seed_ini(const char *path)
+{
+    const void *data;
+    HANDLE file;
+    DWORD size, wrote;
+    unsigned long length;
+
+    if (!config_default_ini(&data, &length))
         return 0;
+    size = (DWORD)length;
     file = CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_NEW,
                        FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) {
