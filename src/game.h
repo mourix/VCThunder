@@ -194,6 +194,60 @@ typedef struct game_profile {
      * on the way in and changes nothing. */
     uint32_t ffb_hit_fn, hook_ffb_hit;
 
+    /* ---- the select screens (menu_wheel.c), read only ---- */
+    /* Which select screen is up, the item it has, and where that item sits on
+     * the wheel. The screens read the steering as a POSITION through one field
+     * of menu_steer, per screen (menu_sel_field, menu_ini_field). Hydro's two
+     * lists are items with a band [lo,hi] and an index word, sub-screens in
+     * states_a are tracks and in states_b boats. Offroad's select screens are
+     * one list with a count, a target and a filtered position; its notch is
+     * what the motor is told to hold. Initials are entering while
+     * menu_ini_state compares to menu_ini_state_want as menu_ini_state_kind
+     * says (1 ==, 2 !=) and menu_ini_gate holds menu_ini_gate_want. */
+    uint32_t menu_steer, menu_sel_active, menu_sel_sub;
+    uint32_t menu_sel_cur_a, menu_sel_cur_b;
+    uint32_t menu_sel_states_a, menu_sel_states_b, menu_sel_field;
+    uint32_t menu_item_index;
+    uint32_t menu_band_a_lo, menu_band_a_hi, menu_band_b_lo, menu_band_b_hi;
+    uint32_t menu_sel_index, menu_sel_target, menu_sel_count;
+    uint32_t menu_sel_filtered, menu_sel_enabled, menu_notch;
+    uint32_t menu_ini_state, menu_ini_state_want, menu_ini_state_kind;
+    uint32_t menu_ini_gate, menu_ini_gate_want, menu_ini_slot;
+    uint32_t menu_ini_wheel, menu_ini_field;
+    /* Hydro's two lists whole, so every item's band can be read: item i is
+     * menu_list_x + i * menu_stride_x, of menu_count_x, and the list steps
+     * only while menu_sel_enable is set. A list whose bit is in
+     * menu_avail_lists skips items whose byte at menu_avail_a is 0. */
+    uint32_t menu_sel_enable;
+    uint32_t menu_list_a, menu_stride_a, menu_count_a;
+    uint32_t menu_list_b, menu_stride_b, menu_count_b;
+    uint32_t menu_avail_a, menu_avail_lists;
+    /* Hydro's initials slot formula: the letters entered (menu_ini_count) and
+     * how many there are, the addresses of its six float constants in the
+     * order the game uses them, its last slot, and the two slots offered
+     * once every letter is in. */
+    uint32_t menu_ini_count, menu_ini_letters;
+    uint32_t menu_ini_k_off, menu_ini_k_scale, menu_ini_k_inv;
+    uint32_t menu_ini_k_bins, menu_ini_k_hyst, menu_ini_k_split;
+    uint32_t menu_ini_slot_max, menu_ini_end_lo, menu_ini_end_hi;
+    /* Offroad's select screens: the index is the floor of the count times a
+     * position that settles on (field - off) * scale (float constants at
+     * menu_sel_k_*). On the states in menu_remap_x_states the screen then
+     * moves it to the nearest enabled item of list menu_remap_x: item i is
+     * enabled when its byte at menu_en_flag_off + i * menu_en_stride has a
+     * bit of menu_en_flag_mask and its word at menu_en_lock_off + i *
+     * menu_en_stride is 0. */
+    uint32_t menu_sel_k_off, menu_sel_k_scale;
+    uint32_t menu_remap_a, menu_remap_a_states, menu_remap_b,
+             menu_remap_b_states;
+    uint32_t menu_en_count_off, menu_en_flag_off, menu_en_flag_mask,
+             menu_en_lock_off, menu_en_stride;
+    /* Offroad's letter wheel: letter = top - round(wheel * k_n); past k_snap
+     * the wheel turns, at its slowest below k_slow; rate_sign is +1 when
+     * steering right raises the letter (stored as a uint32_t). */
+    uint32_t menu_ini_k_n, menu_ini_top, menu_ini_rate_sign;
+    uint32_t menu_ini_k_snap, menu_ini_k_slow;
+
     /* ---- non-volatile storage (Hydro: _wrs_* raw sectors) ---- */
     uint32_t wrs_module_init, wrs_init, wrs_read_block, wrs_write_block;
     uint32_t wrs_enter_write, wrs_exit_write;
@@ -300,13 +354,14 @@ extern const game_profile_t *g_game;
 /* Every profile linked into this build, NULL-terminated. */
 extern const game_profile_t *const g_profiles[];
 
-/* A hard disk MAME lists for one of these titles, from scripts/titles.py's
+/* A hard disk MAME lists for any title this host runs, from scripts/titles.py's
  * MAME_DISKS. A label for the importer, never the gate: the build is decided
  * by the executable's hash. SHA-1s are lowercase hex as the CHD header holds
- * them; the list ends with set == NULL. */
+ * them; the list ends with set == NULL. exe_sha256 is "" for a disk that
+ * holds nothing the import can use, listed so the refusal can say so. */
 typedef struct {
     const char *set, *chd, *name;
-    const game_profile_t *title;
+    const char *title;              /* the title's id: Arctic has no profile */
     const char *sha1, *rawsha1, *exe_sha256;
 } game_mame_disk_t;
 extern const game_mame_disk_t g_mame_disks[];

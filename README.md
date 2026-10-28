@@ -1,6 +1,6 @@
 # VCThunder
 
-**VCThunder** is a Midway Quicksilver II Windows host for **Hydro Thunder** (1999) and **Offroad Thunder** (2000).
+**VCThunder** is a Midway Quicksilver II Windows host for **Hydro Thunder** (1999) and **Offroad Thunder** (2000), and Midway Graphite host for **Arctic Thunder** (2001) and **Ultimate Arctic Thunder** (2004).
 
 VCThunder is **not an emulator.** The original 32-bit x86 game code runs natively on your CPU, in-process, unmodified. What VCThunder replaces is everything *around* that code:
 the Phar Lap ETS kernel becomes real Win32, the Glide 2.53 boundary becomes our own rasteriser, and the cabinet's I/O boards, audio hardware, timebase and NVRAM become host implementations.
@@ -20,7 +20,8 @@ and run it, and it imports each game that is not there yet. A `.chd` kept elsewh
 the game straight out of the CHD, checks it is a build it supports (below) before writing
 anything, and puts it in the folder beside it. A few seconds later **Play** lights up.
 
-`README.txt` in the download says the same, plus how to update and where the log is.
+**Ultimate Arctic Thunder** comes from its update CD (`040503_1309.chd`, or its `.cue`/`.bin`),
+which is laid over Arctic Thunder, so have Arctic Thunder's CHD too.
 
 ## Building from source
 
@@ -43,25 +44,29 @@ its pinned SHA-256, builds the host, and writes a pack into `run/vcthunder/`.
 
 ## Supported builds
 
-Every address VCThunder patches is an offset into one exact executable. This host supports exactly two files:
+Every address VCThunder patches is an offset into one exact executable. This host supports exactly four files:
 
 | Title | Build | SHA-256 of the executable |
 |---|---|---|
 | Hydro Thunder | v01.01b, 1999-02-27 | `a421f5fd4ee0d90f57815975d4a47bb784f2b46d48085e42b422605a029f8e3f` |
 | Offroad Thunder | 2000-02-25 | `fa739d0f1a80c6e429ca73fdee04c3d6d6325bb95848cb701114f74bf2a5e9bf` |
+| Arctic Thunder | v1.002, 2000-12-18 (`snow.exe`) | `de69623f143a200eee50bb0fde3a7c9d106ff659b55cd02ab67e4e7890763b28` |
+| Ultimate Arctic Thunder | v1.9.5.0, 2004-05-03 (`snow.exe`) | `e2ba002abb585079553df678fe8183bd3324598bf4045ad06479c4eafa4dd894` |
 
 The import checks the executable inside a CHD against these before it writes anything, and says which build you have.
 
 ## State
 
-**V0.3**, the third public beta release: the first with a download that needs no building.
+**V0.4**, the fourth public beta release: the first with Arctic Thunder and Ultimate Arctic Thunder.
 
-**Both titles playable**: gameplay, controls, audio, NVRAM, windowing, force feedback, and I/O, at a locked 30 fps.
+**Hydro and Offroad playable**: gameplay, controls, audio, NVRAM, windowing, force feedback, and I/O, at a locked 30 fps. **Both Arctic Thunders run at their own 60 fps** and race on keyboard and pad; they are newer here than the other two.
 
 | Title | Released | I/O board | State |
 |---|---|---|---|
 | **Hydro Thunder** | 1999 | Diego | Playable |
 | **Offroad Thunder** | 2000 | MagicBus | Playable |
+| **Arctic Thunder** | 2001 | (Windows 2000 PC) | In progress |
+| **Ultimate Arctic Thunder** | 2004 | (Windows 2000 PC) | In progress |
 
 Link play is an early beta: **only two instances on one machine have ever been linked.** That's it.
 
@@ -87,4 +92,4 @@ Three pieces of other people's work are built in, none of them committed here: `
 
 A release's `THIRD-PARTY.txt` carries each notice.
 
-Hydro Thunder, Offroad Thunder, Midway and 3dfx marks belong to their respective owners. This project is unaffiliated with them and exists for preservation and for interoperability with hardware its users own.
+Hydro Thunder, Offroad Thunder, Arctic Thunder, Midway and 3dfx marks belong to their respective owners. This project is unaffiliated with them and exists for preservation and for interoperability with hardware its users own.

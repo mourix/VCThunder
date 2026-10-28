@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.4
+
+### Arctic Thunder
+
+- **The third title.** Import it from MAME's `arctthnd` CHD like the other two; it runs from
+  the launcher or as `VCThunder.exe arctic`.
+- **Widescreen, HUD at the edges and pad rumble**.
+
+### Ultimate Arctic Thunder
+
+- **The fourth title.** Import its update CD (MAME's `040503_1309` CHD, or a `.cue`/`.bin`); it is
+  laid over Arctic Thunder. It has its own Play card and needs no cabinet key.
+- **Widescreen, HUD at the edges and pad rumble**.
+
+### Controls
+
+- **Select screens from the keyboard and a pad.** The arrow keys, the D-pad, a stick and LB/RB
+  move one item a press on the track, boat, truck, driver and initials screens, and the choice
+  stays put. A wheel takes the screen back when turned. `[analog] menu_wheel = off` restores the
+  old behaviour. See `docs/configuration.md` §4.1.
+
+### Launcher
+
+- **Graphics page**: a table shows what each game gets.
+- **Force feedback and rumble per game**: the *Force Feedback* page has the same game row as
+  *Controls*, and each game keeps its own strength and rumble settings.
+- **Works with the keyboard and a controller.** Tab reaches every control on every page; the
+  D-pad moves, A presses, B goes back, LB/RB change page and Start plays the selected game.
+  Escape closes the launcher. See `docs/configuration.md` §1.1.
+
+### Performance
+
+- **Processors with performance and efficiency cores** (Intel 12th generation and later): the game
+  runs on the performance cores, automatically.
+- **The CPU renderer uses only the cores it is allowed**, so `start /affinity` no longer slows it
+  down.
+
 ## 0.3
 
 ### Download and play
@@ -97,16 +134,6 @@
 - **A warning when the pack is on a WSL path** (`\\wsl.localhost\...`), where Windows cannot read
   the ini and controller and force-feedback settings silently fell back to their defaults.
 - **`make pack` copies the game data into the pack.**
-
-### Upgrading from 0.1
-
-These 0.1 settings were removed with no conversion. An ini that still uses them loses them:
-
-| 0.1 | 0.2 |
-|---|---|
-| `[analog] dinput_device` | `[analog] dinput_name`, or pick the controller on the launcher's Controls page |
-| `[audio] dcs_ms` | `[audio] dcs_us`, default `5400` |
-| `[ffb] invert` | `[ffb] direction = normal` or `reversed` |
 
 ## 0.1
 

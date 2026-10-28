@@ -23,8 +23,8 @@
 #define IDR_DEFAULT_INI 102
 
 #define VCT_VERSION_MAJOR 0
-#define VCT_VERSION_MINOR 3
-#define VCT_VERSION       "0.3"
+#define VCT_VERSION_MINOR 4
+#define VCT_VERSION       "0.4"
 /* Where the source, the releases and the issue tracker are; the launcher's
  * About links here. */
 #define VCT_REPO_URL      "https://github.com/mourix/VCThunder"

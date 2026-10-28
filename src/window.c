@@ -456,6 +456,14 @@ void window_set_bezel(int art_w, int art_h, int hole_h)
     s_bezel_hole_h = hole_h;
 }
 
+int window_bezel(int *art_w, int *art_h, int *hole_h)
+{
+    *art_w = s_bezel_w;
+    *art_h = s_bezel_h;
+    *hole_h = s_bezel_hole_h;
+    return s_bezel_hole_h != 0;
+}
+
 /* Compute client size from the visible raster and requested aspect. Preserve
  * an integer raster-height multiple for non-stretch windowed modes. Under
  * bezel art the client is the art's shape and its screen hole is the raster's

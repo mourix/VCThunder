@@ -96,6 +96,94 @@ static int physical_cores(const SYSTEM_INFO *si)
     return cores;
 }
 
+/* ...of which, the ones this process may run on. Rows are split evenly and a
+ * job waits for its slowest worker, so a pool that counts a core the process
+ * cannot use, or one it has been steered off (the host gives a hybrid
+ * processor's fastest efficiency class as the default CPU set, src/cpu.c),
+ * only adds a straggler. 0 when the CPU set API is missing or says nothing. */
+typedef BOOL (WINAPI *get_sets_fn)(PSYSTEM_CPU_SET_INFORMATION, ULONG, PULONG,
+                                   HANDLE, ULONG);
+typedef BOOL (WINAPI *get_default_fn)(HANDLE, PULONG, ULONG, PULONG);
+
+typedef struct {
+    const ULONG *ids;           /* the process default CPU set; none = all */
+    ULONG        nids;
+    DWORD_PTR    affinity;      /* 0 = not narrowed */
+} cpu_filter_t;
+
+#define CPU_SET_NEXT(e) \
+    ((SYSTEM_CPU_SET_INFORMATION *)((BYTE *)(e) + (e)->Size))
+
+static int cpu_usable(const SYSTEM_CPU_SET_INFORMATION *e,
+                      const cpu_filter_t *flt)
+{
+    ULONG i;
+
+    if (e->Type != CpuSetInformation)
+        return 0;
+    /* A 32-bit process has one processor group, so the mask is group 0's. */
+    if (flt->affinity && (e->CpuSet.Group != 0 ||
+        e->CpuSet.LogicalProcessorIndex >= 8 * sizeof flt->affinity ||
+        !(flt->affinity >> e->CpuSet.LogicalProcessorIndex & 1)))
+        return 0;
+    if (!flt->nids)
+        return 1;
+    for (i = 0; i < flt->nids; i++)
+        if (flt->ids[i] == e->CpuSet.Id)
+            return 1;
+    return 0;
+}
+
+static int usable_cores(void)
+{
+    HMODULE k = GetModuleHandleA("kernel32.dll");
+    get_sets_fn get = k ? (get_sets_fn)(uintptr_t)
+        GetProcAddress(k, "GetSystemCpuSetInformation") : NULL;
+    get_default_fn get_default = k ? (get_default_fn)(uintptr_t)
+        GetProcAddress(k, "GetProcessDefaultCpuSets") : NULL;
+    SYSTEM_CPU_SET_INFORMATION *buf, *e, *f, *end;
+    cpu_filter_t flt = { NULL, 0, 0 };
+    ULONG len = 0, *ids = NULL;
+    DWORD_PTR mine = 0, all = 0;
+    int cores = 0;
+
+    if (!get || !get_default)
+        return 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &mine, &all) &&
+        mine != all)
+        flt.affinity = mine;
+    if (!get_default(GetCurrentProcess(), NULL, 0, &flt.nids) && flt.nids) {
+        ids = (ULONG *)malloc(flt.nids * sizeof *ids);
+        if (!ids || !get_default(GetCurrentProcess(), ids, flt.nids,
+                                 &flt.nids)) {
+            free(ids);
+            return 0;
+        }
+        flt.ids = ids;
+    }
+    get(NULL, 0, &len, GetCurrentProcess(), 0);
+    buf = len ? (SYSTEM_CPU_SET_INFORMATION *)malloc(len) : NULL;
+    if (!buf || !get(buf, len, &len, GetCurrentProcess(), 0)) {
+        free(buf);
+        free(ids);
+        return 0;
+    }
+    end = (SYSTEM_CPU_SET_INFORMATION *)((BYTE *)buf + len);
+    for (e = buf; e < end && e->Size; e = CPU_SET_NEXT(e)) {
+        if (!cpu_usable(e, &flt))
+            continue;
+        for (f = buf; f < e; f = CPU_SET_NEXT(f))
+            if (cpu_usable(f, &flt) && f->CpuSet.Group == e->CpuSet.Group &&
+                f->CpuSet.CoreIndex == e->CpuSet.CoreIndex)
+                break;
+        if (f == e)
+            cores++;
+    }
+    free(buf);
+    free(ids);
+    return cores;
+}
+
 int vgl_par_open(int want)
 {
     SYSTEM_INFO si;
@@ -116,14 +204,16 @@ int vgl_par_open(int want)
     s_ctx = NULL;
 
     GetSystemInfo(&si);
-    cores = physical_cores(&si);
+    cores = usable_cores();
+    if (cores < 1)
+        cores = physical_cores(&si);
     if (want <= 0)
         want = cores;
     if (want > VGL_PAR_MAX) want = VGL_PAR_MAX;
     if (want < 1) want = 1;
     s_workers = want;
     if (want == 1) {
-        vgl_log(0, "raster: single-threaded (%d physical cores, %lu logical)",
+        vgl_log(0, "raster: single-threaded (%d usable cores, %lu logical)",
                 cores, si.dwNumberOfProcessors);
         return 1;
     }
@@ -143,7 +233,7 @@ int vgl_par_open(int want)
             break;
         }
     }
-    vgl_log(0, "raster: %d workers (%d physical cores, %lu logical), "
+    vgl_log(0, "raster: %d workers (%d usable cores, %lu logical), "
                "row-split, threshold %d rows", s_workers, cores,
             si.dwNumberOfProcessors, VGL_PAR_MIN_ROWS);
     return s_workers;

@@ -16,7 +16,13 @@
  *
  * zlib hunks are raw deflate (zlib's inflate); lzma hunks are headerless LZMA1
  * (7-Zip's public-domain LzmaDec.c); huff and flac are decoded here. Both
- * third-party decoders are fetched by `make deps`, never committed. */
+ * third-party decoders are fetched by `make deps`, never committed.
+ *
+ * A CD CHD is the same container with 2448-byte units, one CD frame each:
+ * 2352 bytes of sector and 96 of subcode. Its three codecs (cdlz, cdzl,
+ * cdfl) carry the sectors and the subcode as two streams, and cdlz and cdzl
+ * strip each sector's sync and ECC when they can be rebuilt; see "CD frames"
+ * below. */
 #include "chd.h"
 
 #include <windows.h>
@@ -42,6 +48,13 @@ enum { T_0, T_1, T_2, T_3, T_NONE, T_SELF, T_PARENT,
 #define TAG_LZMA TAG('l', 'z', 'm', 'a')
 #define TAG_HUFF TAG('h', 'u', 'f', 'f')
 #define TAG_FLAC TAG('f', 'l', 'a', 'c')
+#define TAG_CDLZ TAG('c', 'd', 'l', 'z')
+#define TAG_CDZL TAG('c', 'd', 'z', 'l')
+#define TAG_CDFL TAG('c', 'd', 'f', 'l')
+
+#define CD_FRAME 2448u          /* one unit of a CD CHD */
+#define CD_SECTOR 2352u
+#define CD_SUB 96u
 
 /* resolve()'s answer for a hunk an uncompressed CHD never wrote: it reads
  * as zeroes and has no payload. */
@@ -478,58 +491,54 @@ static unsigned flac_samplesize(unsigned code)
     return table[code & 7] ? table[code & 7] : 16;
 }
 
-static int flac_decode(const uint8_t *raw, size_t rawlen, uint8_t *out,
-                       size_t outlen, int32_t *a, int32_t *b)
+/* FLAC frames from r until outlen bytes of 16-bit stereo are out, in the
+ * given byte order. Leaves r just past the last frame's CRC. */
+static int flac_frames(bits_t *r, uint8_t *out, size_t outlen, int big,
+                       int32_t *a, int32_t *b)
 {
     unsigned nsamples = (unsigned)(outlen / 4), done = 0, i;
-    int big;
-    bits_t r;
 
-    if (rawlen < 1 || (raw[0] != 'L' && raw[0] != 'B'))
-        return 0;
-    big = raw[0] == 'B';
-    bits_init(&r, raw + 1, rawlen - 1);
     while (done < nsamples) {
         unsigned bs_code, sr_code, ch, ss_code, b0, blocksize, bps;
 
-        if (bits_read(&r, 14) != 0x3FFE)
+        if (bits_read(r, 14) != 0x3FFE)
             return 0;                                   /* lost frame sync */
-        bits_read(&r, 2);                               /* reserved, blocking */
-        bs_code = (unsigned)bits_read(&r, 4);
-        sr_code = (unsigned)bits_read(&r, 4);
-        ch = (unsigned)bits_read(&r, 4);
-        ss_code = (unsigned)bits_read(&r, 3);
-        bits_read(&r, 1);                               /* reserved */
-        b0 = (unsigned)bits_read(&r, 8);                /* UTF-8 frame number */
+        bits_read(r, 2);                               /* reserved, blocking */
+        bs_code = (unsigned)bits_read(r, 4);
+        sr_code = (unsigned)bits_read(r, 4);
+        ch = (unsigned)bits_read(r, 4);
+        ss_code = (unsigned)bits_read(r, 3);
+        bits_read(r, 1);                               /* reserved */
+        b0 = (unsigned)bits_read(r, 8);                /* UTF-8 frame number */
         if (b0 >= 0xC0) {
             unsigned m = 0x20;
             while (b0 & m) {
-                bits_read(&r, 8);
+                bits_read(r, 8);
                 m >>= 1;
             }
         }
         if (bs_code == 6)
-            blocksize = (unsigned)bits_read(&r, 8) + 1;
+            blocksize = (unsigned)bits_read(r, 8) + 1;
         else if (bs_code == 7)
-            blocksize = (unsigned)bits_read(&r, 16) + 1;
+            blocksize = (unsigned)bits_read(r, 16) + 1;
         else
             blocksize = flac_blocksize(bs_code) ? flac_blocksize(bs_code)
                                                 : nsamples;
         if (sr_code == 12)
-            bits_read(&r, 8);
+            bits_read(r, 8);
         else if (sr_code == 13 || sr_code == 14)
-            bits_read(&r, 16);
+            bits_read(r, 16);
         bps = flac_samplesize(ss_code);
-        bits_read(&r, 8);                               /* header CRC-8 */
+        bits_read(r, 8);                               /* header CRC-8 */
         if ((ch < 8 ? ch + 1 : 2) != 2)
             return 0;
         if (blocksize > nsamples - done)
             return 0;
-        if (!flac_subframe(&r, a, blocksize, bps + (ch == 9)) ||
-            !flac_subframe(&r, b, blocksize, bps + (ch == 8 || ch == 10)))
+        if (!flac_subframe(r, a, blocksize, bps + (ch == 9)) ||
+            !flac_subframe(r, b, blocksize, bps + (ch == 8 || ch == 10)))
             return 0;
-        bits_align(&r);
-        bits_read(&r, 16);                              /* frame CRC-16 */
+        bits_align(r);
+        bits_read(r, 16);                              /* frame CRC-16 */
         for (i = 0; i < blocksize; i++) {
             int32_t l = a[i], rt = b[i];
             if (ch == 8) {                              /* left / side */
@@ -560,6 +569,17 @@ static int flac_decode(const uint8_t *raw, size_t rawlen, uint8_t *out,
     return 1;
 }
 
+static int flac_decode(const uint8_t *raw, size_t rawlen, uint8_t *out,
+                       size_t outlen, int32_t *a, int32_t *b)
+{
+    bits_t r;
+
+    if (rawlen < 1 || (raw[0] != 'L' && raw[0] != 'B'))
+        return 0;
+    bits_init(&r, raw + 1, rawlen - 1);
+    return flac_frames(&r, out, outlen, raw[0] == 'B', a, b);
+}
+
 int chd_flac_decode(const uint8_t *raw, size_t rawlen, uint8_t *out,
                     size_t outlen)
 {
@@ -570,6 +590,95 @@ int chd_flac_decode(const uint8_t *raw, size_t rawlen, uint8_t *out,
     free(a);
     free(b);
     return ok;
+}
+
+/* ---- CD frames -------------------------------------------------------------
+ *
+ * Measured against chdman's own output, never read out of its source: a
+ * cdlz or cdzl hunk is a bitmap of the frames whose sector was stripped (bit
+ * i of byte i/8 is frame i), the
+ * compressed length of the sector stream in two big-endian bytes, the
+ * sectors of every frame back to back in lzma or deflate, then their subcode
+ * in deflate. A stripped sector has its sync pattern and its 276 ECC bytes
+ * zeroed, and both are rebuilt here; cdfl has no bitmap and no length: its
+ * FLAC frames (big-endian samples) are followed by the subcode's deflate
+ * stream. The hunk's CRC-16 is over the rebuilt frames, so a wrong rebuild
+ * fails the hunk, never passes it. */
+
+static uint8_t s_gf_exp[512], s_gf_log[256];
+static INIT_ONCE s_gf_once = INIT_ONCE_STATIC_INIT;
+
+/* GF(2^8) over x^8 + x^4 + x^3 + x^2 + 1, ECMA-130 Annex A. */
+static BOOL CALLBACK gf_init(PINIT_ONCE once, PVOID p, PVOID *ctx)
+{
+    unsigned i, x = 1;
+    (void)once; (void)p; (void)ctx;
+    for (i = 0; i < 255; i++) {
+        s_gf_exp[i] = (uint8_t)x;
+        s_gf_log[x] = (uint8_t)i;
+        x <<= 1;
+        if (x & 0x100)
+            x ^= 0x11D;
+    }
+    for (i = 255; i < 512; i++)
+        s_gf_exp[i] = s_gf_exp[i - 255];
+    return TRUE;
+}
+
+static uint8_t gf_mul(uint8_t a, uint8_t b)
+{
+    return a && b ? s_gf_exp[s_gf_log[a] + s_gf_log[b]] : 0;
+}
+
+/* The two check symbols of one RSPC vector: n data symbols v[] (with
+ * stride), then p0 and p1 such that the sum of the vector and its sum
+ * weighted by a^(len-1-i) are both zero (ECMA-130 Annex A). */
+static void rspc(const uint8_t *s, const unsigned *at, unsigned n,
+                 uint8_t *p0, uint8_t *p1)
+{
+    uint8_t a = 0, b = 0, q;
+    unsigned i, len = n + 2;
+    for (i = 0; i < n; i++) {
+        a ^= s[at[i]];
+        b ^= gf_mul(s[at[i]], s_gf_exp[(len - 1 - i) % 255]);
+    }
+    /* p0 (a^1 + 1) = a + b; a^1 + 1 = 3. */
+    q = (uint8_t)(a ^ b);
+    q = q ? s_gf_exp[(s_gf_log[q] + 255 - s_gf_log[3]) % 255] : 0;
+    *p0 = q;
+    *p1 = (uint8_t)(a ^ q);
+}
+
+/* A stripped sector's sync and P/Q parity, back. The parity covers bytes
+ * 12..2075 as 16-bit words in two byte planes; a mode 2 sector computes it
+ * with its four header bytes taken as zero (measured: 496 of 496 sampled
+ * sectors of a mode 2 disc agree with that and none with the header). */
+static void cd_rebuild(uint8_t *sec)
+{
+    static const uint8_t sync[12] = { 0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+                                      0xFF, 0xFF, 0xFF, 0xFF, 0 };
+    uint8_t hdr[4];
+    unsigned at[43], plane, k, m;
+
+    InitOnceExecuteOnce(&s_gf_once, gf_init, NULL, NULL);
+    memcpy(sec, sync, sizeof sync);
+    memcpy(hdr, sec + 12, 4);
+    if (sec[15] == 2)
+        memset(sec + 12, 0, 4);
+    for (plane = 0; plane < 2; plane++) {
+        uint8_t *w = sec + 12 + plane;          /* word k's byte: w[2k] */
+        for (k = 0; k < 43; k++) {              /* P: 43 columns of 24 */
+            for (m = 0; m < 24; m++)
+                at[m] = 2 * (43 * m + k);
+            rspc(w, at, 24, &w[2 * (1032 + k)], &w[2 * (1075 + k)]);
+        }
+        for (k = 0; k < 26; k++) {              /* Q: 26 diagonals of 43 */
+            for (m = 0; m < 43; m++)
+                at[m] = 2 * ((44 * m + 43 * k) % 1118);
+            rspc(w, at, 43, &w[2 * (1118 + k)], &w[2 * (1144 + k)]);
+        }
+    }
+    memcpy(sec + 12, hdr, 4);
 }
 
 /* ---- the container -------------------------------------------------------*/
@@ -585,6 +694,7 @@ typedef struct {
     uint8_t *raw;
     size_t rawcap;
     int32_t *fa, *fb;
+    uint8_t *cd;                /* a CD hunk's sectors, then its subcode */
 } codec_t;
 
 /* One cache slot. A slot that is PENDING belongs to a decoder and is pinned. */
@@ -674,21 +784,18 @@ static void *lz_alloc(ISzAllocPtr p, size_t size) { (void)p; return malloc(size)
 static void lz_free(ISzAllocPtr p, void *a) { (void)p; free(a); }
 static const ISzAlloc s_lz_alloc = { lz_alloc, lz_free };
 
-static int codec_init(codec_t *k, const chd_t *c)
+/* The decoders' state for hunks of hunkbytes, with no file. */
+static int codec_setup(codec_t *k, uint32_t hunkbytes)
 {
     /* LZMA in a CHD has no header: the properties are the ones chdman's
      * encoder derives from the hunk size, lc=3 lp=0 pb=2 and a dictionary of
      * the hunk, at least 4 KiB. */
-    uint32_t dict = c->hunkbytes > 4096 ? c->hunkbytes : 4096;
+    uint32_t dict = hunkbytes > 4096 ? hunkbytes : 4096;
     uint8_t props[LZMA_PROPS_SIZE] = {
         (2 * 5 + 0) * 9 + 3,
         (uint8_t)dict, (uint8_t)(dict >> 8), (uint8_t)(dict >> 16),
         (uint8_t)(dict >> 24) };
 
-    memset(k, 0, sizeof *k);
-    k->fh = open_read(c->path);
-    if (k->fh == INVALID_HANDLE_VALUE)
-        return 0;
     if (inflateInit2(&k->z, -15) != Z_OK)
         return 0;
     k->z_ready = 1;
@@ -696,9 +803,19 @@ static int codec_init(codec_t *k, const chd_t *c)
     if (LzmaDec_Allocate(&k->lz, props, LZMA_PROPS_SIZE, &s_lz_alloc) != SZ_OK)
         return 0;
     k->lz_ready = 1;
-    k->fa = malloc(sizeof *k->fa * (c->hunkbytes / 4 + 1));
-    k->fb = malloc(sizeof *k->fb * (c->hunkbytes / 4 + 1));
-    return k->fa && k->fb;
+    k->fa = malloc(sizeof *k->fa * (hunkbytes / 4 + 1));
+    k->fb = malloc(sizeof *k->fb * (hunkbytes / 4 + 1));
+    k->cd = malloc(hunkbytes);
+    return k->fa && k->fb && k->cd;
+}
+
+static int codec_init(codec_t *k, const chd_t *c)
+{
+    memset(k, 0, sizeof *k);
+    k->fh = open_read(c->path);
+    if (k->fh == INVALID_HANDLE_VALUE)
+        return 0;
+    return codec_setup(k, c->hunkbytes);
 }
 
 static void codec_free(codec_t *k)
@@ -712,6 +829,7 @@ static void codec_free(codec_t *k)
     free(k->raw);
     free(k->fa);
     free(k->fb);
+    free(k->cd);
     memset(k, 0, sizeof *k);
 }
 
@@ -732,6 +850,97 @@ static uint32_t resolve(const chd_t *c, uint32_t h, char *err, size_t errsz)
         h = (uint32_t)c->offsets[h];
     }
     return h;
+}
+
+/* Raw deflate of exactly outlen bytes. */
+static int inflate_exact(codec_t *k, const uint8_t *in, size_t inlen,
+                         uint8_t *out, size_t outlen)
+{
+    inflateReset(&k->z);
+    k->z.next_in = (uint8_t *)in;
+    k->z.avail_in = (uInt)inlen;
+    k->z.next_out = out;
+    k->z.avail_out = (uInt)outlen;
+    return inflate(&k->z, Z_FINISH) == Z_STREAM_END &&
+           k->z.total_out == outlen;
+}
+
+/* One cdlz, cdzl or cdfl hunk into out: frames of sector + subcode. */
+static int decode_cd(const chd_t *c, codec_t *k, uint32_t tag, uint32_t len,
+                     uint8_t *out)
+{
+    unsigned frames = c->hunkbytes / CD_FRAME, nb = (frames + 7) / 8, i;
+    size_t secs = (size_t)frames * CD_SECTOR, at, sublen;
+    uint8_t *sub = k->cd + secs;
+    const uint8_t *raw = k->raw;
+
+    if (tag == TAG_CDFL) {
+        bits_t r;
+        bits_init(&r, raw, len);
+        if (!flac_frames(&r, k->cd, secs, 1, k->fa, k->fb))
+            return 0;
+        at = r.p - r.n / 8;                     /* past the last frame */
+        nb = 0;
+    } else {
+        size_t clen;
+        if (len < nb + 2)
+            return 0;
+        clen = be16(raw + nb);
+        at = nb + 2 + clen;
+        if (at > len)
+            return 0;
+        if (tag == TAG_CDZL) {
+            if (!inflate_exact(k, raw + nb + 2, clen, k->cd, secs))
+                return 0;
+        } else {
+            SizeT outlen = secs, inlen = clen;
+            ELzmaStatus status;
+            LzmaDec_Init(&k->lz);
+            if (LzmaDec_DecodeToBuf(&k->lz, k->cd, &outlen, raw + nb + 2,
+                                    &inlen, LZMA_FINISH_ANY, &status) != SZ_OK ||
+                outlen != secs)
+                return 0;
+        }
+    }
+    if (at > len)
+        return 0;
+    sublen = (size_t)frames * CD_SUB;
+    if (!inflate_exact(k, raw + at, len - at, sub, sublen))
+        return 0;
+    for (i = 0; i < frames; i++) {
+        uint8_t *f = out + (size_t)i * CD_FRAME;
+        memcpy(f, k->cd + (size_t)i * CD_SECTOR, CD_SECTOR);
+        memcpy(f + CD_SECTOR, sub + (size_t)i * CD_SUB, CD_SUB);
+        if (nb && (raw[i / 8] >> (i % 8) & 1))
+            cd_rebuild(f);
+    }
+    return 1;
+}
+
+void chd_cd_rebuild(uint8_t *sector)
+{
+    cd_rebuild(sector);
+}
+
+int chd_cd_decode(const char codec[4], const uint8_t *raw, size_t rawlen,
+                  uint8_t *out, unsigned frames)
+{
+    chd_t c;
+    codec_t k;
+    uint32_t tag = TAG(codec[0], codec[1], codec[2], codec[3]);
+    int ok;
+
+    memset(&c, 0, sizeof c);
+    memset(&k, 0, sizeof k);
+    c.hunkbytes = frames * CD_FRAME;
+    ok = codec_setup(&k, c.hunkbytes) && rawlen <= UINT32_MAX;
+    if (ok) {
+        k.raw = (uint8_t *)raw;
+        ok = decode_cd(&c, &k, tag, (uint32_t)rawlen, out);
+        k.raw = NULL;
+    }
+    codec_free(&k);
+    return ok;
 }
 
 /* Decode hunk h (already resolved, never SELF) into out. Thread-safe given
@@ -799,6 +1008,13 @@ static int decode_hunk(const chd_t *c, codec_t *k, uint32_t h, uint8_t *out,
         } else if (tag == TAG_FLAC) {
             if (!flac_decode(k->raw, len, out, c->hunkbytes, k->fa, k->fb)) {
                 set_err(err, errsz, "hunk %u: undecodable flac stream", h);
+                return 0;
+            }
+        } else if (tag == TAG_CDLZ || tag == TAG_CDZL || tag == TAG_CDFL) {
+            if (!decode_cd(c, k, tag, len, out)) {
+                set_err(err, errsz, "hunk %u: undecodable %c%c%c%c stream", h,
+                        (int)(tag >> 24), (int)(tag >> 16 & 0xFF),
+                        (int)(tag >> 8 & 0xFF), (int)(tag & 0xFF));
                 return 0;
             }
         } else {
@@ -1233,7 +1449,7 @@ int chd_open(const wchar_t *path, unsigned jobs, chd_t **out,
     for (i = 0; i < 4; i++) {
         uint32_t t = be32(hdr + 16 + i * 4);
         if (t && t != TAG_ZLIB && t != TAG_LZMA && t != TAG_HUFF &&
-            t != TAG_FLAC) {
+            t != TAG_FLAC && t != TAG_CDLZ && t != TAG_CDZL && t != TAG_CDFL) {
             set_err(err, errsz, "this CHD uses a codec (%c%c%c%c) that is "
                     "not read here", (int)(t >> 24), (int)(t >> 16 & 0xFF),
                     (int)(t >> 8 & 0xFF), (int)(t & 0xFF));
@@ -1260,6 +1476,21 @@ int chd_open(const wchar_t *path, unsigned jobs, chd_t **out,
         !c->unitbytes) {
         set_err(err, errsz, "implausible hunk size %u", c->hunkbytes);
         goto fail;
+    }
+    /* The CD codecs split a hunk into whole frames. The sector stream's
+     * length field widens with the hunk, not the stream, and a hunk of 64 KiB
+     * or more has never been measured here; such a file is declined rather
+     * than guessed at. */
+    for (i = 0; i < 4; i++) {
+        uint32_t t = c->compressors[i];
+        if ((t == TAG_CDLZ || t == TAG_CDZL || t == TAG_CDFL) &&
+            (c->unitbytes != CD_FRAME || c->hunkbytes % CD_FRAME ||
+             c->hunkbytes >= 65536)) {
+            set_err(err, errsz, "a CD CHD laid out as this reader has never "
+                    "measured (hunk %u, unit %u)", c->hunkbytes, c->unitbytes);
+            rc = CHD_UNSUPPORTED;
+            goto fail;
+        }
     }
     hunks = (c->logicalbytes + c->hunkbytes - 1) / c->hunkbytes;
     if (hunks >= HUNK_ZERO - 1) {

@@ -19,12 +19,15 @@
 const setting_desc_t *const k_settings = vct_ui_setting;
 
 const action_desc_t k_actions[ACTION_COUNT] = {
-#define BINDING(key, hydro, offroad, pad_hydro, pad_offroad, button, hl, ol)  \
-    { #key, hl, ol, hydro, offroad, 1, pad_hydro, pad_offroad },
-#define BINDING_AXIS(key, hydro, offroad, hl, ol)                             \
-    { #key, hl, ol, hydro, offroad, 0, 0, 0 },
-#define BINDING_PAD(key, pad_hydro, pad_offroad, hl, ol)                      \
-    { #key, hl, ol, NULL, NULL, 1, pad_hydro, pad_offroad },
+#define BINDING(key, hydro, offroad, arctic, pad_hydro, pad_offroad,       \
+                pad_arctic, button, hl, ol, al)                               \
+    { #key, { hl, ol, al }, { hydro, offroad, arctic }, 1,                    \
+      { pad_hydro, pad_offroad, pad_arctic } },
+#define BINDING_AXIS(key, hydro, offroad, arctic, hl, ol, al)                 \
+    { #key, { hl, ol, al }, { hydro, offroad, arctic }, 0, { 0, 0, 0 } },
+#define BINDING_PAD(key, pad_hydro, pad_offroad, pad_arctic, hl, ol, al)      \
+    { #key, { hl, ol, al }, { NULL, NULL, NULL }, 1,                          \
+      { pad_hydro, pad_offroad, pad_arctic } },
 #include "bindings.def"
 #undef BINDING
 #undef BINDING_AXIS
@@ -32,6 +35,9 @@ const action_desc_t k_actions[ACTION_COUNT] = {
 };
 
 static ini_doc_t s_doc;
+/* The file as it was read or last written: what a game-tab switch reverts
+ * to, and what tells model_save() that edits cancelled out. */
+static ini_doc_t s_disk;
 /* The [devices] table out of s_doc, loaded per question; see table_load(). */
 static struct {
     unsigned    n;
@@ -42,8 +48,8 @@ static struct {
 } s_table;
 static void table_load(void);
 static char s_value[SETTING_COUNT][INI_VALUE_CAP];
-static char s_key_binding[2][ACTION_COUNT][MODEL_BINDING_CAP];
-static char s_pad_binding[2][ACTION_COUNT][MODEL_BINDING_CAP];
+static char s_key_binding[MODEL_TITLES][ACTION_COUNT][MODEL_BINDING_CAP];
+static char s_pad_binding[MODEL_TITLES][ACTION_COUNT][MODEL_BINDING_CAP];
 
 ini_doc_t *model_doc(void)
 {
@@ -173,11 +179,20 @@ static int setting_is_device_scoped(unsigned i)
  * section. While split, s_value[] holds ONE cabinet's choices, s_view_title's,
  * and the other cabinet's live in s_doc until Apply writes them. */
 static int s_split;
-static int s_view_title;                /* 0 hydro, 1 offroad               */
+static int s_view_title;                /* a MODEL_TITLE_*                  */
 /* Lines changed in s_doc that Apply has not written yet: the outgoing
  * cabinet's choices on a switch, and what split or join rewrote. */
 static int s_doc_pending;
-static const char *const k_title_id[2] = { "hydro", "offroad" };
+static const char *const k_title_id[MODEL_TITLES] = {
+    "hydro", "offroad", "arctic" };
+static const char *const k_title_name[MODEL_TITLES] = {
+    "Hydro Thunder", "Offroad Thunder", "Arctic Thunder" };
+
+/* Any int a caller hands in, as a title: out of range is Hydro, as 0 was. */
+static int title_index(int title)
+{
+    return title > 0 && title < MODEL_TITLES ? title : 0;
+}
 typedef struct {
     char section[96];
     char key[96];
@@ -226,6 +241,25 @@ static int setting_is_title_choice(unsigned i)
 static int scope_title(void)
 {
     return s_split ? s_view_title : -1;
+}
+
+/* FORCE FEEDBACK AND RUMBLE ARE ALWAYS PER CABINET. dinput.c and rumble.c read
+ * every [ffb] key through ini_read_scoped(), [<title>.ffb] then [ffb], and the
+ * games want different numbers, so s_value[] holds the shown cabinet's and an
+ * edit goes to its [<title>.ffb]. [ffb] is what a cabinet with no line of its
+ * own falls through to. */
+static int setting_is_title_tuning(unsigned i)
+{
+    return !_stricmp(k_settings[i].section, "ffb");
+}
+
+/* The cabinet this key is read for and written to, or -1 for the shared
+ * sections. */
+static int setting_title(unsigned i)
+{
+    if (setting_is_title_tuning(i))
+        return s_view_title;
+    return setting_is_title_choice(i) ? scope_title() : -1;
 }
 
 static int setting_resolve(unsigned i, char *out, size_t out_size);
@@ -336,9 +370,9 @@ const char *setting_section(unsigned i)
 {
     static char scoped[96];
     const char *base = base_section(i);
-    int t = scope_title();
+    int t = setting_title(i);
 
-    if (t < 0 || !setting_is_title_choice(i))
+    if (t < 0)
         return base;
     snprintf(scoped, sizeof scoped, "%s.%s", k_title_id[t], base);
     return scoped;
@@ -427,15 +461,13 @@ static int setting_resolve_as(unsigned i, int t, char *out, size_t out_size)
     return ini_doc_get(&s_doc, canon, key, out, out_size);
 }
 
-/* As the shown cabinet reads it when the key is one of its choices, else the
- * shared answer. setting_resolve_as() with the OTHER cabinet is right only for
- * a key whose section does not depend on the shown cabinet's controller: a
- * selector, never an axis. */
+/* As the shown cabinet reads it when the key is one of its choices or its
+ * tuning, else the shared answer. setting_resolve_as() with the OTHER cabinet
+ * is right only for a key whose section does not depend on the shown cabinet's
+ * controller: a selector, never an axis. */
 static int setting_resolve(unsigned i, char *out, size_t out_size)
 {
-    int t = setting_is_title_choice(i) ? scope_title() : -1;
-
-    return setting_resolve_as(i, t, out, out_size);
+    return setting_resolve_as(i, setting_title(i), out, out_size);
 }
 
 /* The attached controllers, from whoever can enumerate them (the launcher's
@@ -516,7 +548,7 @@ static unsigned action_halves(unsigned title, unsigned action,
                               size_t pad_text_sz)
 {
     const action_desc_t *a = &k_actions[action];
-    const char *key_default = title ? a->offroad_key : a->hydro_key;
+    const char *key_default = a->key_default[title];
     unsigned n = 0;
 
     if (key_default) {
@@ -528,7 +560,7 @@ static unsigned action_halves(unsigned title, unsigned action,
     }
     if (a->has_pad) {
         snprintf(pad_text, pad_text_sz, "%u",
-                 title ? a->offroad_pad : a->hydro_pad);
+                 a->pad_default[title]);
         out[n].section  = "gamepad";
         out[n].fallback = pad_text;
         out[n].value    = s_pad_binding[title][action];
@@ -731,9 +763,9 @@ void model_load(void)
     for (i = 0; i < SETTING_COUNT; i++) {
         int unused, found;
 
-        /* A cabinet's own choice is read through its title first; with no
-         * device known yet that is [<title>.analog], then [analog]. */
-        if (s_split && setting_is_title_choice(i))
+        /* A cabinet's own choice or tuning is read through its title first;
+         * with no device known yet that is [<title>.analog], then [analog]. */
+        if (setting_title(i) >= 0)
             found = setting_resolve(i, s_value[i], sizeof s_value[i]);
         else
             found = ini_doc_get(&s_doc, k_settings[i].section,
@@ -751,7 +783,7 @@ void model_load(void)
             snprintf(s_value[i], sizeof s_value[i], "%s",
                      k_settings[i].fallback);
     }
-    for (title = 0; title < 2; title++) {
+    for (title = 0; title < MODEL_TITLES; title++) {
         const char *id = k_title_id[title];
         char section[64], shared[64], pad_text[16];
         for (action = 0; action < ACTION_COUNT; action++) {
@@ -852,7 +884,7 @@ static const char *plain_title_section(const char *section, int *scoped)
     unsigned t;
 
     *scoped = 0;
-    for (t = 0; t < 2; t++) {
+    for (t = 0; t < MODEL_TITLES; t++) {
         size_t n = strlen(k_title_id[t]);
 
         if (is_title_section(section, k_title_id[t])) {
@@ -928,24 +960,39 @@ static void title_selector_value(int t, const char *key, char *out,
 
 static int commit_settings(int *changed);
 
-/* The shown cabinet's choices, out of the document: the keys that choose the
- * device first, because which device it is decides where its axes are read. */
+/* The shown cabinet's tuning and, while split, its choices, out of the
+ * document: the keys that choose the device first, because which device it is
+ * decides where its axes are read. */
 static void reload_title_choices(void)
 {
     unsigned i;
+    int unused;
 
-    for (i = 0; i < SETTING_COUNT; i++)
-        if (setting_is_title_choice(i) && !setting_is_device_key(i) &&
-            !setting_resolve(i, s_value[i], sizeof s_value[i]))
+    for (i = 0; i < SETTING_COUNT; i++) {
+        if (!setting_is_title_tuning(i) &&
+            (!s_split || !setting_is_title_choice(i) ||
+             setting_is_device_key(i)))
+            continue;
+        if (!setting_resolve(i, s_value[i], sizeof s_value[i]) ||
+            (k_settings[i].type == ST_BOOL &&
+             !ini_parse_bool(s_value[i], &unused)))
             snprintf(s_value[i], sizeof s_value[i], "%s",
                      k_settings[i].fallback);
+    }
+    if (!s_split)
+        return;
     resolve_profile();
     reload_device_settings();
 }
 
+const char *model_title_name(int title)
+{
+    return k_title_name[title_index(title)];
+}
+
 const char *model_title_id(int title)
 {
-    return k_title_id[title ? 1 : 0];
+    return k_title_id[title_index(title)];
 }
 
 int model_title_raw(int title, const char *section, const char *key,
@@ -953,7 +1000,8 @@ int model_title_raw(int title, const char *section, const char *key,
 {
     char scoped[128];
 
-    snprintf(scoped, sizeof scoped, "%s.%s", k_title_id[title ? 1 : 0], section);
+    snprintf(scoped, sizeof scoped, "%s.%s", k_title_id[title_index(title)],
+             section);
     if (ini_doc_get(&s_doc, scoped, key, out, out_size) && out[0])
         return 1;
     return ini_doc_get(&s_doc, section, key, out, out_size);
@@ -966,7 +1014,14 @@ typedef struct {
     char file[MAX_PATH];    /* the ini's path, or bezels/<title>.png       */
     char pick[MAX_PATH];    /* chosen and not yet applied; copied on Apply */
 } bezel_state_t;
-static bezel_state_t s_bezel[2];
+/* One per cabinet the launcher configures; Ultimate reads Arctic's. */
+static bezel_state_t s_bezel[MODEL_TITLES];
+
+/* A cabinet index for the bezel state; anything out of range is Hydro's. */
+static int bezel_title(int title)
+{
+    return title >= 0 && title < MODEL_TITLES ? title : 0;
+}
 static int s_bezel_copies;
 
 int model_bezel_copied(void)
@@ -988,7 +1043,7 @@ void model_bezel_destination(int title, char *out, size_t out_size)
         slash = fwd;
     dir = slash ? (int)(slash - s_doc.path) + 1 : 0;
     snprintf(out, out_size, "%.*sbezels\\%s.png", dir, s_doc.path,
-             k_title_id[title ? 1 : 0]);
+             k_title_id[bezel_title(title)]);
 }
 
 /* What the file says, as the game reads it: the cabinet's line, else the
@@ -999,7 +1054,7 @@ static void bezel_load_state(void)
     char value[INI_VALUE_CAP], dest[MAX_PATH];
     int t;
 
-    for (t = 0; t < 2; t++) {
+    for (t = 0; t < MODEL_TITLES; t++) {
         memset(&s_bezel[t], 0, sizeof s_bezel[t]);
         if (model_title_raw(t, "graphics", "bezel", value, sizeof value) &&
             !bezel_value_is_off(value)) {
@@ -1016,7 +1071,7 @@ static void bezel_load_state(void)
 
 int model_bezel_get(int title, char *path, size_t path_size)
 {
-    const bezel_state_t *b = &s_bezel[title ? 1 : 0];
+    const bezel_state_t *b = &s_bezel[bezel_title(title)];
 
     snprintf(path, path_size, "%s", b->pick[0] ? b->pick : b->file);
     return b->enabled && path[0];
@@ -1024,12 +1079,12 @@ int model_bezel_get(int title, char *path, size_t path_size)
 
 void model_bezel_set_enabled(int title, int on)
 {
-    s_bezel[title ? 1 : 0].enabled = on != 0;
+    s_bezel[bezel_title(title)].enabled = on != 0;
 }
 
 void model_bezel_choose(int title, const char *source)
 {
-    bezel_state_t *b = &s_bezel[title ? 1 : 0];
+    bezel_state_t *b = &s_bezel[bezel_title(title)];
 
     snprintf(b->pick, sizeof b->pick, "%s", source);
     b->enabled = 1;
@@ -1045,7 +1100,7 @@ static int commit_bezels(int *changed, char *why, size_t why_size)
     char a[MAX_PATH], b[MAX_PATH], scoped[64];
     int t;
 
-    for (t = 0; t < 2; t++) {
+    for (t = 0; t < MODEL_TITLES; t++) {
         bezel_state_t *s = &s_bezel[t];
 
         if (s->enabled && s->pick[0]) {
@@ -1094,20 +1149,20 @@ int model_controls_title(void)
 
 int model_setting_per_cabinet(unsigned i)
 {
-    return i < SETTING_COUNT && setting_is_title_choice(i);
+    return i < SETTING_COUNT &&
+           (setting_is_title_choice(i) || setting_is_title_tuning(i));
 }
 
-/* Show cabinet `title`'s choices. The shown cabinet's go into the document
- * first, so nothing typed is lost on the way past, and Apply writes both. */
+/* Show cabinet `title`'s tuning, and its choices while split. The shown
+ * cabinet's go into the document first, so nothing typed is lost on the way
+ * past, and Apply writes both. */
 int model_controls_show(int title)
 {
     int n = 0;
 
-    title = title ? 1 : 0;
-    if (!s_split || title == s_view_title) {
-        s_view_title = title;
+    title = title_index(title);
+    if (title == s_view_title)
         return 1;
-    }
     if (!commit_settings(&n))
         return 0;
     s_doc_pending += n;
@@ -1148,7 +1203,7 @@ int model_controls_split_on(void)
             value = s_value[i];         /* the marker that says "split" */
         else
             continue;
-        for (t = 0; t < 2; t++) {
+        for (t = 0; t < MODEL_TITLES; t++) {
             char section[64];
 
             snprintf(section, sizeof section, "%s.analog", k_title_id[t]);
@@ -1352,7 +1407,7 @@ void scan_ini_problems(void)
             _stricmp(key, "bezel") && !ini_key_is_on_a_page(key)) {
             snprintf(text, sizeof text,
                      "[%s] %s is set for one cabinet only. This window edits "
-                     "the settings both cabinets share, so it cannot show you "
+                     "the settings all games share, so it cannot show you "
                      "that line.", current, key);
             add_ini_problem(text);
         } else if (!_strnicmp(plain, "analog.", 7) && key_is_selector(key)) {
@@ -1360,7 +1415,7 @@ void scan_ini_problems(void)
              * [<title>.analog] only; under a controller's label it is dead. */
             snprintf(text, sizeof text,
                      "[%s] %s chooses a controller, which is read only from "
-                     "[analog] or [hydro.analog] / [offroad.analog]. Nothing "
+                     "[analog] or [<game>.analog]. Nothing "
                      "reads that line.", current, key);
             add_ini_problem(text);
         }
@@ -1500,29 +1555,57 @@ static int setting_value_valid(unsigned i, const char *v, const char *who,
 static int validate_hidden_cabinet(char *why, size_t why_size)
 {
     doc_key_ref_t ref[TITLE_CHOICE_MAX];
-    int other = !s_view_title;
-    size_t n = strlen(k_title_id[other]);
     char who[32], value[INI_VALUE_CAP];
     unsigned k;
+    int other;
 
     if (!s_split)
         return 1;
     memset(ref, 0, sizeof ref);
     title_choice_lines(ref, TITLE_CHOICE_MAX);
-    snprintf(who, sizeof who, "%s: ",
-             other ? "Offroad Thunder" : "Hydro Thunder");
-    for (k = 0; k < TITLE_CHOICE_MAX && ref[k].key[0]; k++) {
-        int i = setting_find("analog", ref[k].key);
+    for (other = 0; other < MODEL_TITLES; other++) {
+        size_t n = strlen(k_title_id[other]);
 
-        if (i < 0 || _strnicmp(ref[k].section, k_title_id[other], n) ||
-            ref[k].section[n] != '.' ||
-            !ini_doc_get(&s_doc, ref[k].section, ref[k].key, value,
-                         sizeof value))
+        if (other == s_view_title)
             continue;
-        if (!setting_value_valid((unsigned)i, value, who, why, why_size))
-            return 0;
+        snprintf(who, sizeof who, "%s: ", k_title_name[other]);
+        for (k = 0; k < TITLE_CHOICE_MAX && ref[k].key[0]; k++) {
+            int i = setting_find("analog", ref[k].key);
+
+            if (i < 0 || _strnicmp(ref[k].section, k_title_id[other], n) ||
+                ref[k].section[n] != '.' ||
+                !ini_doc_get(&s_doc, ref[k].section, ref[k].key, value,
+                             sizeof value))
+                continue;
+            if (!setting_value_valid((unsigned)i, value, who, why, why_size))
+                return 0;
+        }
     }
     return 1;
+}
+
+/* Every game's [ffb] tuning is the same: the page shows one game's, and the
+ * others' were put into the document by a tab switch. Returns the row of the
+ * first that fails, or -1. */
+static int validate_hidden_tuning(char *why, size_t why_size)
+{
+    char who[32], section[64], value[INI_VALUE_CAP];
+    unsigned i;
+    int other;
+
+    for (other = 0; other < MODEL_TITLES; other++) {
+        if (other == s_view_title)
+            continue;
+        snprintf(who, sizeof who, "%s: ", k_title_name[other]);
+        snprintf(section, sizeof section, "%s.ffb", k_title_id[other]);
+        for (i = 0; i < SETTING_COUNT; i++)
+            if (setting_is_title_tuning(i) &&
+                ini_doc_get(&s_doc, section, k_settings[i].key, value,
+                            sizeof value) && value[0] &&
+                !setting_value_valid(i, value, who, why, why_size))
+                return (int)i;
+    }
+    return -1;
 }
 
 /* A cabinet that clears a controller choice falls through to the shared one,
@@ -1542,8 +1625,8 @@ static int validate_empty_choice(char *why, size_t why_size)
                          sizeof shared) || !shared[0])
             continue;
         snprintf(why, why_size, "%s: %s cannot be left empty while [analog] "
-                 "says %s for both games. Pick a controller instead.",
-                 s_view_title ? "Offroad Thunder" : "Hydro Thunder",
+                 "says %s for all games. Pick a controller instead.",
+                 k_title_name[s_view_title],
                  k_settings[i].label, shared);
         return 0;
     }
@@ -1563,21 +1646,24 @@ int validate_settings(char *why, size_t why_size, int *page)
                 *page = k_settings[i].page;
             return 0;
         }
+    if ((i = (unsigned)validate_hidden_tuning(why, why_size)) < SETTING_COUNT) {
+        if (page)
+            *page = k_settings[i].page;
+        return 0;
+    }
     if (!validate_hidden_cabinet(why, why_size) ||
         !validate_empty_choice(why, why_size)) {
         if (page)
             *page = PAGE_CONTROLS;
         return 0;
     }
-    for (title = 0; title < 2; title++)
+    for (title = 0; title < MODEL_TITLES; title++)
         for (action = 0; action < ACTION_COUNT; action++) {
-            if ((title ? k_actions[action].offroad_key :
-                         k_actions[action].hydro_key) &&
+            if (k_actions[action].key_default[title] &&
                 !keyboard_binding_valid(s_key_binding[title][action])) {
                 snprintf(why, why_size,
                          "%s keyboard binding is not supported.",
-                         title ? k_actions[action].offroad_label :
-                                 k_actions[action].hydro_label);
+                         k_actions[action].label[title]);
                 if (page)
                     *page = PAGE_CONTROLS;
                 return 0;
@@ -1589,8 +1675,7 @@ int validate_settings(char *why, size_t why_size, int *page)
                          "0..%d, optionally with a controller from [devices] "
                          "and a colon in front of it, and up to %d of them "
                          "separated by commas.",
-                         title ? k_actions[action].offroad_label :
-                                 k_actions[action].hydro_label,
+                         k_actions[action].label[title],
                          IO_MAX_BUTTONS, IO_MAX_PAD_REFS);
                 if (page)
                     *page = PAGE_CONTROLS;
@@ -1616,7 +1701,7 @@ static int save_bindings_to_doc(int *changed)
     unsigned title, action;
     char section[64], shared[64], pad_text[16];
 
-    for (title = 0; title < 2; title++) {
+    for (title = 0; title < MODEL_TITLES; title++) {
         const char *id = k_title_id[title];
         for (action = 0; action < ACTION_COUNT; action++) {
             const char *key = k_actions[action].key;
@@ -1767,10 +1852,11 @@ int model_device_match(const char *provider, const ini_device_id_t *dev,
                        char *out, size_t out_size)
 {
     char match[2][INI_MATCH_CAP], value[INI_MATCH_CAP + 16];
-    char named[INI_MATCH_CAP + 16], other_named[INI_MATCH_CAP + 16];
-    const char *extra = NULL, *other = NULL;
-    int before[INI_DEVICES_MAX], before_extra, before_other = -1;
-    unsigned k, nmatch = 0, i;
+    char named[INI_MATCH_CAP + 16];
+    char other_named[MODEL_TITLES][INI_MATCH_CAP + 16];
+    const char *extra = NULL, *other[MODEL_TITLES];
+    int before[INI_DEVICES_MAX], before_extra, before_other[MODEL_TITLES];
+    unsigned k, nmatch = 0, i, nother = 0, o;
 
     if (which >= count)
         return 0;
@@ -1788,19 +1874,27 @@ int model_device_match(const char *provider, const ini_device_id_t *dev,
                  model_value("analog", "dinput_name"));
         extra = named;
     }
-    /* ...nor the one the cabinet not shown opens. */
+    /* ...nor the ones the cabinets not shown open. */
     if (as_line && !_stricmp(provider, "dinput") && s_split) {
-        char name[INI_MATCH_CAP];
+        int t;
 
-        title_selector_value(!s_view_title, "dinput_name", name, sizeof name);
-        if (name[0]) {
-            snprintf(other_named, sizeof other_named, "dinput:%s", name);
-            other = other_named;
+        for (t = 0; t < MODEL_TITLES; t++) {
+            char name[INI_MATCH_CAP];
+
+            if (t == s_view_title)
+                continue;
+            title_selector_value(t, "dinput_name", name, sizeof name);
+            if (name[0]) {
+                snprintf(other_named[nother], sizeof other_named[0],
+                         "dinput:%s", name);
+                other[nother] = other_named[nother];
+                nother++;
+            }
         }
     }
     table_load();
-    if (other)
-        before_other = table_resolve(NULL, other, provider, dev, count);
+    for (o = 0; o < nother; o++)
+        before_other[o] = table_resolve(NULL, other[o], provider, dev, count);
     before_extra = table_resolve(NULL, extra, provider, dev, count);
     memcpy(before, s_table.at, s_table.n * sizeof before[0]);
     for (k = 0; k < nmatch; k++) {
@@ -1815,10 +1909,10 @@ int model_device_match(const char *provider, const ini_device_id_t *dev,
             for (i = 0; i < s_table.n && got == (int)which; i++)
                 if (s_table.at[i] != before[i])
                     got = -1;
-            if (got == (int)which && other &&
-                table_resolve(value, other, provider, dev, count) !=
-                    before_other)
-                got = -1;
+            for (o = 0; o < nother && got == (int)which; o++)
+                if (table_resolve(value, other[o], provider, dev, count) !=
+                    before_other[o])
+                    got = -1;
         } else {
             got = table_resolve(NULL, value, provider, dev, count);
         }
@@ -1882,10 +1976,22 @@ const char *model_problem(unsigned i)
 
 /* ---- the document's life ------------------------------------------------- */
 
+/* A snapshot that will not load is an empty one: model_save() then sees
+ * a difference and writes, which is the safe way to be wrong. */
+static void disk_reload(void)
+{
+    ini_doc_free(&s_disk);
+    if (!ini_doc_load(&s_disk, s_doc.path))
+        ini_doc_free(&s_disk);
+}
+
 int model_open(const char *ini_path)
 {
     s_split = s_view_title = 0;
-    return ini_doc_load(&s_doc, ini_path);
+    if (!ini_doc_load(&s_doc, ini_path))
+        return 0;
+    disk_reload();
+    return 1;
 }
 
 int model_reopen(void)
@@ -1895,12 +2001,16 @@ int model_reopen(void)
     /* ini_doc_free() zeroes the document, path included, so take it first. */
     snprintf(path, sizeof path, "%s", s_doc.path);
     ini_doc_free(&s_doc);
-    return ini_doc_load(&s_doc, path);
+    if (!ini_doc_load(&s_doc, path))
+        return 0;
+    disk_reload();
+    return 1;
 }
 
 void model_close(void)
 {
     ini_doc_free(&s_doc);
+    ini_doc_free(&s_disk);
 }
 
 /* ---- saving --------------------------------------------------------------
@@ -1923,6 +2033,18 @@ int model_unsafe_video_mode(void)
 /* The settings rows into the document, not to disk. Shared by Apply and by
  * showing the other cabinet's controller, which has to put the shown one's
  * somewhere first. */
+/* What a game with no [<title>.ffb] line of its own reads from the file:
+ * [ffb], then the default. The launcher never edits [ffb]. */
+static int disk_inherits(unsigned i, const char *value)
+{
+    char have[INI_VALUE_CAP];
+
+    if (!ini_doc_get(&s_disk, k_settings[i].section, k_settings[i].key,
+                     have, sizeof have))
+        snprintf(have, sizeof have, "%s", k_settings[i].fallback);
+    return !strcmp(have, value);
+}
+
 static int commit_settings(int *changed)
 {
     unsigned i;
@@ -1957,10 +2079,25 @@ static int commit_settings(int *changed)
             }
             continue;
         }
+        /* An empty line in a cabinet's section is absent to the host, so it
+         * is compared as absent too, against what the host falls through to. */
         if (ini_doc_get(&s_doc, section, k_settings[i].key,
-                        have, sizeof have)) {
+                        have, sizeof have) &&
+            (have[0] || setting_title(i) < 0)) {
             if (!strcmp(have, s_value[i]))
                 continue;
+            /* A per-game line a tab switch added, and the row is back to what
+             * the file gives that game: take the line out again, rather than
+             * write a copy of the inherited value. */
+            if (setting_is_title_tuning(i) &&
+                !ini_doc_get(&s_disk, section, k_settings[i].key,
+                             have, sizeof have) &&
+                disk_inherits(i, s_value[i])) {
+                if (!ini_doc_drop(&s_doc, section, k_settings[i].key,
+                                  !ini_doc_has_section(&s_disk, section)))
+                    return 0;
+                continue;
+            }
         } else {
             /* Absent from the section this would WRITE. For an ordinary key
              * that means absent from the file, and the fallback is what
@@ -2012,10 +2149,20 @@ int model_save(char *why, size_t why_size, int *changed)
      * they did not mean. */
     if (!*changed)
         return MODEL_SAVE_OK;
+    /* The counts say a line was set, not that the file differs: a tab switch
+     * commits the outgoing game, and edits made and undone across switches
+     * leave a document that says what the file does. */
+    if (ini_doc_same_content(&s_doc, &s_disk)) {
+        *changed = 0;
+        s_device_entry_pending = 0;
+        s_doc_pending = 0;
+        return MODEL_SAVE_OK;
+    }
     if (!ini_doc_save(&s_doc, why, why_size))
         return MODEL_SAVE_FAILED;
     s_device_entry_pending = 0;
     s_doc_pending = 0;
+    disk_reload();
     return MODEL_SAVE_OK;
 }
 

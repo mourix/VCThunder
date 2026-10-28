@@ -40,7 +40,7 @@
 SETTING("graphics", "window_scale",
         STORE(VCT_STORE_UINT_AUTO, window_scale, "auto", NULL, 1, 8),
         SHOW(GROUP_GFX_DISPLAY, "Window size", ST_AUTO_UINT, SF_NONE, WARNING_NONE,
-             "Automatic picks the biggest size that fits your screen."))
+             NULL))
 SETTING("graphics", "fullscreen",
         STORE(VCT_STORE_BOOL, fullscreen, "false", NULL, 0, 0),
         SHOW(GROUP_GFX_DISPLAY, "Start borderless fullscreen", ST_BOOL,
@@ -49,8 +49,8 @@ SETTING("graphics", "aspect",
         STORE(VCT_STORE_ENUM, aspect, "raster", "raster|4:3|16:9|stretch", 0, 0),
         SHOW(GROUP_GFX_DISPLAY, "Aspect ratio", ST_ENUM,
              SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
-/* Bezel art around the picture: a PNG path, per title in [hydro.graphics] /
- * [offroad.graphics]. Not a row: the Graphics page's Bezel box edits it per
+/* Bezel art around the picture: a PNG path, per title in [hydro.graphics],
+ * [offroad.graphics] and [arctic.graphics]. Not a row: the Graphics page's Bezel box edits it per
  * cabinet (launcher.c, docs/configuration.md §3.2). */
 SETTING_DEV("graphics", "bezel",
         STORE(VCT_STORE_STR, bezel, "off", NULL, 0, 0))
@@ -128,9 +128,8 @@ SETTING("audio", "balance",
         STORE(VCT_STORE_UINT, audio_balance, "15", NULL, 0, 100),
         SHOW(PAGE_AUDIO, "Front and subwoofer balance", ST_UINT,
              SF_SLIDER, WARNING_NONE,
-             "Slide toward a speaker to turn the other one down; the mark in "
-             "the middle plays both at full. The default suits desk "
-             "speakers."))
+             "Slide toward a speaker to turn the other one down. The default "
+             "suits desk speakers."))
 SETTING("audio", "dcs_us",
         /* The cabinet's 5.4 ms, which the game's fades are sized for. The
          * ceiling keeps the fallback sleep inside audio_shutdown()'s 500 ms. */
@@ -178,6 +177,24 @@ SETTING("analog", "pov_digital",
              SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
              "Automatic turns it off for a force-feedback wheel, where a hat "
              "press means full lock, and on for anything else."))
+/* The select screens: a key, the hat, the D-pad or a
+ * stick steps one item a press, and a wheel turned past menu_takeover_percent
+ * from where it was at the press takes the screen back. `auto` asks the opened
+ * device whether it holds its position (a wheel) or springs back (a pad), the
+ * way pov_digital does; io_config_menu_wheel() resolves it at use. */
+SETTING("analog", "menu_wheel",
+        STORE_ELSEWHERE("auto", "auto|wheel|pad|off", 0, 0),
+        SHOW(PAGE_CONTROLS, "Select screens from keys and pads", ST_ENUM,
+             SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE,
+             "Keys, the D-pad and a stick move one item a press on the track, "
+             "boat and initials screens, and a wheel takes over when turned. "
+             "Off is how it was before."))
+SETTING("analog", "menu_takeover_percent",
+        STORE_ELSEWHERE("8", NULL, 2, 50),
+        SHOW(PAGE_CONTROLS, "Wheel takes a select screen back after", ST_UINT,
+             SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
+             "How far a wheel has to turn after a key press before the select "
+             "screen follows the wheel again."))
 SETTING("analog", "xinput_device",
         STORE_ELSEWHERE("0", NULL, 0, 3),
         SHOW(PAGE_CONTROLS, "Gamepad: which XInput pad", ST_UINT,
@@ -402,6 +419,16 @@ SETTING("timing", "speed_percent",
              SF_ADVANCED | SF_UNSHIPPED | SF_SLIDER | SF_PERCENT, WARNING_NONE,
              "100 is the cabinet's own speed; anything else runs the whole game "
              "faster or slower."))
+/* Ultimate Arctic Thunder asks for a KEYLOK II on the parallel port. `auto`
+ * uses a real one when its driver opens and the host's model otherwise;
+ * `off` answers neither and is the control. src/arctic_keylok.c. */
+SETTING_DEV("diagnostics", "dongle",
+        STORE(VCT_STORE_ENUM, dongle, "auto", "auto|virtual|off", 0, 0))
+/* Hybrid processors: src/cpu.c. Never shown: the host decides, and
+ * `system` is the maintainer's A/B control. */
+SETTING_DEV("timing", "cpu_cores",
+        STORE(VCT_STORE_ENUM, cpu_cores, "performance",
+              "performance|all|system", 0, 0))
 SETTING_DEV("timing", "limiter_idle",
         STORE(VCT_STORE_BOOL, limiter_idle, "true", NULL, 0, 0))
 SETTING("controls", "dip_switches",

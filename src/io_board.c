@@ -79,9 +79,13 @@ static unsigned char encode_throttle(float v)
 
 /* Convert momentary paddle edges into Offroad's maintained three-position
  * shifter state. The latch starts in neutral and remains inactive when the
- * paddle bindings are absent. */
+ * paddle bindings are absent. On a select screen the paddles are the menu's
+ * (menu_prev/menu_next share their buttons), so the latch follows them
+ * without moving: a gear chosen there would be the gear the race starts in,
+ * and a paddle still held when the screen goes is not a new press. */
 static unsigned sequential_shift(const host_state_t *host)
 {
+    int frozen = menu_wheel_screen_up();
     static int up_held, down_held;
     int up, down;
 
@@ -90,9 +94,9 @@ static unsigned sequential_shift(const host_state_t *host)
         return 0;
     up = pad_down(host, &s_cfg.pad_shift_up);
     down = pad_down(host, &s_cfg.pad_shift_down);
-    if (up && !up_held && s_gear < 3)
+    if (up && !up_held && s_gear < 3 && !frozen)
         s_gear++;
-    if (down && !down_held && s_gear > 0)
+    if (down && !down_held && s_gear > 0 && !frozen)
         s_gear--;
     up_held = up;
     down_held = down;
@@ -116,18 +120,42 @@ static void coin_edge(int pressed, int *held, unsigned char *counter, int slot)
     *held = pressed;
 }
 
+/* The select screens (menu_wheel.c): the keys, the
+ * hat, the D-pad and a pad's stick step them one item a press, and a wheel
+ * turned away from where it was at the press takes them back. A wheel's hat
+ * steps them whatever pov_digital says; that rule protects the race, which
+ * this never touches. While the keys own a screen the wheel gets no force,
+ * or the game's menu spring would turn it into a takeover. */
+static volatile int s_menu_mute;
+
+static unsigned char menu_steer(const host_state_t *host, unsigned char byte)
+{
+    int mute;
+
+    byte = (unsigned char)menu_wheel_steer(host, byte, &mute);
+    s_menu_mute = mute;
+    return byte;
+}
+
+/* EACH FIELD IS PUBLISHED WITH ONE STORE. This runs on the poll thread and
+ * the frame is built on the game's, so a field written twice, or cleared and
+ * then filled in, can be sent half made: a held key's full lock in the middle
+ * of a select screen's step, or a held button released for one frame. Each is
+ * built in a local and stored once at the end. */
 static void sample_input(void)
 {
     host_state_t host;
     int left, right, up, down, pov;
+    unsigned char steer, throttle;
+    unsigned buttons;
     static int last_steer = -1, last_throttle = -1;
     static unsigned last_buttons = ~0u;
 
     io_host_refresh_active();
 
     io_host_sample(&host);
-    s_steer = host.present ? encode_steering(host.steer) : 0x80;
-    s_throttle = host.present ? encode_throttle(host.drive) : 0x80;
+    steer = host.present ? encode_steering(host.steer) : 0x80;
+    throttle = host.present ? encode_throttle(host.drive) : 0x80;
 
     /* MAME analogue fields have digital increment/decrement inputs. Keyboard
      * arrows and controller POV/D-pad take full-lock priority over the axis. */
@@ -137,26 +165,32 @@ static void sample_input(void)
     up = io_key_down(&s_cfg.throttle) || (pov && host.up);
     down = io_key_down(&s_cfg.brake) || (pov && host.down);
     if (left != right)
-        s_steer = left ? 0x00 : 0xFF;
+        steer = left ? 0x00 : 0xFF;
     if (up != down)
-        s_throttle = up ? 0xFE : 0x01;
+        throttle = up ? 0xFE : 0x01;
+    steer = menu_steer(&host, steer);
 
     /* Logical buttons only, from src/bindings.def; which physical line each
      * lands on is the BOARD's business. A row whose `button` is BTN_NONE folds
      * away here: coin slots are counters (coin_edge) and shifter paddles drive
      * a latch (sequential_shift). */
-    s_buttons = 0;
-#define BINDING(key, hydro, offroad, pad_hydro, pad_offroad, button, hl, ol)  \
+    buttons = 0;
+#define BINDING(key, hydro, offroad, arctic, pad_hydro, pad_offroad,       \
+                pad_arctic, button, hl, ol, al)                               \
     if ((button) != BTN_NONE &&                                               \
         (io_key_down(&s_cfg.key) || pad_down(&host, &s_cfg.pad_##key))) \
-        s_buttons |= (button);
-#define BINDING_AXIS(key, hydro, offroad, hl, ol)     /* the axes, above */
-#define BINDING_PAD(key, pad_hydro, pad_offroad, hl, ol)  /* the latch, below */
+        buttons |= (button);
+#define BINDING_AXIS(key, hydro, offroad, arctic, hl, ol, al) /* the axes, above */
+#define BINDING_PAD(key, pad_hydro, pad_offroad, pad_arctic, hl, ol, al) \
+    /* the latch, below */
 #include "bindings.def"
 #undef BINDING
 #undef BINDING_AXIS
 #undef BINDING_PAD
-    s_buttons |= sequential_shift(&host);
+    buttons |= sequential_shift(&host);
+    s_steer = steer;
+    s_throttle = throttle;
+    s_buttons = buttons;
 
     coin_edge(io_key_down(&s_cfg.coin1) || pad_down(&host, &s_cfg.pad_coin1),
               &s_coin1_held, &s_coin1, 1);
@@ -179,6 +213,7 @@ static void sample_input(void)
         last_throttle = s_throttle;
         last_buttons = s_buttons;
     }
+    menu_wheel_trace(s_steer);
 }
 
 /* --- the wheel's queue ---------------------------------------------------
@@ -316,7 +351,7 @@ static void update_force_feedback(double when_ms)
     if (!G->io_dac_out)
         return;
     raw = (int)(signed char)rd8(G->io_dac_out);
-    wheel_submit(-(float)raw / 128.0f, when_ms);
+    wheel_submit(s_menu_mute ? 0.0f : -(float)raw / 128.0f, when_ms);
     /* THE UNITS FIRST, THEN THE PAD. These were the other way round, so
      * rumble.c consumed each frame's channels one frame before they were
      * filled: every impact arrived late and the first frame of every event was

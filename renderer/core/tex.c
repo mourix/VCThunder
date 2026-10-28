@@ -130,6 +130,7 @@ uint32_t vgl_tex_chain_extent(const void *info)
 /* Filled below, next to the decoder it is built from; declared here because
  * grTexSource is what notices that it has gone stale. */
 static void build_decode_tables(vgl_tmu_t *u);
+static int ncc_store(int type, const uint8_t *table);
 
 static void texture_write(int tmu, uint32_t first, uint32_t last)
 {
@@ -543,6 +544,8 @@ void vgl_tex_table(int tmu, int type, const void *data)
                 build_decode_tables(u);
         }
     } else {
+        if (ncc_store(type, (const uint8_t *)data))
+            return;
         /* An NCC table. Neither game downloads one (Hydro's single
          * grTexDownloadTable is a palette and its two grTexNCCTable calls
          * select a table nothing ever filled), so YIQ decoding is not
@@ -551,6 +554,58 @@ void vgl_tex_table(int tmu, int type, const void *data)
                      "of either game contains one and YIQ decoding is not "
                      "implemented", type, tmu);
     }
+}
+
+/* NCC: the nccTable register image (Voodoo2 Graphics Specification 1.16
+ * §5.92; Voodoo3 Specification 1.0 §8.72). Words 0-3 hold Y0..Yf, one byte
+ * each, least significant first; words 4-7 are I0..I3 and 8-11 Q0..Q3, each
+ * {r[26:18], g[17:9], b[8:0]}, nine-bit signed. A YIQ texel is Y in bits 7:4,
+ * I in 3:2, Q in 1:0 (Glide 3.0 Programming Guide Table 10.1), and each
+ * channel is Y + I + Q clamped to 0..255 (the specification's decompression
+ * figure). The table is shared by every unit, as the palette is. */
+static int s9(uint32_t v) { return (v & 0x100u) ? (int)v - 512 : (int)v; }
+
+static int ncc_store(int type, const uint8_t *table)
+{
+    uint32_t w[12];
+    int t, k, c;
+
+    if (type != GR_TEXTABLE_NCC0 && type != GR_TEXTABLE_NCC1)
+        return 0;
+    memcpy(w, table + GR_NCC_PACKED_OFF, sizeof w);
+    for (t = 0; t < VGL_TMUS; t++) {
+        vgl_tmu_t *u = &vgl.tmu[t];
+
+        for (k = 0; k < 16; k++)
+            u->ncc_y[type][k] = (uint8_t)(w[k >> 2] >> ((k & 3) * 8));
+        for (k = 0; k < 4; k++)
+            for (c = 0; c < 3; c++) {
+                u->ncc_i[type][k][c] = (int16_t)s9((w[4 + k] >> (18 - 9 * c)) & 0x1ffu);
+                u->ncc_q[type][k][c] = (int16_t)s9((w[8 + k] >> (18 - 9 * c)) & 0x1ffu);
+            }
+        u->ncc_valid[type] = 1;
+        u->pal_ver++;               /* the YIQ decode tables rebuild from it */
+        if (u->lut_fmt >= 0)
+            build_decode_tables(u);
+    }
+    VGL_LOG_ONCE("tex: NCC table %d downloaded; YIQ textures decode through it",
+                 type);
+    return 1;
+}
+
+/* Table 0: the Glide 3 default, and the only one Arctic downloads. */
+static uint32_t ncc_rgb(const vgl_tmu_t *u, uint8_t texel, int alpha)
+{
+    int y = texel >> 4, i = (texel >> 2) & 3, q = texel & 3, c, rgb[3];
+
+    if (!u->ncc_valid[0])
+        return ((uint32_t)alpha << 24) | 0x00ffffffu;
+    for (c = 0; c < 3; c++) {
+        int v = u->ncc_y[0][y] + u->ncc_i[0][i][c] + u->ncc_q[0][q][c];
+        rgb[c] = v < 0 ? 0 : (v > 255 ? 255 : v);
+    }
+    return ((uint32_t)alpha << 24) | ((uint32_t)rgb[0] << 16) |
+           ((uint32_t)rgb[1] << 8) | (uint32_t)rgb[2];
 }
 
 /* Decode observed direct and palette formats. YIQ remains unsupported because
@@ -606,6 +661,10 @@ static uint32_t decode_texel(const vgl_tmu_t *u, const uint8_t *p)
     }
     case VGL_TEXFMT_ALPHA_INTENSITY_88:
         return argb(p[1], p[0], p[0], p[0]);
+    case VGL_TEXFMT_YIQ_422:
+        return ncc_rgb(u, p[0], 255);
+    case VGL_TEXFMT_AYIQ_8422:      /* alpha in the high byte (Table 10.1) */
+        return ncc_rgb(u, p[0], p[1]);
     case VGL_TEXFMT_AP_88: {
         uint32_t c = u->palette_valid ? u->palette[p[0]] : 0x00ffffffu;
         return argb(p[1], (int)((c >> 16) & 0xff), (int)((c >> 8) & 0xff),

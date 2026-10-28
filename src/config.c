@@ -9,6 +9,7 @@
  * parse: keep the previous layer's and file a note. The other readers cannot
  * share that, because this pass runs before the log opens. */
 #include "vcthunder.h"
+#include "arctic.h"
 #include "settings.h"
 #include "ini.h"
 #include "resource.h"
@@ -211,13 +212,30 @@ static int set_bool(const char *section, const char *key, const char *v,
     return 0;
 }
 
-/* Classify title-scoped sections from the runtime profile table. The shared
- * configuration pass skips all such sections. */
+/* Classify title-scoped sections: every ETS profile, and every win32 title,
+ * which has no profile. The shared configuration pass skips all such sections;
+ * one it missed would apply its keys to every title. */
 static int section_owner_is_title(const char *name, const char *id)
 {
     size_t n = strlen(id);
 
     return _strnicmp(name, id, n) == 0 && (name[n] == '\0' || name[n] == '.');
+}
+
+/* A bare command-line word that names a title: any ETS profile's id, or any
+ * win32 title's. Both tables are generated, so adding a title does not come
+ * back here. */
+static int is_title_word(const char *w)
+{
+    unsigned i;
+
+    for (i = 0; g_profiles[i]; i++)
+        if (_stricmp(g_profiles[i]->id, w) == 0)
+            return 1;
+    for (i = 0; g_arctic_titles[i]; i++)
+        if (_stricmp(g_arctic_titles[i]->ids->id, w) == 0)
+            return 1;
+    return 0;
 }
 
 static int section_is_per_title(const char *name)
@@ -226,6 +244,9 @@ static int section_is_per_title(const char *name)
 
     for (i = 0; g_profiles[i]; i++)
         if (section_owner_is_title(name, g_profiles[i]->id))
+            return 1;
+    for (i = 0; g_arctic_titles[i]; i++)
+        if (section_owner_is_title(name, g_arctic_titles[i]->ids->id))
             return 1;
     return 0;
 }
@@ -646,8 +667,7 @@ int config_parse_argv(shim_config_t *c, int argc, char **argv)
             snprintf(c->vcglide_log, sizeof c->vcglide_log, "%s", argv[++i]);
         else if (strcmp(argv[i], "--link") == 0 && i + 1 < argc)
             snprintf(c->link, sizeof c->link, "%s", argv[++i]);
-        else if (_stricmp(argv[i], "hydro") == 0 ||
-                 _stricmp(argv[i], "offroad") == 0)
+        else if (is_title_word(argv[i]))
             snprintf(c->title, sizeof c->title, "%s", argv[i]);
         else {
             fprintf(stderr,

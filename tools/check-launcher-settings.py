@@ -162,29 +162,34 @@ if len(bindings) != len(binding_items):
 # (SETTING_DEV) is the deliberate exception: parsed, shown nowhere, absent from
 # the shipped file.
 def binding_defaults(macro, columns):
-    """{action: (hydro, offroad)} for one macro, by column index."""
+    """{action: (hydro, offroad, arctic)} for one macro, by column index."""
     out = {}
     for m in re.finditer(
             r"^" + macro + r"\s*\(([^;]*?)\)\s*$", BINDINGS, re.M | re.S):
         parts = [p.strip() for p in m.group(1).split(",")]
-        out[parts[0]] = (parts[columns[0]], parts[columns[1]])
+        out[parts[0]] = tuple(parts[c] for c in columns)
     return out
 
-# BINDING(key, hydro, offroad, pad_hydro, pad_offroad, button, hl, ol)
-# BINDING_AXIS(key, hydro, offroad, hl, ol)
-# BINDING_PAD(key, pad_hydro, pad_offroad, hl, ol)
-expected: dict[tuple[str, str], tuple[str, str]] = {}
-for action, pair in binding_defaults("BINDING", (1, 2)).items():
-    expected[("digital", action)] = tuple(v.strip('"') for v in pair)
-for action, pair in binding_defaults("BINDING_AXIS", (1, 2)).items():
-    expected[("digital", action)] = tuple(v.strip('"') for v in pair)
-for action, pair in binding_defaults("BINDING", (3, 4)).items():
-    expected[("gamepad", action)] = pair
-for action, pair in binding_defaults("BINDING_PAD", (1, 2)).items():
-    expected[("gamepad", action)] = pair
-n_both = len(binding_defaults("BINDING", (1, 2)))
-n_axis = len(binding_defaults("BINDING_AXIS", (1, 2)))
-n_pad = len(binding_defaults("BINDING_PAD", (1, 2)))
+# BINDING(key, hydro, offroad, arctic, pad_hydro, pad_offroad, pad_arctic,
+#         button, hl, ol, al)
+# BINDING_AXIS(key, hydro, offroad, arctic, hl, ol, al)
+# BINDING_PAD(key, pad_hydro, pad_offroad, pad_arctic, hl, ol, al)
+# Each (section, action) maps to its three defaults, and to whether each title
+# HAS the control (a NULL label says it does not, and then its default is moot).
+expected: dict[tuple[str, str], tuple[str, str, str]] = {}
+has: dict[tuple[str, str], tuple[bool, bool, bool]] = {}
+def add(base, macro, values, labels):
+    for action, vals in binding_defaults(macro, values).items():
+        expected[(base, action)] = tuple(v.strip('"') for v in vals)
+        has[(base, action)] = tuple(
+            lab != "NULL" for lab in binding_defaults(macro, labels)[action])
+add("digital", "BINDING", (1, 2, 3), (8, 9, 10))
+add("digital", "BINDING_AXIS", (1, 2, 3), (4, 5, 6))
+add("gamepad", "BINDING", (4, 5, 6), (8, 9, 10))
+add("gamepad", "BINDING_PAD", (1, 2, 3), (4, 5, 6))
+n_both = len(binding_defaults("BINDING", (1, 2, 3)))
+n_axis = len(binding_defaults("BINDING_AXIS", (1, 2, 3)))
+n_pad = len(binding_defaults("BINDING_PAD", (1, 2, 3)))
 if (n_both + n_axis + n_pad != len(bindings) or
         len(expected) != (n_both + n_axis) + (n_both + n_pad)):
     raise SystemExit(
@@ -255,32 +260,38 @@ if shipped_unshipped:
 
 # Hold every shipped binding value to bindings.def's own column.
 wrong: list[str] = []
-for (base, action), (hydro, offroad) in sorted(expected.items()):
+for (base, action), defaults in sorted(expected.items()):
+    hydro = defaults[0]
     shared = shipped_bindings.get(("", base, action))
-    scoped = shipped_bindings.get(("offroad", base, action))
     # AN ABSENT KEY IS NOT A DEFECT, and saying so was this check's own first
     # mistake: it flagged shift1..3, which the file deliberately ships only
     # under [offroad.digital] because Hydro has no shifter. Work the fallback
     # chain instead of the file's shape. Absent everywhere, each cabinet lands
-    # on its OWN bindings.def column and both are right. The one arrangement
+    # on its OWN bindings.def column and all are right. The one arrangement
     # that is wrong is a shared line without the scoped line beside it, because
     # the shared value is tried second and beats the per-title DEFAULT, which is
-    # tried third and never reached.
+    # tried third and never reached. A title without the control is not held to
+    # anything.
     if shared is not None and shared != hydro:
         wrong.append(
             f"[{base}] {action} = {shared}, but bindings.def says {hydro}")
-    if scoped is not None and scoped != offroad:
-        wrong.append(
-            f"[offroad.{base}] {action} = {scoped}, but bindings.def "
-            f"says {offroad}")
-    if offroad != hydro and shared is not None and scoped is None:
-        wrong.append(
-            f"[offroad.{base}] {action} is not shipped, so Offroad reads "
-            f"[{base}]'s {shared} and never bindings.def's {offroad}")
-    if offroad == hydro and scoped is not None:
-        wrong.append(
-            f"[offroad.{base}] {action} = {scoped} restates the shared "
-            f"value; bindings.def gives both cabinets {hydro}")
+    for t, title in ((1, "offroad"), (2, "arctic")):
+        own = defaults[t]
+        scoped = shipped_bindings.get((title, base, action))
+        if not has[(base, action)][t]:
+            continue
+        if scoped is not None and scoped != own:
+            wrong.append(
+                f"[{title}.{base}] {action} = {scoped}, but bindings.def "
+                f"says {own}")
+        if own != hydro and shared is not None and scoped is None:
+            wrong.append(
+                f"[{title}.{base}] {action} is not shipped, so {title} reads "
+                f"[{base}]'s {shared} and never bindings.def's {own}")
+        if own == hydro and scoped is not None:
+            wrong.append(
+                f"[{title}.{base}] {action} = {scoped} restates the shared "
+                f"value; bindings.def gives {title} {hydro} too")
 if wrong:
     raise SystemExit(
         "shipped INI bindings disagree with src/bindings.def:\n  "

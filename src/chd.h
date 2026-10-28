@@ -51,5 +51,10 @@ int chd_huff_decode(const uint8_t *raw, size_t rawlen, uint8_t *out,
                     size_t outlen);
 int chd_flac_decode(const uint8_t *raw, size_t rawlen, uint8_t *out,
                     size_t outlen);
+/* A CD sector's sync and ECMA-130 P/Q parity, rebuilt in place. */
+void chd_cd_rebuild(uint8_t *sector);
+/* One cdlz/cdzl/cdfl hunk of `frames` 2448-byte frames into out. */
+int chd_cd_decode(const char codec[4], const uint8_t *raw, size_t rawlen,
+                  uint8_t *out, unsigned frames);
 
 #endif

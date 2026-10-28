@@ -51,6 +51,12 @@ int aspect_is_4_3(const char *aspect)
 static const game_profile_t k_hydro   = { .id = "hydro" };
 static const game_profile_t k_offroad = { .id = "offroad" };
 const game_profile_t *const g_profiles[] = { &k_hydro, &k_offroad, NULL };
+/* A win32 title has no profile; its sections are named by its identity. One
+ * entry is enough here: what is under test is that the registry is consulted
+ * at all, not how many titles it holds. */
+static const arctic_ids_t   k_arctic_ids = { .id = "arctic" };
+static const arctic_title_t k_arctic     = { .ids = &k_arctic_ids };
+const arctic_title_t *const g_arctic_titles[] = { &k_arctic, NULL };
 const game_profile_t *g_game;
 
 static int failures;

@@ -5,6 +5,15 @@ How VCThunder is put together, and why.
 There is no CPU emulation here. The game's x86 code executes natively. Everything below is about the
 *boundaries* that code reaches through: the OS, the graphics library, the hardware, and how each is replaced.
 
+**Arctic Thunder and Ultimate Arctic Thunder are different.** They are Windows 2000 programs
+from Midway's Graphite cabinet, not Phar Lap ETS images, so the ETS facts in §1 and the startup
+order in §3 are Hydro and Offroad's.
+The Arctic titles' `snow.exe`, `goose.dll` and `gobj.dll` are mapped as ordinary PE images and
+their imports bound by the host (`src/pe_host.c`, `src/arctic.c`); their Glide 3 calls are
+translated onto the same Glide 2 core (`renderer/core/glide3.c`); the cabinet shell `wincsm.exe`
+becomes a thread in the process (`src/arctic_io.c`); and Ultimate Arctic Thunder's KEYLOK II key
+and its watchdog are answered at the boundary (`src/arctic_keylok.c`).
+
 ---
 
 ## 1. The four facts everything follows from
@@ -116,7 +125,8 @@ calls `ExitProcess`.
 | `src/ffb_events.c`, `src/rumble.c` | Pad rumble, the one effect this host derives: the game's own force-feedback cells, read rather than the summed DAC byte, turned into two motor levels. |
 | `src/audio.c`, `src/audio_offroad.c` | The shared WASAPI transport and each title's own audio backend. |
 | `src/timebase.c` | Makes a modern CPU look like a 333 MHz Celeron. Without it the game hangs forever in its own sleep. |
-| `src/chd.c`, `src/fat.c`, `src/ingest.c` | The CHD importer: reads a MAME CHD v5 and the cabinet disk's FAT partitions inside it, checks the executable against the supported build, and writes `data/<title>/`. The launcher and `VCThunder.exe import` both call it. |
+| `src/pe_host.c`, `src/arctic*.c` | The Arctic titles: their images mapped and bound, the cabinet shell, I/O, sound, force feedback, widescreen and Ultimate's key. |
+| `src/chd.c`, `src/fat.c`, `src/ntfs.c`, `src/ingest.c` | The CHD importer: reads a MAME CHD v5 and the cabinet disk's FAT partitions (Arctic's NTFS volume) inside it, checks the executable against the supported build, and writes `data/<title>/`. The launcher and `VCThunder.exe import` both call it. |
 | `src/settings.def` | **The one settings table**: every key the host reads, expanded by both the config parser and the launcher. |
 | `renderer/` | **A separate module and a separate DLL**, sharing no source or header with `src/`. `core/` is portable C99; `win32/` holds the CPU presenter/worker pool and the SDL3 GPU backend. |
 | `tools/` | The conformance harness (`glide-replay.c` and its synthetic capture), the audits `make check` runs, and the build's helpers. |

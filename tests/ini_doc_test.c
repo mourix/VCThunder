@@ -855,6 +855,45 @@ static void test_doc_key_enumeration(const char *folder)
     ini_doc_free(&doc);
 }
 
+/* A line the launcher inserted can be taken out again, its new section with
+ * it, and the result says what the file says. */
+static void test_drop_and_same_content(const char *folder)
+{
+    static const char original[] = "[ffb]\r\nstrength_percent = 100";
+    char path[MAX_PATH];
+    ini_doc_t doc, disk;
+    size_t i;
+    int same = 1;
+
+    snprintf(path, sizeof path, "%.*s\\drop.ini",
+             (int)(sizeof path - sizeof "\\drop.ini"), folder);
+    check(write_bytes(path, original), "write drop fixture");
+    check(ini_doc_load(&doc, path) && ini_doc_load(&disk, path),
+          "load drop fixture twice");
+    check(ini_doc_same_content(&doc, &disk), "a fresh load is the file");
+    check(ini_doc_set(&doc, "hydro.ffb", "strength_percent", "80"),
+          "a new section is appended");
+    check(!ini_doc_same_content(&doc, &disk), "and that is a difference");
+    check(ini_doc_drop(&doc, "hydro.ffb", "strength_percent", 1),
+          "the line is dropped");
+    check(doc.count == disk.count, "with its section and the blank before it");
+    for (i = 0; i < doc.count && i < disk.count; i++)
+        same &= !strcmp(doc.line[i], disk.line[i]);
+    check(same, "...and the lines are the file's, byte for byte");
+    check(ini_doc_same_content(&doc, &disk), "so nothing differs");
+
+    check(ini_doc_set(&doc, "ffb", "strength_percent", "100") &&
+          ini_doc_same_content(&doc, &disk),
+          "setting a key to its own value is no difference");
+    check(ini_doc_set(&doc, "hydro.ffb", "rumble", "") &&
+          ini_doc_set(&doc, "hydro.ffb", "strength_percent", "80") &&
+          ini_doc_drop(&doc, "hydro.ffb", "strength_percent", 1) &&
+          !ini_doc_same_content(&doc, &disk),
+          "a section with another line left in it keeps that line");
+    ini_doc_free(&doc);
+    ini_doc_free(&disk);
+}
+
 int main(void)
 {
     char root[MAX_PATH], folder[MAX_PATH];
@@ -876,6 +915,7 @@ int main(void)
     test_device_scope(folder);
     test_device_identity(folder);
     test_doc_key_enumeration(folder);
+    test_drop_and_same_content(folder);
     if (failures) {
         fprintf(stderr, "ini document tests: %d failure(s)\n", failures);
         return 1;

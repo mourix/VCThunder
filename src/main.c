@@ -7,6 +7,7 @@
  * unpacked and the game CRT is entered.
  */
 #include "vcthunder.h"
+#include "arctic.h"
 #include "ingest.h"
 
 #include <shellapi.h>
@@ -281,7 +282,9 @@ static LONG CALLBACK on_exception(EXCEPTION_POINTERS *ep)
 {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
     DWORD eip  = ep->ContextRecord->Eip;
-    int in_game = (eip >= G->image_base && eip < G->span_end);
+    /* G is NULL until a title is selected, and this handler is installed
+     * before that. */
+    int in_game = G && eip >= G->image_base && eip < G->span_end;
 
     /* Benign notifications, not faults. 0x406D1388 is MS_VC_EXCEPTION (the
      * debugger "name this thread" signal, which graphics runtimes raise for
@@ -519,6 +522,24 @@ static void chdir_to_own_folder(void)
     SetCurrentDirectoryA(path);
 }
 
+/* The operator system's log is the game's, with "-diag" before the extension:
+ * the two processes hand over to each other, and each opens its log "w". */
+static void diag_log_name(char *log, size_t cap)
+{
+    char stem[MAX_PATH];
+    char *dot, *slash;
+
+    snprintf(stem, sizeof stem, "%s", log);
+    dot = strrchr(stem, '.');
+    slash = strrchr(stem, '\\');
+    if (dot && (!slash || dot > slash)) {
+        *dot = 0;
+        snprintf(log, cap, "%s-diag.%s", stem, dot + 1);
+    } else {
+        snprintf(log, cap, "%s-diag", stem);
+    }
+}
+
 __declspec(dllexport) int shim_run(void)
 {
     char cmdbuf[32768];
@@ -531,6 +552,29 @@ __declspec(dllexport) int shim_run(void)
     }
 
     chdir_to_own_folder();
+    /* Arctic Thunder's operator system: this executable again, started by the
+     * game on TEST and by nothing else (arctic_operator_requested()), with the
+     * game's arguments. No launcher, no ini seeding: the game ran first. */
+    if (arctic_operator_requested()) {
+        config_defaults(&g_cfg);
+        config_load_shared(&g_cfg, "vcthunder.ini");
+        if (!config_parse_argv(&g_cfg, argc, argv))
+            ExitProcess(2);
+        /* Which title's operator system is in the command line the game was
+         * started with: arctic_spawn() guarantees the title word is there.
+         * Selected here because everything below reads the title's tables. */
+        if (!arctic_title_select(g_cfg.title)) {
+            fprintf(stderr, "VCThunder: '%s' has no operator system\n",
+                    g_cfg.title);
+            ExitProcess(2);
+        }
+        diag_log_name(g_cfg.log_file, sizeof g_cfg.log_file);
+        log_open(g_cfg.log_file, g_cfg.log_level);
+        config_resolve_graphics(&g_cfg);
+        cpu_policy_apply(g_cfg.cpu_cores);
+        AddVectoredExceptionHandler(1, on_exception);
+        arctic_diag_run();
+    }
     /* AFTER the chdir and before every reader, the launcher included: the
      * shipped ini is a resource in this binary and a pack that has none gets
      * one written here. It never overwrites, so this is a no-op on every run
@@ -555,7 +599,9 @@ __declspec(dllexport) int shim_run(void)
         config_defaults(&g_cfg);
         config_load_shared(&g_cfg, "vcthunder.ini");
         snprintf(g_cfg.title, sizeof g_cfg.title, "%s",
-                 selected == LAUNCHER_HYDRO ? "hydro" : "offroad");
+                 selected == LAUNCHER_HYDRO ? "hydro" :
+                 selected == LAUNCHER_ARCTIC ? "arctic" :
+                 selected == LAUNCHER_UARCTIC ? "uarctic" : "offroad");
     } else {
         config_defaults(&g_cfg);
         config_load_shared(&g_cfg, "vcthunder.ini");
@@ -572,7 +618,16 @@ __declspec(dllexport) int shim_run(void)
      * consumer reads the keys they settle. */
     config_report_notes();
     config_resolve_graphics(&g_cfg);
+    /* Before arctic_run() and game_map(): every thread either title starts
+     * comes after this line. */
+    cpu_policy_apply(g_cfg.cpu_cores);
     AddVectoredExceptionHandler(1, on_exception);
+
+    /* A win32 title has no ETS profile: its own startup, which never returns
+     * (src/arctic.c). Which titles those are is generated, not a name written
+     * here, so the registry decides the path. */
+    if (arctic_title_select(g_cfg.title))
+        arctic_run();
 
     /* The title is chosen ONCE, before anything reads G. Nothing below this
      * point works without it (fs_map, the preloads and every patch address are

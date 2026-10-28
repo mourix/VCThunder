@@ -434,6 +434,105 @@ int ini_doc_remove(ini_doc_t *doc, const char *section, const char *key)
     return 1;
 }
 
+static void doc_delete(ini_doc_t *doc, size_t at)
+{
+    free(doc->line[at]);
+    memmove(&doc->line[at], &doc->line[at + 1],
+            (doc->count - at - 1) * sizeof *doc->line);
+    doc->count--;
+}
+
+static int line_blank(const char *line)
+{
+    while (*line == ' ' || *line == '\t' || *line == '\r' || *line == '\n')
+        line++;
+    return !*line;
+}
+
+int ini_doc_drop(ini_doc_t *doc, const char *section, const char *key,
+                 int empty_section)
+{
+    char current[96] = "";
+    size_t i = 0, header = (size_t)-1;
+    int left = 0;
+
+    while (i < doc->count) {
+        char name[96], k[96], value[INI_VALUE_CAP];
+
+        if (ini_doc_section(doc->line[i], name, sizeof name)) {
+            snprintf(current, sizeof current, "%s", name);
+            if (!_stricmp(name, section) && header == (size_t)-1)
+                header = i;
+        } else if (!_stricmp(current, section)) {
+            if (doc_key_value(doc->line[i], k, sizeof k, value, sizeof value) &&
+                !_stricmp(k, key)) {
+                doc_delete(doc, i);
+                continue;
+            }
+            left |= !line_blank(doc->line[i]);
+        }
+        i++;
+    }
+    if (empty_section && header != (size_t)-1 && !left) {
+        /* The header, the blanks under it, and the one blank ini_doc_set()
+         * put above it (which may be the previous line's terminator). */
+        doc_delete(doc, header);
+        while (header < doc->count && line_blank(doc->line[header]))
+            doc_delete(doc, header);
+        if (header && line_blank(doc->line[header - 1]))
+            doc_delete(doc, header - 1);
+    }
+    return 1;
+}
+
+int ini_doc_has_section(const ini_doc_t *doc, const char *section)
+{
+    char name[96];
+    size_t i;
+
+    for (i = 0; i < doc->count; i++)
+        if (ini_doc_section(doc->line[i], name, sizeof name) &&
+            !_stricmp(name, section))
+            return 1;
+    return 0;
+}
+
+/* The next line that says something, or doc->count: a header counts only
+ * when a non-blank line follows it before the next header. */
+static size_t next_content(const ini_doc_t *doc, size_t i)
+{
+    char name[96];
+
+    for (; i < doc->count; i++) {
+        size_t j;
+
+        if (line_blank(doc->line[i]))
+            continue;
+        if (!ini_doc_section(doc->line[i], name, sizeof name))
+            return i;
+        for (j = i + 1; j < doc->count; j++)
+            if (!line_blank(doc->line[j]))
+                break;
+        if (j < doc->count && !ini_doc_section(doc->line[j], name, sizeof name))
+            return i;
+    }
+    return doc->count;
+}
+
+int ini_doc_same_content(const ini_doc_t *a, const ini_doc_t *b)
+{
+    size_t i = next_content(a, 0), j = next_content(b, 0);
+
+    for (; i < a->count && j < b->count;
+         i = next_content(a, i + 1), j = next_content(b, j + 1)) {
+        size_t n = line_eol(a->line[i]);
+
+        if (n != line_eol(b->line[j]) || memcmp(a->line[i], b->line[j], n))
+            return 0;
+    }
+    return i == a->count && j == b->count;
+}
+
 int ini_doc_save(ini_doc_t *doc, char *why, size_t why_size)
 {
     char tmp[MAX_PATH], bak[MAX_PATH];

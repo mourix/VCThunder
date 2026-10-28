@@ -11,64 +11,71 @@
 
 /* ---- the row --------------------------------------------------------------
  *
- *      BINDING(key, hydro, offroad, pad_hydro, pad_offroad, button,
- *              hydro_label, offroad_label)
+ *      BINDING(key, hydro, offroad, arctic, pad_hydro, pad_offroad,
+ *              pad_arctic, button, hydro_label, offroad_label, arctic_label)
  *          A control with both halves: a keyboard key in [digital] and a
  *          controller button ordinal in [gamepad].
  *
- *      BINDING_AXIS(key, hydro, offroad, hydro_label, offroad_label)
+ *      BINDING_AXIS(key, hydro, offroad, arctic, hydro_label, offroad_label,
+ *                   arctic_label)
  *          Keyboard only. MAME's digital increment/decrement inputs for an
  *          analogue field; a controller drives the axis itself.
  *
- *      BINDING_PAD(key, pad_hydro, pad_offroad, hydro_label, offroad_label)
+ *      BINDING_PAD(key, pad_hydro, pad_offroad, pad_arctic, hydro_label,
+ *                  offroad_label, arctic_label)
  *          Controller only: Offroad's three-position gate as two paddles,
- *          which no keyboard key corresponds to (the three gears do).
+ *          which no keyboard key corresponds to (the three gears do), and
+ *          the select screens' previous and next item, which the steering
+ *          keys already are.
  *
  * `key` is a bare identifier and three things at once: the ini key in BOTH
  * sections, the `controls_config_t` member holding the resolved key code, and,
  * with a `pad_` prefix, the member holding the ordinal. A row cannot name one
  * of those and not the others.
  *
- * `hydro` and `offroad` are MAME key NAMES, not key codes, so a default goes
- * through parse_vk() exactly as a value from the file does. `NONE` is a real
- * answer: the cabinet has no such control.
+ * `hydro`, `offroad` and `arctic` are MAME key NAMES, not key codes, so a
+ * default goes through parse_vk() exactly as a value from the file does.
+ * `NONE` is a real answer: the cabinet has no such control.
  *
- * `pad_hydro` and `pad_offroad` are the same per-title split for the controller
- * half, 0 meaning unbound. TWO COLUMNS AND NOT ONE: a shared column cannot
- * express "the shifter paddles, on the cabinet that has a shifter" without also
- * offering them on the cabinet that does not.
+ * `pad_hydro`, `pad_offroad` and `pad_arctic` are the same per-title split for
+ * the controller half, 0 meaning unbound. ONE COLUMN PER TITLE AND NOT ONE: a
+ * shared column cannot express "the shifter paddles, on the cabinet that has a
+ * shifter" without also offering them on the cabinets that do not.
  *
  * `button` is the logical switch line in src/io.h, or BTN_NONE for a control
  * that is not one: the coin slots are counters, and the shifter paddles drive
- * a latch that produces one of the three gear lines.
+ * a latch that produces one of the three gear lines. Arctic's board writer
+ * (arctic_io.c) places its controls itself and does not read this column.
  *
- * A NULL `hydro_label` means the control is Offroad's alone; the launcher hides
- * it while Hydro is selected. */
+ * A NULL label means that cabinet does not have the control; the launcher
+ * hides the row while that game is selected. Arctic's Attack is Hydro's Boost
+ * row: the button under the right thumb, and the default key and pad button
+ * the other two cabinets give it. */
 
 /* ---- coins and the operator panel --------------------------------------- */
-BINDING     (coin1,        "5",      "5",      7, 7, BTN_NONE,
-             "Coin 1",      "Coin 1")
-BINDING     (coin2,        "6",      "6",      0, 0, BTN_NONE,
-             "Coin 2",      "Coin 2")
-BINDING     (start1,       "1",      "1",      8, 8, BTN_START,
-             "Start",       "Start")
-BINDING     (service1,     "9",      "9",      0, 0, BTN_SERVICE,
-             "Service credit", "Service credit")
-BINDING     (service_mode, "F2",     "F2",     0, 0, BTN_TEST,
-             "Operator menu", "Operator menu")
+BINDING     (coin1,        "5",      "5",      "5",      7, 7, 7, BTN_NONE,
+             "Coin 1",      "Coin 1",      "Coin 1")
+BINDING     (coin2,        "6",      "6",      "6",      0, 0, 0, BTN_NONE,
+             "Coin 2",      "Coin 2",      "Coin 2")
+BINDING     (start1,       "1",      "1",      "1",      8, 8, 8, BTN_START,
+             "Start",       "Start",       "Start")
+BINDING     (service1,     "9",      "9",      "9",      0, 0, 0, BTN_SERVICE,
+             "Service credit", "Service credit", "Service credit")
+BINDING     (service_mode, "F2",     "F2",     "F2",     0, 0, 0, BTN_TEST,
+             "Operator menu", "Operator menu", "Operator menu")
 
 /* ---- the analogue fields, as digital overrides --------------------------- */
-BINDING_AXIS(steer_left,   "LEFT",   "LEFT",
-             "Steer left",  "Steer left")
-BINDING_AXIS(steer_right,  "RIGHT",  "RIGHT",
-             "Steer right", "Steer right")
+BINDING_AXIS(steer_left,   "LEFT",   "LEFT",   "LEFT",
+             "Steer left",  "Steer left",  "Steer left")
+BINDING_AXIS(steer_right,  "RIGHT",  "RIGHT",  "RIGHT",
+             "Steer right", "Steer right", "Steer right")
 /* Offroad has a pedal box where Hydro has a throttle lever, so gas and brake
  * move off the arrows onto Ctrl and Alt. That frees the modifiers Hydro used
  * for its views, which is why the two cabinets disagree from here down. */
-BINDING_AXIS(throttle,     "UP",     "LCTRL",
-             "Accelerator", "Accelerator")
-BINDING_AXIS(brake,        "DOWN",   "LALT",
-             "Brake",       "Brake")
+BINDING_AXIS(throttle,     "UP",     "LCTRL",  "UP",
+             "Accelerator", "Accelerator", "Throttle")
+BINDING_AXIS(brake,        "DOWN",   "LALT",   "NONE",
+             "Brake",       "Brake",       NULL)
 
 /* ---- what the player's hands are on -------------------------------------- */
 /* BOOST IS THE BOTTOM FACE BUTTON ON PURPOSE AND MUST NOT MOVE TO A SHOULDER.
@@ -78,29 +85,29 @@ BINDING_AXIS(brake,        "DOWN",   "LALT",
  * gets the most discoverable button on the pad, why both cabinets agree on it,
  * and why no camera convention from a modern racing game is a reason to
  * rearrange the four face buttons around it. */
-BINDING     (boost,        "LCTRL",  "SPACE",  1, 1, BTN_BOOST,
-             "Boost",       "Nitro")
-BINDING     (view_high,    "LALT",   "V",      2, 2, BTN_VIEW1,
-             "High view",   "Slam cam")
-BINDING     (view_low,     "SPACE",  "B",      3, 3, BTN_VIEW2,
-             "Low view",    "Chase cam")
-BINDING     (view_pilot,   "LSHIFT", "N",      4, 4, BTN_VIEW3,
-             "Pilot view",  "Chopper cam")
-BINDING     (volume_down,  "MINUS",  "MINUS",  0, 0, BTN_VOL_DN,
-             "Volume down", "Volume down")
-BINDING     (volume_up,    "EQUALS", "EQUALS", 0, 0, BTN_VOL_UP,
-             "Volume up",   "Volume up")
+BINDING     (boost,        "LCTRL",  "SPACE",  "LCTRL",  1, 1, 1, BTN_BOOST,
+             "Boost",       "Nitro",       "Attack")
+BINDING     (view_high,    "LALT",   "V",      "NONE",   2, 2, 0, BTN_VIEW1,
+             "High view",   "Slam cam",    NULL)
+BINDING     (view_low,     "SPACE",  "B",      "NONE",   3, 3, 0, BTN_VIEW2,
+             "Low view",    "Chase cam",   NULL)
+BINDING     (view_pilot,   "LSHIFT", "N",      "NONE",   4, 4, 0, BTN_VIEW3,
+             "Pilot view",  "Chopper cam", NULL)
+BINDING     (volume_down,  "MINUS",  "MINUS",  "MINUS",  0, 0, 0, BTN_VOL_DN,
+             "Volume down", "Volume down", "Volume down")
+BINDING     (volume_up,    "EQUALS", "EQUALS", "EQUALS", 0, 0, 0, BTN_VOL_UP,
+             "Volume up",   "Volume up",   "Volume up")
 
 /* ---- Offroad's three-speed shifter --------------------------------------- */
 /* Maintained lines, not edges: no SHIFT bit set is how the game derives
  * neutral. Hydro has no shifter, so its default is NONE rather than a key it
  * would ignore. */
-BINDING     (shift1,       "NONE",   "Z",      0, 0, BTN_SHIFT1,
-             NULL,          "Gear 1")
-BINDING     (shift2,       "NONE",   "X",      0, 0, BTN_SHIFT2,
-             NULL,          "Gear 2")
-BINDING     (shift3,       "NONE",   "C",      0, 0, BTN_SHIFT3,
-             NULL,          "Gear 3")
+BINDING     (shift1,       "NONE",   "Z",      "NONE",   0, 0, 0, BTN_SHIFT1,
+             NULL,          "Gear 1",      NULL)
+BINDING     (shift2,       "NONE",   "X",      "NONE",   0, 0, 0, BTN_SHIFT2,
+             NULL,          "Gear 2",      NULL)
+BINDING     (shift3,       "NONE",   "C",      "NONE",   0, 0, 0, BTN_SHIFT3,
+             NULL,          "Gear 3",      NULL)
 /* The same gate on two paddles: each rising edge steps a latch that produces
  * one of the three lines above. See sequential_shift() in io_board.c.
  *
@@ -116,7 +123,17 @@ BINDING     (shift3,       "NONE",   "C",      0, 0, BTN_SHIFT3,
  * and RIGHT_SHOULDER to bits 4 and 5, which are ordinals 5 and 6. A DirectInput
  * wheel numbers its paddles for itself, which is what the launcher's
  * press-to-bind is for. */
-BINDING_PAD (shift_up,                         0, 6,
-             NULL,          "Shift up")
-BINDING_PAD (shift_down,                       0, 5,
-             NULL,          "Shift down")
+BINDING_PAD (shift_up,                                 0, 6, 0,
+             NULL,          "Shift up",    NULL)
+BINDING_PAD (shift_down,                               0, 5, 0,
+             NULL,          "Shift down",  NULL)
+
+/* The select screens (menu_wheel.c): one item back or on per press, held to
+ * repeat, and on a select screen only; LB and RB, the pair a pad player
+ * reaches for in a menu. In Offroad they are the paddles too: on a select
+ * screen the press goes to the menu and the gear stays where it was
+ * (io_board.c sequential_shift()). */
+BINDING_PAD (menu_prev,                                5, 5, 5,
+             "Previous item", "Previous item", "Previous item")
+BINDING_PAD (menu_next,                                6, 6, 6,
+             "Next item",   "Next item",   "Next item")

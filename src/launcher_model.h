@@ -29,27 +29,34 @@ extern const setting_desc_t *const k_settings;
 /* The launcher's half of src/bindings.def: labels and per-title defaults, as
  * the text this file writes back. The catalogue is NOT duplicated here, see
  * the note in bindings.def. */
+/* The titles the launcher configures, in the order of bindings.def's
+ * columns. */
+enum { MODEL_TITLE_HYDRO, MODEL_TITLE_OFFROAD, MODEL_TITLE_ARCTIC,
+       MODEL_TITLES };
+
 typedef struct {
     const char *key;                    /* the ini key, in BOTH sections    */
-    const char *hydro_label;            /* NULL: Offroad's control alone    */
-    const char *offroad_label;
+    /* One per title, MODEL_TITLE_* order. NULL: that cabinet has no such
+     * control, and the row is hidden while it is selected. */
+    const char *label[MODEL_TITLES];
     /* The keyboard default per title, or NULL where the control has no
      * keyboard half, which is the shifter paddles and nothing else. */
-    const char *hydro_key, *offroad_key;
+    const char *key_default[MODEL_TITLES];
     int         has_pad;                /* is there a [gamepad] ordinal?    */
-    /* The controller default per title, 0 for unbound. Two columns for the
-     * same reason the keyboard half has two: see bindings.def. */
-    unsigned    hydro_pad, offroad_pad;
+    /* The controller default per title, 0 for unbound. One column per title
+     * for the same reason the keyboard half has them: see bindings.def. */
+    unsigned    pad_default[MODEL_TITLES];
 } action_desc_t;
 
 /* ACTION_COUNT HAS TO BE A CONSTANT EXPRESSION, not `sizeof k_actions`, now
  * that the array is declared in a header and defined in one translation unit.
  * The same table, walked to produce one enumerator each. */
 enum {
-#define BINDING(key, hydro, offroad, pad_hydro, pad_offroad, button, hl, ol)  \
+#define BINDING(key, hydro, offroad, arctic, pad_hydro, pad_offroad,       \
+                pad_arctic, button, hl, ol, al)          VCT_ACTION_##key,
+#define BINDING_AXIS(key, hydro, offroad, arctic, hl, ol, al)  VCT_ACTION_##key,
+#define BINDING_PAD(key, pad_hydro, pad_offroad, pad_arctic, hl, ol, al)      \
     VCT_ACTION_##key,
-#define BINDING_AXIS(key, hydro, offroad, hl, ol)   VCT_ACTION_##key,
-#define BINDING_PAD(key, pad_hydro, pad_offroad, hl, ol)  VCT_ACTION_##key,
 #include "bindings.def"
 #undef BINDING
 #undef BINDING_AXIS
@@ -123,8 +130,10 @@ void        model_device_entry_added(void);
  *   per_cabinet     is setting `i` one of those choices?
  *
  * 0 from the three that change something: out of memory. */
-/* "hydro" or "offroad", the prefix of a cabinet's own sections. */
+/* "hydro", "offroad" or "arctic", the prefix of a cabinet's own sections,
+ * and the game's name as the page writes it. */
 const char *model_title_id(int title);
+const char *model_title_name(int title);
 /* A key the launcher does not edit, as one cabinet reads it: [<title>.<section>]
  * if it has a value there, else [<section>]. 0 when neither has the key. */
 int         model_title_raw(int title, const char *section, const char *key,
@@ -190,7 +199,7 @@ int         model_device_label_ensure(const char *provider,
 
 /* ---- bindings ------------------------------------------------------------ */
 
-/* MODEL_BINDING_CAP bytes each, writable. `title` is 0 hydro, 1 offroad. */
+/* MODEL_BINDING_CAP bytes each, writable. `title` is a MODEL_TITLE_*. */
 char       *model_key_binding(int title, unsigned action);
 char       *model_pad_binding(int title, unsigned action);
 

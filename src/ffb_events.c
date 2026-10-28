@@ -480,10 +480,21 @@ static void boost_poll(double when_ms)
     s_ev_boosting = on;
 }
 
+/* A title outside the ETS profiles (Arctic) supplies its own channels; G is
+ * then not read at all. */
+static int (*s_source)(ffb_event_state_t *out);
+
+void ffb_events_set_source(int (*take)(ffb_event_state_t *out))
+{
+    s_source = take;
+}
+
 int ffb_events_take(ffb_event_state_t *out)
 {
     if (!out)
         return 0;
+    if (s_source)
+        return s_source(out);
     out->anchored = s_have_channels;
     out->have = s_have_channels && ffb_path_live();
     /* One-shot, consumed by reading and consumed ATOMICALLY, see the latch. */

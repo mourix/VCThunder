@@ -58,6 +58,12 @@ static di8_create_fn s_create;
 static LPDIRECTINPUT8A s_di;
 static LPDIRECTINPUTDEVICE8A s_dev;
 static LPDIRECTINPUTEFFECT s_force;
+/* A spring, for a cabinet whose motor is a position servo (di_set_spring()).
+ * Made on first use, on the actuator the constant force was accepted on. */
+static LPDIRECTINPUTEFFECT s_spring;
+static DWORD s_ffb_axis;
+static int s_ffb_by_id, s_spring_refused;
+static LONG s_spring_last[3] = { 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF };
 static HWND s_window;
 static ATOM s_class;
 static char s_name[MAX_PATH];
@@ -201,7 +207,7 @@ static void di_load_ini(const char *path)
     if (ini_read_scoped(path, "analog", "dinput_name", "",
                         s_cfg.device_name, sizeof s_cfg.device_name))
         LOGI("io: dinput_name = %s, from [%s.analog]", s_cfg.device_name,
-             G->id);
+             ini_title());
 
     s_cfg.ffb_enabled = di_bool(path, "ffb", "enabled", 1);
     s_cfg.ffb_gain_percent = di_percent(path, "ffb", "device_gain_percent", 100, 100);
@@ -817,6 +823,8 @@ static int create_effects(void)
         if (SUCCEEDED(hr) && s_force) {
             LOGI("io: constant force on the %s (0x%08lX)",
                  rung[i].how, (unsigned long)rung[i].axis);
+            s_ffb_axis = rung[i].axis;
+            s_ffb_by_id = rung[i].by_id;
             IDirectInputEffect_Start(s_force, 1, 0);
             return 1;
         }
@@ -1367,6 +1375,11 @@ void di_close(void)
         IDirectInputEffect_Release(s_force);
         s_force = NULL;
     }
+    if (s_spring) {
+        IDirectInputEffect_Stop(s_spring);
+        IDirectInputEffect_Release(s_spring);
+        s_spring = NULL;
+    }
     if (s_dev) {
         /* Hand the wheel back the way it was found. A device released while
          * autocenter is off stays limp for whatever the user runs next, and
@@ -1441,6 +1454,8 @@ static int poll_slot(unsigned s, DIJOYSTATE2 *js)
             if (s_force)
                 IDirectInputEffect_Start(s_force, 1, 0);
             s_last_magnitude = 0x7FFFFFFF;
+            if (s_spring)
+                IDirectInputEffect_Start(s_spring, 1, 0);
         }
     }
     IDirectInputDevice8_Poll(slot->dev);
@@ -1665,6 +1680,90 @@ void di_set_force(float f)
      * once when created and again after each re-Acquire, which is the case
      * DIEP_START was there to cover. */
     IDirectInputEffect_SetParameters(s_force, &eff, DIEP_TYPESPECIFICPARAMS);
+}
+
+/* A SPRING, FOR A MOTOR THAT IS A POSITION SERVO. The cabinet commands where
+ * the wheel should be and how hard to hold it there; DirectInput's condition
+ * effect is that, run in the wheel's own firmware, and its sign is defined by
+ * the axis position rather than by motor wiring, so [ffb] direction does not
+ * apply. `centre` is in the host's steering units and is taken back through
+ * the steering role's invert and travel to the axis; the deadzone is ignored. */
+static void spring_params(DIEFFECT *eff, DICONDITION *c, LONG offset,
+                             LONG coeff, LONG sat)
+{
+    memset(c, 0, sizeof *c);
+    c->lOffset = offset;
+    c->lPositiveCoefficient = c->lNegativeCoefficient = coeff;
+    c->dwPositiveSaturation = c->dwNegativeSaturation = (DWORD)sat;
+    memset(eff, 0, sizeof *eff);
+    eff->dwSize = sizeof *eff;
+    eff->cbTypeSpecificParams = sizeof *c;
+    eff->lpvTypeSpecificParams = c;
+}
+
+void di_set_spring(float centre, float coefficient, float saturation)
+{
+    const di_role_t *r = &s_roles.role[DI_ROLE_STEER];
+    DIEFFECT eff;
+    DICONDITION c;
+    LONG offset, coeff, sat;
+    float axis;
+
+    if (!s_force || s_spring_refused)
+        return;
+    axis = (r->invert ? -centre : centre) * (float)r->range_percent / 100.0f;
+    axis = io_clamp_unit(axis);
+    if (coefficient < 0.0f) coefficient = 0.0f;
+    if (coefficient > 1.0f) coefficient = 1.0f;
+    if (saturation < 0.0f) saturation = 0.0f;
+    if (saturation > 1.0f) saturation = 1.0f;
+    offset = (LONG)(axis * (float)DI_FFNOMINALMAX);
+    coeff = (LONG)(coefficient * (float)DI_FFNOMINALMAX);
+    sat = (LONG)(saturation * (float)DI_FFNOMINALMAX *
+                 (float)s_cfg.ffb_strength_percent / 100.0f);
+    if (sat > DI_FFNOMINALMAX)
+        sat = DI_FFNOMINALMAX;
+    if (sat > s_peak_magnitude)
+        s_peak_magnitude = sat;
+
+    if (!s_spring) {
+        DWORD axis_id = s_ffb_axis;
+        LONG direction = 0;
+        HRESULT hr;
+
+        spring_params(&eff, &c, offset, coeff, sat);
+        eff.dwFlags = DIEFF_CARTESIAN |
+                      (s_ffb_by_id ? DIEFF_OBJECTIDS : DIEFF_OBJECTOFFSETS);
+        eff.dwDuration = INFINITE;
+        eff.dwGain = DI_FFNOMINALMAX;
+        eff.dwTriggerButton = DIEB_NOTRIGGER;
+        eff.cAxes = 1;
+        eff.rgdwAxes = &axis_id;
+        eff.rglDirection = &direction;
+        hr = IDirectInputDevice8_CreateEffect(s_dev, &GUID_Spring, &eff,
+                                              &s_spring, NULL);
+        if (FAILED(hr) || !s_spring) {
+            s_spring = NULL;
+            s_spring_refused = 1;
+            LOGW("io: the wheel refused a spring effect (hr=0x%08lX); the "
+                 "cabinet's motor cannot be driven", (unsigned long)hr);
+            return;
+        }
+        LOGI("io: spring effect on the actuator the constant force uses");
+        IDirectInputEffect_Start(s_spring, 1, 0);
+        s_spring_last[0] = offset;
+        s_spring_last[1] = coeff;
+        s_spring_last[2] = sat;
+        return;
+    }
+    if (offset == s_spring_last[0] && coeff == s_spring_last[1] &&
+        sat == s_spring_last[2])
+        return;
+    s_spring_last[0] = offset;
+    s_spring_last[1] = coeff;
+    s_spring_last[2] = sat;
+    spring_params(&eff, &c, offset, coeff, sat);
+    IDirectInputEffect_SetParameters(s_spring, &eff, DIEP_TYPESPECIFICPARAMS);
 }
 
 /* Peak |magnitude| sent to DirectInput since the last call, and reset. 10000 is

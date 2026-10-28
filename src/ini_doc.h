@@ -54,6 +54,20 @@ int  ini_doc_key_index(const ini_doc_t *doc, const char *section,
  * stays visible, and stops being read. */
 int  ini_doc_remove(ini_doc_t *doc, const char *section, const char *key);
 
+/* DELETE the key's lines outright, for undoing a line the launcher itself
+ * inserted this session; a line the user wrote is ini_doc_remove()'s. With
+ * `empty_section`, a section this leaves with nothing in it goes too, header
+ * and the blank line ini_doc_set() put before it. */
+int  ini_doc_drop(ini_doc_t *doc, const char *section, const char *key,
+                  int empty_section);
+
+/* Does the document have a [section] header, keys or not? */
+int  ini_doc_has_section(const ini_doc_t *doc, const char *section);
+
+/* Would saving `a` change what `b` says? Line endings, blank lines and
+ * sections with nothing in them are not content. */
+int  ini_doc_same_content(const ini_doc_t *a, const ini_doc_t *b);
+
 /* Write through a temporary and MoveFileEx, keeping a .bak. On failure
  * nothing is touched and `why` says what Windows refused. */
 int  ini_doc_save(ini_doc_t *doc, char *why, size_t why_size);

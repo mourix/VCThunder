@@ -857,6 +857,154 @@ static void test_per_cabinet_controls(void)
     model_close();
 }
 
+/* ---- force feedback per cabinet ----------------------------------------
+ *
+ * Every [ffb] key is read [<title>.ffb] then [ffb], split or not, so the page
+ * always shows one cabinet's and an edit goes under its title. */
+static const char *ffb_value(const char *key)
+{
+    return model_value("ffb", key);
+}
+
+static void test_per_cabinet_ffb(void)
+{
+    char path[MAX_PATH], why[512], *before, *after;
+    int changed = -1, i = setting_find("ffb", "strength_percent");
+    unsigned k;
+
+    check(open_model("ffb.ini",
+            "[ffb]\r\n"
+            "strength_percent = 100\r\n"
+            "rumble_texture_percent = 50\r\n"
+            "[hydro.ffb]\r\n"
+            "rumble =\r\n"
+            "[offroad.ffb]\r\n"
+            "rumble_texture_percent = 8\r\n",
+            path, sizeof path), "the scratch ini opened");
+    check(model_controls_show(MODEL_TITLE_HYDRO), "Hydro can be shown");
+    check(!model_controls_split(), "a cabinet's tuning splits no controller");
+    check(i >= 0 && model_setting_per_cabinet((unsigned)i),
+          "a force-feedback row is per cabinet");
+    check(!strcmp(setting_section((unsigned)i), "hydro.ffb"),
+          "and is written under the shown cabinet's title");
+    check(!strcmp(ffb_value("rumble_texture_percent"), "50"),
+          "Hydro falls through to [ffb]");
+    check(!strcmp(ffb_value("rumble"), "true"),
+          "an empty cabinet line is absent: the default, not an empty box");
+
+    check(model_controls_show(MODEL_TITLE_OFFROAD), "Offroad can be shown");
+    check(!strcmp(ffb_value("rumble_texture_percent"), "8"),
+          "Offroad reads its own [offroad.ffb]");
+    snprintf(model_slot((unsigned)i), INI_VALUE_CAP, "%s", "80");
+    check(model_controls_show(MODEL_TITLE_HYDRO), "back to Hydro");
+    check(doc_says("offroad.ffb", "strength_percent", "80"),
+          "Offroad's edit went into the document on the way past");
+    check(!strcmp(ffb_value("strength_percent"), "100"),
+          "and Hydro's strength is still the shared one");
+
+    changed = -1;
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK &&
+          changed == 1, "Apply writes the one edit");
+    check(doc_says("ffb", "strength_percent", "100") &&
+          !doc_has("hydro.ffb", "strength_percent") &&
+          !doc_has("arctic.ffb", "strength_percent"),
+          "R4: the shared value and the other cabinets are not written");
+    check(doc_says("hydro.ffb", "rumble", ""),
+          "and the empty line nobody touched is left as it was");
+
+    check(model_reopen(), "the file reads back");
+    model_load();
+    check(model_controls_title() == MODEL_TITLE_HYDRO &&
+          !strcmp(ffb_value("strength_percent"), "100"),
+          "Hydro is still shown, at the shared strength");
+    model_controls_show(MODEL_TITLE_OFFROAD);
+    check(!strcmp(ffb_value("strength_percent"), "80"),
+          "and Offroad's comes back from [offroad.ffb]");
+    model_controls_show(MODEL_TITLE_ARCTIC);
+    check(!strcmp(ffb_value("strength_percent"), "100") &&
+          !strcmp(ffb_value("rumble_texture_percent"), "50"),
+          "Arctic, with no section of its own, reads [ffb]");
+
+    before = read_bytes(path);
+    changed = -1;
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK &&
+          changed == 0, "R4: switching through all three writes nothing");
+    after = read_bytes(path);
+    check(before && after && !strcmp(before, after),
+          "...and the file is byte-identical");
+    free(after);
+    free(before);
+
+    scan_ini_problems();
+    for (k = 0; k < model_problem_count(); k++)
+        if (strstr(model_problem(k), ".ffb"))
+            break;
+    check(k == model_problem_count(),
+          "a cabinet's own tuning is not reported as a line nothing shows");
+    model_controls_show(MODEL_TITLE_HYDRO);
+    model_close();
+}
+
+/* Edits made and undone across game-tab switches cancel out: Apply writes
+ * nothing, and so leaves vcthunder.ini.bak alone. */
+static void test_per_cabinet_ffb_revert(void)
+{
+    static const char *const text[2] = {
+        "[ffb]\r\nstrength_percent = 100\r\n",
+        "[ffb]\r\nstrength_percent = 100\r\n"
+        "[hydro.ffb]\r\nstrength_percent = 90\r\n",
+    };
+    char path[MAX_PATH], bak[MAX_PATH], why[512], *before, *after;
+    int changed, i = setting_find("ffb", "strength_percent"), page;
+    unsigned t;
+
+    for (t = 0; t < 2; t++) {
+        const char *was = t ? "90" : "100";
+
+        check(open_model("ffb-revert.ini", text[t], path, sizeof path),
+              "the scratch ini opened");
+        snprintf(bak, sizeof bak, "%s.bak", path);
+        DeleteFileA(bak);
+        before = read_bytes(path);
+        model_controls_show(MODEL_TITLE_HYDRO);
+        snprintf(model_slot((unsigned)i), INI_VALUE_CAP, "%s", "80");
+        check(model_controls_show(MODEL_TITLE_OFFROAD), "to Offroad");
+        check(doc_says("hydro.ffb", "strength_percent", "80"),
+              "Hydro's edit went into the document");
+        check(model_controls_show(MODEL_TITLE_HYDRO), "back to Hydro");
+        snprintf(model_slot((unsigned)i), INI_VALUE_CAP, "%s", was);
+        check(model_controls_show(MODEL_TITLE_OFFROAD), "and away again");
+        changed = -1;
+        check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK &&
+              changed == 0, t ? "an edit undone on a line the file has "
+                                "writes nothing"
+                              : "an edit undone on a line a switch added "
+                                "writes nothing");
+        after = read_bytes(path);
+        check(before && after && !strcmp(before, after),
+              "...and the file is byte-identical");
+        check(GetFileAttributesA(bak) == INVALID_FILE_ATTRIBUTES,
+              "...and no backup was made of it");
+        free(after);
+        free(before);
+        model_controls_show(MODEL_TITLE_HYDRO);
+        model_close();
+    }
+
+    /* The game a switch left behind is validated as the shown one is. */
+    check(open_model("ffb-revert.ini", text[0], path, sizeof path),
+          "the scratch ini opened");
+    model_controls_show(MODEL_TITLE_OFFROAD);
+    snprintf(model_slot((unsigned)i), INI_VALUE_CAP, "%s", "lots");
+    check(model_controls_show(MODEL_TITLE_HYDRO), "away from Offroad");
+    page = -1;
+    check(!validate_settings(why, sizeof why, &page) &&
+          !strncmp(why, "Offroad Thunder: ", 17) &&
+          page == k_settings[i].page,
+          "a bad value on a game not shown is refused, naming the game");
+    model_close();
+}
+
 static void test_per_cabinet_split_on(void)
 {
     char path[MAX_PATH], why[512];
@@ -873,7 +1021,8 @@ static void test_per_cabinet_split_on(void)
     check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK,
           "Apply succeeds");
     check(doc_says("hydro.analog", "provider", "dinput") &&
-          doc_says("offroad.analog", "provider", "dinput"),
+          doc_says("offroad.analog", "provider", "dinput") &&
+          doc_says("arctic.analog", "provider", "dinput"),
           "what the page held when it split is both cabinets' starting point, "
           "and the provider in both is what makes the file read as split");
     check(!doc_has("analog", "provider"),
@@ -930,6 +1079,60 @@ static void test_per_cabinet_split_on(void)
     check(model_problem_count() == 1 &&
           strstr(model_problem(0), "chooses a controller") != NULL,
           "the dead selector is listed on Help");
+    model_close();
+}
+
+/* THE THIRD TITLE: Arctic's own column of bindings.def, the controls it does
+ * not have, its own sections, and a controller choice of its own. */
+static void test_arctic_title(void)
+{
+    char path[MAX_PATH], why[512];
+    binding_item_t row[8], one;
+    int changed = -1;
+    unsigned n;
+
+    check(!strcmp(model_title_id(MODEL_TITLE_ARCTIC), "arctic") &&
+          !strcmp(model_title_name(MODEL_TITLE_ARCTIC), "Arctic Thunder"),
+          "Arctic's section prefix and name");
+    check(k_actions[VCT_ACTION_boost].label[MODEL_TITLE_ARCTIC] &&
+          !strcmp(k_actions[VCT_ACTION_boost].label[MODEL_TITLE_ARCTIC],
+                  "Attack"), "Hydro's Boost row is Arctic's Attack");
+    check(!k_actions[VCT_ACTION_brake].label[MODEL_TITLE_ARCTIC] &&
+          !k_actions[VCT_ACTION_view_high].label[MODEL_TITLE_ARCTIC] &&
+          !k_actions[VCT_ACTION_shift1].label[MODEL_TITLE_ARCTIC],
+          "no brake, views or shifter on Arctic's page");
+
+    check(open_model("arctic.ini", "[analog]\r\nprovider = auto\r\n",
+                     path, sizeof path), "the scratch ini opened");
+    n = model_binding_items(MODEL_TITLE_ARCTIC, VCT_ACTION_boost, row, 8);
+    check(n == 2 && !row[0].pad && !strcmp(row[0].value, "LCTRL") &&
+          row[1].pad && !strcmp(row[1].value, "1"),
+          "Attack defaults to LCTRL and pad button 1");
+    one.pad = 0;
+    snprintf(one.value, sizeof one.value, "%s", "SPACE");
+    check(model_binding_set_items(MODEL_TITLE_ARCTIC, VCT_ACTION_boost, &one,
+                                  1), "Attack can be rebound");
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK,
+          "Apply succeeds");
+    check(doc_says("arctic.digital", "boost", "SPACE") &&
+          !doc_has("digital", "boost") && !doc_has("hydro.digital", "boost"),
+          "an Arctic binding goes under [arctic.digital] and nowhere else");
+    model_close();
+
+    check(open_model("arctic-own.ini",
+            "[analog]\r\n"
+            "provider = dinput\r\n"
+            "[arctic.analog]\r\n"
+            "provider = xinput\r\n",
+            path, sizeof path), "the scratch ini opened");
+    check(model_controls_split(), "a choice in [arctic.analog] splits the file");
+    model_controls_show(MODEL_TITLE_ARCTIC);
+    check(!strcmp(model_value("analog", "provider"), "xinput"),
+          "Arctic's tab reads its own choice");
+    model_controls_show(MODEL_TITLE_OFFROAD);
+    check(!strcmp(model_value("analog", "provider"), "dinput"),
+          "and Offroad falls through to [analog]");
+    model_controls_show(MODEL_TITLE_HYDRO);
     model_close();
 }
 
@@ -1297,12 +1500,15 @@ int main(void)
     test_configured_device();
     test_save_writes_only_what_changed();
     test_per_cabinet_controls();
+    test_per_cabinet_ffb();
+    test_per_cabinet_ffb_revert();
     test_per_cabinet_split_on();
     test_per_cabinet_review();
     test_binding_save();
     test_binding_slots();
     test_binding_default_spacing();
     test_defaults_restore();
+    test_arctic_title();
 
     if (failures) {
         fprintf(stderr, "launcher model tests: %d failure(s)\n", failures);

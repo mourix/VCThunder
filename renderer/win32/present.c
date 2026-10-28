@@ -613,6 +613,18 @@ void vgl_present_frame(const uint32_t *buf, int w, int h, int swap_interval)
         memcpy(out, src, (size_t)s_rw * 4);
     }
     extend_undrawn_edges();
+    /* The DAC's table, on the copy that is shown (vgl.h). */
+    if (vgl_gamma.on) {
+        size_t i, n = (size_t)s_rw * (size_t)s_rh;
+
+        for (i = 0; i < n; i++) {
+            uint32_t c = s_rgb[i];
+
+            s_rgb[i] = ((uint32_t)vgl_gamma.lut[0][(c >> 16) & 0xffu] << 16) |
+                       ((uint32_t)vgl_gamma.lut[1][(c >> 8) & 0xffu] << 8) |
+                       (uint32_t)vgl_gamma.lut[2][c & 0xffu];
+        }
+    }
     s_bmi->bmiHeader.biWidth  = s_rw;
     s_bmi->bmiHeader.biHeight = -s_rh;
     if (!GetClientRect(s_wnd, &rc) || rc.right <= 0 || rc.bottom <= 0)

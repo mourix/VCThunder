@@ -86,6 +86,9 @@ static probe_device_t s_devices[INPUT_PROBE_MAX_DEVICES];
 static unsigned s_device_count;
 static int s_selected = -1;
 static HWND s_owner;
+/* The window non-exclusive reads are tied to: s_owner, or a dialog of ours in
+ * front of it (input_probe_follow_window). */
+static HWND s_coop;
 
 static HMODULE s_di_module, s_xi_module, s_mm_module;
 static LPDIRECTINPUT8A s_di;
@@ -284,7 +287,7 @@ static void stop_force_test(void)
     if (s_di_exclusive && s_exclusive_dev) {
         IDirectInputDevice8_Unacquire(s_exclusive_dev);
         IDirectInputDevice8_SetCooperativeLevel(
-            s_exclusive_dev, s_owner, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+            s_exclusive_dev, s_coop, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
         IDirectInputDevice8_Acquire(s_exclusive_dev);
     }
     s_exclusive_dev = NULL;
@@ -541,7 +544,7 @@ const char *input_probe_axis_label(unsigned index)
 int input_probe_start(HWND owner)
 {
     input_probe_stop();
-    s_owner = owner;
+    s_owner = s_coop = owner;
     enumerate_dinput();
     enumerate_xinput();
     enumerate_winmm();
@@ -580,7 +583,7 @@ static int open_dinput(probe_device_t *d)
     }
     if (FAILED(IDirectInputDevice8_SetDataFormat(d->dev, &c_dfDIJoystick2)) ||
         FAILED(IDirectInputDevice8_SetCooperativeLevel(
-                   d->dev, s_owner, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND))) {
+                   d->dev, s_coop, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND))) {
         IDirectInputDevice8_Release(d->dev);
         d->dev = NULL;
         d->open_failed = 1;
@@ -646,7 +649,10 @@ static int poll_dinput(const probe_device_t *d, input_probe_state_t *out)
     for (i = 0; i < IO_MAX_BUTTONS; i++)
         if (js.rgbButtons[i] & 0x80)
             io_button_set(out->buttons, i);
-    out->pov = js.rgdwPOV[0] == 0xFFFFFFFFu ? -1 : (int)js.rgdwPOV[0];
+    /* Centred is documented as -1 and some drivers answer 0xFFFF; the low
+     * word covers both, as pov_digital() in dinput.c does. */
+    out->pov = (js.rgdwPOV[0] & 0xFFFFu) == 0xFFFFu ? -1
+                                                    : (int)js.rgdwPOV[0];
     return 1;
 }
 
@@ -775,7 +781,7 @@ int input_probe_test_force(void)
             dev, s_owner, DISCL_EXCLUSIVE | DISCL_FOREGROUND);
         if (FAILED(hr) || FAILED(IDirectInputDevice8_Acquire(dev))) {
             IDirectInputDevice8_SetCooperativeLevel(
-                dev, s_owner, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+                dev, s_coop, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
             IDirectInputDevice8_Acquire(dev);
             return 0;
         }
@@ -908,5 +914,26 @@ void input_probe_stop(void)
     s_joy_get_caps = NULL;
     s_joy_get_pos_ex = NULL;
     s_device_count = 0;
-    s_owner = NULL;
+    s_owner = s_coop = NULL;
+}
+
+void input_probe_follow_window(HWND window)
+{
+    unsigned i;
+
+    if (!window)
+        window = s_owner;
+    if (!window || window == s_coop)
+        return;
+    s_coop = window;
+    for (i = 0; i < s_device_count; i++) {
+        LPDIRECTINPUTDEVICE8A dev = s_devices[i].dev;
+
+        if (!dev || (s_di_exclusive && dev == s_exclusive_dev))
+            continue;
+        IDirectInputDevice8_Unacquire(dev);
+        IDirectInputDevice8_SetCooperativeLevel(
+            dev, window, DISCL_NONEXCLUSIVE | DISCL_FOREGROUND);
+        IDirectInputDevice8_Acquire(dev);
+    }
 }

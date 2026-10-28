@@ -431,6 +431,18 @@ float4 over_ps(CopyOut i) : SV_Target0
     return tex0.Load(int3(p, 0));
 }
 
+/* The display's gamma table, as the DAC applies it on the way out: tex0 the
+ * display, texel for pixel; tex1 the table, 256x1, entry i of each channel at
+ * x = i (gpu.c, gamma_apply). The display is 8 bits a channel, so the index is
+ * exact. */
+float4 gamma_ps(CopyOut i) : SV_Target0
+{
+    float4 c = tex0.Load(int3(int2(i.pos.xy), 0));
+    uint3 k = uint3(c.rgb * 255.0 + 0.5);
+    return float4(tex1.Load(int3(k.r, 0, 0)).r, tex1.Load(int3(k.g, 0, 0)).g,
+                  tex1.Load(int3(k.b, 0, 0)).b, 1.0);
+}
+
 /* Under a bezel, the presented picture and the art over it: one filtered
  * sample, the art premultiplied with its mips; the pipeline blends or not. */
 float4 bezel_ps(CopyOut i) : SV_Target0

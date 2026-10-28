@@ -131,6 +131,7 @@ static SDL_GPUGraphicsPipeline *s_easu_pipe, *s_rcas_pipe;
 enum { MAGNIFY_BILINEAR, MAGNIFY_CATMULL_ROM, MAGNIFY_FSR1 };
 static int s_magnifier;         /* [graphics] upscale_2d */
 static int s_texmag_catmull;    /* VCGLIDE_TEXMAG = catmull_rom */
+static const char *s_swap_mode; /* the present mode the swapchain took */
 static int s_layer_used[2];     /* the layer holds something */
 static int s_layer_stale[2];    /* s_layer_up does not show it yet */
 static int s_run;               /* a 2D run is open, on s_run_buffer */
@@ -154,6 +155,14 @@ static SDL_GPUShader *s_bezel_ps;
 static SDL_GPUGraphicsPipeline *s_bezel_pipe, *s_bezel_pic_pipe;
 static SDL_GPUTexture *s_bezel_tex;
 static SDL_GPUSampler *s_bezel_sampler;
+
+/* The display's gamma table (vgl.h): a 256x1 lookup texture, uploaded again
+ * whenever the game loads a table, and the copy of the display the pass
+ * reads while it writes the display. */
+static SDL_GPUShader *s_gamma_ps;
+static SDL_GPUGraphicsPipeline *s_gamma_pipe;
+static SDL_GPUTexture *s_gamma_lut, *s_gamma_src;
+static unsigned s_gamma_gen;
 static SDL_GPUTextureSamplerBinding s_pass_bind[2];
 static int s_pass_bind_valid, s_pass_scissor_valid, s_surface_pushed;
 static SDL_Rect s_pass_scissor;
@@ -939,6 +948,22 @@ int vgl_gpu_preload(void)
         vgl_log(0, "gpu: fixed resource creation failed: %s", SDL_GetError());
         goto done;
     }
+    {
+        ID3DBlob *gms = compile_shader("gamma_ps", "ps_5_1");
+
+        if (gms) {
+            s_gamma_ps = make_shader(gms, SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1);
+            ID3D10Blob_Release(gms);
+        }
+        if (s_gamma_ps)
+            s_gamma_pipe = layer_pipeline(s_gamma_ps, 0, 0, 1);
+        s_gamma_lut = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                                   SDL_GPU_TEXTUREUSAGE_SAMPLER, 256, 1, 1);
+        if (!s_gamma_pipe || !s_gamma_lut) {
+            vgl_log(0, "gpu: gamma pass creation failed: %s", SDL_GetError());
+            goto done;
+        }
+    }
     s_ready = 1;
     vgl_log(0, "gpu: SDL %d.%d.%d, driver %s, D3D12/DXBC backend ready",
             SDL_MAJOR_VERSION, SDL_MINOR_VERSION, SDL_MICRO_VERSION,
@@ -998,6 +1023,8 @@ static void release_surface_resources(void)
     if (s_lfb_tex) SDL_ReleaseGPUTexture(device(), s_lfb_tex);
     if (s_display) SDL_ReleaseGPUTexture(device(), s_display);
     s_depth = s_native = s_native_depth = s_lfb_tex = s_display = NULL;
+    if (s_gamma_src) SDL_ReleaseGPUTexture(device(), s_gamma_src);
+    s_gamma_src = NULL;
     for (i = 0; i < 2; i++) {
         if (s_layer[i]) SDL_ReleaseGPUTexture(device(), s_layer[i]);
         if (s_layer_up[i]) SDL_ReleaseGPUTexture(device(), s_layer_up[i]);
@@ -1345,10 +1372,37 @@ static int create_window(void *caller_window, int window_scale)
         vgl_log(0, "gpu: SDL swapchain claim failed: %s", SDL_GetError());
         return 0;
     }
-    if (SDL_WindowSupportsGPUPresentMode(device(), s_window,
-                                         SDL_GPU_PRESENTMODE_IMMEDIATE))
-        SDL_SetGPUSwapchainParameters(device(), s_window,
-            SDL_GPU_SWAPCHAINCOMPOSITION_SDR, SDL_GPU_PRESENTMODE_IMMEDIATE);
+    /* A claimed swapchain defaults to VSYNC, which waits on the display and
+     * can make the games miss their own deadline.
+     * Mailbox is the other mode that never waits; it just does not tear. */
+    {
+        static const struct {
+            SDL_GPUPresentMode mode;
+            const char *name;
+        } k_modes[] = {
+            { SDL_GPU_PRESENTMODE_IMMEDIATE, "immediate" },
+            { SDL_GPU_PRESENTMODE_MAILBOX,   "mailbox" },
+        };
+        char why[160] = "not supported";
+        size_t i;
+
+        s_swap_mode = "vsync";
+        for (i = 0; i < sizeof k_modes / sizeof k_modes[0]; i++) {
+            if (!SDL_WindowSupportsGPUPresentMode(device(), s_window,
+                                                  k_modes[i].mode))
+                continue;
+            if (SDL_SetGPUSwapchainParameters(device(), s_window,
+                    SDL_GPU_SWAPCHAINCOMPOSITION_SDR, k_modes[i].mode)) {
+                s_swap_mode = k_modes[i].name;
+                break;
+            }
+            snprintf(why, sizeof why, "%s refused: %s", k_modes[i].name,
+                     SDL_GetError());
+        }
+        if (i == sizeof k_modes / sizeof k_modes[0])
+            vgl_log(0, "gpu: WARNING no present mode that never waits (%s); "
+                    "presenting with vsync, which can slow the game", why);
+    }
     /* Bounds nothing: settle_frame() finishes every submission before the
      * next is recorded, so one frame is in flight whatever this says. Three
      * is what the settle was measured with, and the only reason it stays. Do
@@ -1378,6 +1432,11 @@ static int recreate_display(void)
         SDL_ReleaseGPUTexture(device(), s_display);
     }
     s_display = next;
+    if (s_gamma_src) {
+        SDL_WaitForGPUIdle(device());
+        SDL_ReleaseGPUTexture(device(), s_gamma_src);
+        s_gamma_src = NULL;
+    }
     return 1;
 }
 
@@ -1465,9 +1524,9 @@ int vgl_gpu_open(void *caller_window, int w, int h, int raster_w, int raster_h,
     QueryPerformanceCounter(&s_fps_start);
     s_next_present = s_fps_start;
     s_fps_frames = 0;
-    vgl_log(0, "gpu: SDL3 %s, internal target %dx%d (%dx), native LFB %dx%d%s",
+    vgl_log(0, "gpu: SDL3 %s, internal target %dx%d (%dx), native LFB %dx%d, %s%s",
             SDL_GetGPUDeviceDriver(device()), s_iw, s_ih, s_scale, s_w, s_h,
-            present ? ", immediate swapchain" : ", headless");
+            present ? s_swap_mode : "headless", present ? " swapchain" : "");
     if (s_scale > 1)
         vgl_log(0, "gpu: 2D layer magnified by %s, 3D textures by %s",
                 vgl_cfg.upscale_2d, vgl_cfg.texmag);
@@ -2633,6 +2692,53 @@ static void blit(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *src,
     SDL_BlitGPUTexture(cmd, &bi);
 }
 
+/* The DAC's table over the finished display, after the 2D layer and the
+ * margins: the display is copied out and drawn back through the table. */
+static void gamma_apply(void)
+{
+    unsigned w = (unsigned)(s_rw * s_scale), h = (unsigned)(s_rh * s_scale);
+    SDL_GPUTexture *src[2];
+    ps_data_t ps;
+    uint8_t rgba[256 * 4];
+    int i;
+
+    if (!vgl_gamma.on || !s_gamma_pipe || !s_display || s_lost)
+        return;
+    /* Released with the display it copies (recreate_display), so a size
+     * change never frees it under the frame being recorded. */
+    if (!s_gamma_src) {
+        s_gamma_src = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                                   SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                   SDL_GPU_TEXTUREUSAGE_SAMPLER, w, h, 1);
+        if (!s_gamma_src) {
+            VGL_LOG_CAPPED(3, "gpu: cannot allocate the %ux%u gamma copy: %s",
+                           w, h, SDL_GetError());
+            return;
+        }
+    }
+    if (s_gamma_gen != vgl_gamma.gen) {
+        for (i = 0; i < 256; i++) {
+            rgba[i * 4 + 0] = vgl_gamma.lut[0][i];
+            rgba[i * 4 + 1] = vgl_gamma.lut[1][i];
+            rgba[i * 4 + 2] = vgl_gamma.lut[2][i];
+            rgba[i * 4 + 3] = 255;
+        }
+        if (!queue_rgba(s_gamma_lut, 0, 256, 1, rgba))
+            return;
+        s_gamma_gen = vgl_gamma.gen;
+    }
+    end_pass();
+    if (!command())
+        return;
+    blit(s_cmd, s_display, 0, 0, (int)w, (int)h, s_gamma_src, 0, 0, (int)w,
+         (int)h, SDL_GPU_LOADOP_DONT_CARE, SDL_GPU_FILTER_NEAREST);
+    memset(&ps, 0, sizeof ps);
+    src[0] = s_gamma_src;
+    src[1] = s_gamma_lut;
+    layer_quadn(s_display, SDL_GPU_LOADOP_DONT_CARE, NULL, s_gamma_pipe, src, 2,
+                &ps, NULL);
+}
+
 static void prepare_display(SDL_GPUCommandBuffer *cmd)
 {
     int vx0 = s_vx0, vy0 = s_vy0, vx1 = s_vx1, vy1 = s_vy1;
@@ -2668,6 +2774,7 @@ static void prepare_display(SDL_GPUCommandBuffer *cmd)
         blit(cmd, s_display, (vx1 - 1) * s_scale, 0, s_scale, rh,
              s_display, vx1 * s_scale, 0, (s_rw - vx1) * s_scale, rh,
              SDL_GPU_LOADOP_LOAD, SDL_GPU_FILTER_NEAREST);
+    gamma_apply();
 }
 
 static int borderless_fullscreen(void)

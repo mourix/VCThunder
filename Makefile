@@ -109,7 +109,7 @@ DLL_LDFLAGS := $(LDFLAGS_REPRO) -static-libgcc -shared
 # Verify with `objdump -p build/VCThunder.dll | grep 'DLL Name'`; dinput8.dll
 # must not appear, or a machine without it stops loading the host at all.
 LIBS        := -lkernel32 -luser32 -lgdi32 -lcomctl32 -lcomdlg32 -lshell32 \
-               -lole32 -lavrt -lbcrypt -ldinput8
+               -lole32 -lavrt -lbcrypt -ldinput8 -lversion
 
 # The per-title profiles are generated C, compiled in alongside the sources.
 GEN_SRC := $(wildcard generated/*.c)
@@ -126,8 +126,12 @@ WS_SHIFT_TEST     := build/tests/ws-shift-test.exe
 NET_LINK_TEST     := build/tests/net-link-test.exe
 RUMBLE_TEST       := build/tests/rumble-model-test.exe
 BUTTON_TEST       := build/tests/button-mask-test.exe
+LAUNCHER_PAD_TEST := build/tests/launcher-pad-test.exe
+KEYLOK_TEST       := build/tests/keylok-test.exe
+MENU_MODEL_TEST   := build/tests/menu-model-test.exe
 IMPORT_TEST       := build/tests/import-test.exe
 BEZEL_TEST        := build/tests/bezel-test.exe
+CPU_TEST          := build/tests/cpu-test.exe
 DI_ROLE_TEST      := build/tests/di-role-test.exe
 LAUNCHER_MODEL_TEST := build/tests/launcher-model-test.exe
 CONFIG_TEST       := build/tests/config-test.exe
@@ -415,8 +419,9 @@ conformance-accept: conformance-frames
 
 
 .PHONY: all check check-full defs deps pack pack-cfg pack-ini clean renderer tools ini-doc-test \
-        launcher-model-test \
+        launcher-model-test launcher-pad-test \
         config-test round-trip-test emitter-test button-test di-role-test import-test bezel-test \
+        keylok-test menu-model-test cpu-test \
         FORCE \
         conformance conformance-frames conformance-accept widescreen-test net-link-test \
         probe-dll
@@ -616,6 +621,15 @@ check:
 	@echo "== the 128-button mask, against the 32-bit code it replaced =="
 	@$(MAKE) --no-print-directory button-test
 	@echo
+	@echo "== the launcher driven from a controller =="
+	@$(MAKE) --no-print-directory launcher-pad-test
+	@echo
+	@echo "== the cabinet key, against snow.exe's own checks =="
+	@$(MAKE) --no-print-directory keylok-test
+	@echo
+	@echo "== the select screens' virtual wheel, on modelled screens =="
+	@$(MAKE) --no-print-directory menu-model-test
+	@echo
 	@echo "== steering, gas and brake from different controllers =="
 	@$(MAKE) --no-print-directory di-role-test
 	@echo
@@ -624,6 +638,9 @@ check:
 	@echo
 	@echo "== bezel art: PNG decoding, the screen hole, the layout =="
 	@$(MAKE) --no-print-directory bezel-test
+	@echo
+	@echo "== the cores a hybrid processor gives the game =="
+	@$(MAKE) --no-print-directory cpu-test
 	@echo
 	@echo "== renderer conformance (synthetic capture, CPU reference) =="
 	@$(MAKE) --no-print-directory conformance
@@ -805,13 +822,47 @@ $(BUTTON_TEST): tests/button_mask_test.c src/io.h src/vcthunder.h
 button-test: $(BUTTON_TEST)
 	@./$(BUTTON_TEST)
 
+# The launcher driven from a controller: what a press means and where a move
+# lands, on a pinned clock, with no window and no device.
+$(LAUNCHER_PAD_TEST): tests/launcher_pad_test.c src/launcher_pad.c \
+                src/launcher_pad.h src/io.h src/vcthunder.h
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -Isrc -Itests -o $@ $< -lkernel32
+
+launcher-pad-test: $(LAUNCHER_PAD_TEST)
+	@./$(LAUNCHER_PAD_TEST)
+
+# The key Ultimate Arctic Thunder asks for, against every check the game
+# performs on one. No key, no device and no game: src/keylok.c is pure.
+$(KEYLOK_TEST): tests/keylok_test.c src/keylok.c src/keylok.h
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -Isrc -Itests -o $@ \
+	  tests/keylok_test.c src/keylok.c -lkernel32
+
+keylok-test: $(KEYLOK_TEST)
+	@./$(KEYLOK_TEST)
+
+# A key, a hat or a stick on a select screen: one item a press, held where it
+# was left, and handed back to a wheel that is turned. src/menu_model.c is
+# pure, and the screens it is driven against are modelled in the test.
+$(MENU_MODEL_TEST): tests/menu_model_test.c src/menu_model.c src/menu_model.h
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -Isrc -Itests -o $@ \
+	  tests/menu_model_test.c src/menu_model.c -lkernel32 -lm
+
+menu-model-test: $(MENU_MODEL_TEST)
+	@./$(MENU_MODEL_TEST)
+
 # The CHD importer's pieces with no game: a cabinet-shaped disk built in
-# memory through src/fat.c, hand-assembled FLAC frames, CRC-16's check value.
+# memory through src/fat.c, an NTFS volume through src/ntfs.c, a CD image
+# through src/iso.c, hand-assembled FLAC frames and CD hunks, the CD parity
+# checked by its own syndromes, CRC-16's check value.
 $(IMPORT_TEST): tests/import_test.c src/chd.c src/chd.h src/fat.c src/fat.h \
-                $(DEC_OBJ)
+                src/iso.c src/iso.h \
+                src/ntfs.c src/ntfs.h $(DEC_OBJ)
 	@mkdir -p $(dir $@)
 	$(CC) $(LINK_CFLAGS) -I$(ZLIB_DIR) -I$(LZMA_DIR) $(LDFLAGS_REPRO) -o $@ \
-	  tests/import_test.c src/chd.c src/fat.c $(DEC_OBJ) -lkernel32
+	  tests/import_test.c src/chd.c src/fat.c src/iso.c src/ntfs.c $(DEC_OBJ) -lkernel32
 
 import-test: $(IMPORT_TEST)
 	@./$(IMPORT_TEST)
@@ -828,6 +879,15 @@ $(BEZEL_TEST): tests/bezel_test.c src/bezel.c src/bezel.h \
 
 bezel-test: $(BEZEL_TEST)
 	@./$(BEZEL_TEST)
+
+# The choice src/cpu.c makes on a hybrid processor, over CPU set lists built
+# in the test: the machine running it is only ever one kind of processor.
+$(CPU_TEST): tests/cpu_test.c src/cpu.c src/vcthunder.h
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) $(LDFLAGS_REPRO) -o $@ $< -lkernel32
+
+cpu-test: $(CPU_TEST)
+	@./$(CPU_TEST)
 
 # Which controller each axis role is read from, and what it reads when that
 # controller does not answer. src/di_role.c
@@ -916,7 +976,7 @@ pack: $(EXE) $(DLL) $(VGL_DLL) $(SDL3_RUNTIME_OUT)
 	elif [ ! -d $(PACKDIR)/data/hydro ] || [ ! -d $(PACKDIR)/data/offroad ]; then \
 	  echo "import your games into it: put your .chd files in $(PACKDIR)/ and run VCThunder.exe"; \
 	fi
-	@echo "run it as:  VCThunder.exe (launcher) | VCThunder.exe hydro | VCThunder.exe offroad"
+	@echo "run it as:  VCThunder.exe (launcher) | VCThunder.exe hydro | VCThunder.exe offroad | VCThunder.exe arctic"
 
 # The INI is the RUN directory's configuration, not a build output. Copying it
 # unconditionally would silently discard whatever was being tested there, so

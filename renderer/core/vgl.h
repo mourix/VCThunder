@@ -131,6 +131,11 @@ typedef struct {
     unsigned lut_pal_ver;               /* palette generation they were built from */
     unsigned pal_ver;                   /* bumped when a palette download changes it */
     unsigned mem_ver;                   /* bumped by every texture-memory write */
+    /* The two NCC tables, decoded from the packed register image (tex.c).
+     * Like the palette, one set serves every unit. */
+    uint8_t  ncc_y[2][16];
+    int16_t  ncc_i[2][4][3], ncc_q[2][4][3];
+    uint8_t  ncc_valid[2];
 
     /* state */
     int      min_filter, mag_filter;
@@ -240,6 +245,20 @@ typedef struct {
 } vgl_dev_t;
 
 extern vgl_dev_t vgl;
+
+/* The display's gamma table (Glide 3's grLoadGammaTable, glide3.c), applied
+ * as each frame is presented and never written into the frame buffer: the
+ * Voodoo3 indexes its DAC's lookup table with the frame buffer's colour on
+ * the way to the monitor (Voodoo3 Specification 1.0, "Video Output Gamma
+ * Correction"), so a frame-buffer read, a capture and a frame dump all see
+ * the picture as drawn. `on` is 0 while the table is the identity. */
+typedef struct {
+    uint8_t  lut[3][256];               /* red, green, blue */
+    int      on;
+    unsigned gen;                       /* bumped on every load */
+} vgl_gamma_t;
+
+extern vgl_gamma_t vgl_gamma;
 
 /* Conformance-sensitive readings remain switches so the harness can reproduce
  * their A/B evidence. Set from the environment by the seam; the defaults are

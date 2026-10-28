@@ -19,8 +19,8 @@ static char s_save[MAX_PATH];
 
 /* One line per distinct path that takes the write route, so a run says which
  * files it considers the game's rather than the dump's. Small and bounded:
- * both titles together have eight. */
-#define FS_SEEN_MAX 32
+ * the ETS titles together have eight, Arctic Thunder about twenty. */
+#define FS_SEEN_MAX 64
 static char s_seen[FS_SEEN_MAX][MAX_PATH];
 static int s_seen_count;
 
@@ -232,7 +232,6 @@ static void seed_from_dump(const char *save_path, const char *data_path)
 const char *fs_map_path_mode(const char *in, char *out, size_t out_sz,
                              fs_access_t mode)
 {
-    char other[MAX_PATH];
     const char *leaf = in;
 
     if (!in || !*in)
@@ -246,11 +245,26 @@ const char *fs_map_path_mode(const char *in, char *out, size_t out_sz,
     while (*leaf == '\\' || *leaf == '/')
         leaf++;
 
-    if (snprintf(out, out_sz, "%s\\%s", s_save, leaf) >= (int)out_sz ||
-        snprintf(other, sizeof other, "%s\\%s", s_data, leaf) >= (int)sizeof other) {
+    if (!fs_overlay_path(s_data, s_save, leaf, out, out_sz, mode)) {
         LOGW("fs: path too long, passing through: '%s'", in);
         return in;
     }
+    LOGT("fs: '%s' -> '%s' (%s)", in, out,
+         mode == FS_WRITE ? "write" : mode == FS_DELETE ? "delete" : "read");
+    return out;
+}
+
+const char *fs_overlay_path(const char *data, const char *save,
+                            const char *leaf, char *out, size_t out_sz,
+                            fs_access_t mode)
+{
+    char other[MAX_PATH];
+
+    while (*leaf == '\\' || *leaf == '/')
+        leaf++;
+    if (snprintf(out, out_sz, "%s\\%s", save, leaf) >= (int)out_sz ||
+        snprintf(other, sizeof other, "%s\\%s", data, leaf) >= (int)sizeof other)
+        return NULL;
 
     /* Normalise separators so the log is readable and Windows is happy. */
     for (char *p = out; *p; p++)
@@ -265,7 +279,7 @@ const char *fs_map_path_mode(const char *in, char *out, size_t out_sz,
      * and the seed below want this one, and neither can find its file without
      * it: `d:\audt1.nvr` is `AUDT1.NVR` on the disk. */
     if (!exists(other))
-        fs_resolve_ci(s_data, leaf, other, sizeof other);
+        fs_resolve_ci(data, leaf, other, sizeof other);
 
     switch (mode) {
     case FS_WRITE:
@@ -291,14 +305,11 @@ const char *fs_map_path_mode(const char *in, char *out, size_t out_sz,
          * case fallback as the dump: a pack carried from a case-insensitive
          * host to a case-sensitive one has the game's own files in whatever
          * spelling that host recorded. */
-        if (exists(out) || fs_resolve_ci(s_save, leaf, out, out_sz))
+        if (exists(out) || fs_resolve_ci(save, leaf, out, out_sz))
             break;
         snprintf(out, out_sz, "%s", other);
         break;
     }
-
-    LOGT("fs: '%s' -> '%s' (%s)", in, out,
-         mode == FS_WRITE ? "write" : mode == FS_DELETE ? "delete" : "read");
     return out;
 }
 

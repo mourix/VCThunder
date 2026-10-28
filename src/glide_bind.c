@@ -149,6 +149,30 @@ static void glide_publish_raster(int w, int h, int native_lfb_width)
     }
 }
 
+/* ---- the geometry, for a title that opens its own surface (glide_int.h) -- */
+
+int glide_widescreen_width(int height)
+{
+    return widescreen_width(height);
+}
+
+int glide_surface_for_raster(int requested, int raster_w, int raster_h,
+                             int *surface_w, int *surface_h)
+{
+    int e = glide_enum_for_raster(requested, raster_w, raster_h);
+    int known = e >= 0 && e < (int)(sizeof GLIDE_RESOLUTION /
+                                    sizeof GLIDE_RESOLUTION[0]);
+
+    *surface_w = known ? GLIDE_RESOLUTION[e].width : 0;
+    *surface_h = known ? GLIDE_RESOLUTION[e].height : 0;
+    return e;
+}
+
+void glide_publish_field(int raster_w, int raster_h, int native_w)
+{
+    glide_publish_raster(raster_w, raster_h, native_w);
+}
+
 /* EVERY GEOMETRY DECISION THIS HOST MAKES, IN ONE FUNCTION.
  *
  * There are three numbers and they are easy to confuse, which is why they are
@@ -489,6 +513,20 @@ static void gl_clip_window(unsigned min_x, unsigned min_y,
         s_real_clip(min_x, min_y, max_x, max_y);
 }
 
+/* An output path, made absolute before it crosses: the provider may open it
+ * after an Arctic title has changed directory into its read-only package. */
+static void set_path_env(const char *var, const char *path)
+{
+    char full[MAX_PATH];
+
+    if (!path[0]) {
+        SetEnvironmentVariableA(var, path);
+        return;
+    }
+    ini_resolve_path(path, full, sizeof full);
+    SetEnvironmentVariableA(var, full);
+}
+
 /* Configure and preload vcglide before game mapping. Configuration crosses the
  * DLL boundary through environment variables, and vglInit loads backend
  * dependencies while LoadLibrary remains available. */
@@ -496,9 +534,9 @@ static void vcglide_configure(void)
 {
     char n[32];
 
-    SetEnvironmentVariableA("VCGLIDE_LOG",     g_cfg.vcglide_log);
-    SetEnvironmentVariableA("VCGLIDE_CAPTURE", g_cfg.glide_capture);
-    SetEnvironmentVariableA("VCGLIDE_FRAMES",  g_cfg.glide_frames);
+    set_path_env("VCGLIDE_LOG",     g_cfg.vcglide_log);
+    set_path_env("VCGLIDE_CAPTURE", g_cfg.glide_capture);
+    set_path_env("VCGLIDE_FRAMES",  g_cfg.glide_frames);
     SetEnvironmentVariableA("VCGLIDE_TITLE",   G ? G->id : "unknown");
     snprintf(n, sizeof n, "%u", g_cfg.glide_capture_frames);
     SetEnvironmentVariableA("VCGLIDE_CAPTURE_FRAMES", n);

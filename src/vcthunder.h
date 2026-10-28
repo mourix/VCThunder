@@ -430,6 +430,14 @@ const char *fs_map_path_mode(const char *in, char *out, size_t out_sz,
                              fs_access_t mode);
 /* FS_READ, for the callers that never write. */
 const char *fs_map_path(const char *in, char *out, size_t out_sz);
+/* The same rule over any pair of folders: `leaf` (relative) under `save` for
+ * a write, a delete, or a read of a file the game has written, and under
+ * `data` for any other read; the dump's copy is seeded into `save` on the
+ * first write. Returns `out`, or NULL when the path does not fit. Arctic
+ * Thunder applies it per cabinet folder (src/arctic_fs.c). */
+const char *fs_overlay_path(const char *data, const char *save,
+                            const char *leaf, char *out, size_t out_sz,
+                            fs_access_t mode);
 
 /* Resolve `rel` under `base` in the case the FILESYSTEM uses, component by
  * component. Writes `out` and returns 1 only when every component resolved, so
@@ -551,6 +559,12 @@ const char *di_slot_name(unsigned slot);
  * rate: an unchanged magnitude does not reach the driver. */
 void di_set_force(float force);
 
+/* Hold the wheel at `centre` (-1..+1, steering units) with a spring of
+ * `coefficient` 0..1 whose force is capped at `saturation` 0..1, for a cabinet
+ * whose motor is a position servo. Unchanged parameters do not reach the
+ * driver. No-op without a force-feedback wheel. */
+void di_set_spring(float centre, float coefficient, float saturation);
+
 /* Peak |magnitude| handed to DirectInput since the last call, 0..10000, and
  * reset by reading. 10000 is the API's full scale. */
 long di_peak_force(void);
@@ -620,6 +634,11 @@ int input_probe_poll_device(unsigned index, input_probe_state_t *state);
  * DirectInput is made exclusive only for the duration of the test and is
  * returned to non-exclusive foreground polling before gameplay starts. */
 int input_probe_test_force(void);
+/* Tie DirectInput reads to `window`, a dialog of ours in front of the owner
+ * (NULL: the owner again). Reads are foreground-only, and a message box in
+ * front of the launcher would otherwise leave every DirectInput pad dead on
+ * it. */
+void input_probe_follow_window(HWND window);
 void input_probe_stop(void);
 
 /* -------------------------------------------------------------- audio.c: */
@@ -637,6 +656,15 @@ int  audio_ready(void);
  * [audio] output and [audio] balance: front is the bridged front-speaker mono
  * bus, seat is the seat-woofer bus. Shared by both title-specific mixers. */
 void audio_route_buses(float front, float seat, float *left, float *right);
+
+/* Set [audio] output, balance and volume without opening a device, for a
+ * title that plays through its own API (Arctic's DirectSound), and read back
+ * what they resolve to: the cabinet flag, the two bus trims, the mix gain and
+ * the user gain. audio_preload() calls the first. */
+void audio_route_config(const char *routing, unsigned balance,
+                        unsigned volume_percent);
+void audio_route_gains(int *cabinet, float *front, float *seat, float *mix,
+                       float *user);
 
 /* Install the selected title's audio backend. Hydro replaces
  * _audio_dspcmd_*; Offroad replaces the 11-entry Audiolib YMF jump table. Run
@@ -690,6 +718,12 @@ void profile_interleave_tick(void);
 void profile_attract_poll(void);
 void profile_shutdown(void);
 
+/* ---------------------------------------------------------------- cpu.c: */
+
+/* Which cores the process runs on: `[timing] cpu_cores`. Before the game's
+ * first thread, so every thread without its own CPU set inherits it. */
+void cpu_policy_apply(const char *mode);
+
 /* ----------------------------------------------------------- timebase.c: */
 
 /* Make a modern CPU look like the cabinet's 333 MHz Celeron. Without this the
@@ -729,6 +763,9 @@ void window_geometry(int view_w, int view_h);
 /* Bezel art is active: size the window to the art's shape, with its screen
  * hole as tall as the raster at the window scale. 0 for any value clears it. */
 void window_set_bezel(int art_w, int art_h, int hole_h);
+/* The art window_set_bezel() was given: nonzero with its size and hole height,
+ * 0 without bezel art. For a title whose window is not this module's. */
+int  window_bezel(int *art_w, int *art_h, int *hole_h);
 
 /* Re-apply the configured geometry. force=1 after a game mode request;
  * force=0 is the bounded per-swap re-apply after one (written for a provider
@@ -754,7 +791,9 @@ int  aspect_is_16_9(const char *aspect);
 typedef enum {
     LAUNCHER_CANCEL,
     LAUNCHER_HYDRO,
-    LAUNCHER_OFFROAD
+    LAUNCHER_OFFROAD,
+    LAUNCHER_ARCTIC,
+    LAUNCHER_UARCTIC
 } launcher_result_t;
 
 /* Run before any game image is mapped. It owns no state after returning. */
@@ -789,6 +828,7 @@ typedef struct {
     unsigned cpu_hz;      /* synthetic CPU rate the game is told it has */
     unsigned speed_percent;/* virtual game-clock rate; 100 = real time  */
     int      limiter_idle; /* sleep the tick's idle instead of spinning */
+    char cpu_cores[16];   /* performance | all | system; see cpu.c          */
     unsigned dip_switches;/* cabinet DIP byte reported by the I/O board  */
     unsigned io_ms;       /* I/O board poll period                       */
     char io_backend[16];  /* only `sim` is implemented; `serial` is not yet */
@@ -801,6 +841,7 @@ typedef struct {
     int  fullscreen;      /* start borderless-fullscreen; Alt+Enter toggles   */
     char aspect[16];      /* raster | 4:3 | 16:9 | stretch; see window.c   */
     char bezel[MAX_PATH]; /* bezel art, a PNG; "off" or "" = none          */
+    char dongle[8];       /* auto | virtual | off: the key a title asks for */
     char upscale_2d[16];  /* bilinear | catmull_rom | fsr1, above 1x       */
     char texmag[16];      /* bilinear | catmull_rom: 3D textures, above 1x */
     char frame_rate[4];   /* 30 | 60: 60 adds an in-between picture each tick */

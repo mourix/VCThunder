@@ -70,6 +70,12 @@ static const game_profile_t k_hydro   = { .id = "hydro" };
 static const game_profile_t k_offroad = { .id = "offroad" };
 const game_profile_t *const g_profiles[] = { &k_hydro, &k_offroad, NULL };
 const game_profile_t *g_game;
+/* A win32 title has no profile; its sections are named by its identity. One
+ * entry is enough here: what is under test is that the registry is consulted
+ * at all, not how many titles it holds. */
+static const arctic_ids_t   k_arctic_ids = { .id = "arctic" };
+static const arctic_title_t k_arctic     = { .ids = &k_arctic_ids };
+const arctic_title_t *const g_arctic_titles[] = { &k_arctic, NULL };
 
 static int failures;
 
@@ -330,6 +336,21 @@ static void test_per_title_sections(void)
     config_load_title(&c, s_path, "offroad");
     config_report_notes();
     check(c.render_scale == 7, "for the other title too");
+
+    /* Arctic has no profile G, and a test over the profile table alone took
+     * [arctic.graphics] for a misplaced [graphics]: its widescreen reached
+     * every title. */
+    write_ini("[graphics]\nwidescreen = false\n"
+              "[arctic.graphics]\nwidescreen = true\n");
+    log_count = 0;
+    config_defaults(&c);
+    config_load_shared(&c, s_path);
+    config_report_notes();
+    check(c.widescreen == 0, "the shared pass skips Arctic's sections too");
+    check(log_count == 0, "and has nothing to say about them");
+    config_load_title(&c, s_path, "arctic");
+    config_report_notes();
+    check(c.widescreen == 1, "and Arctic's title pass applies its own");
 
     /* A FLAT [hydro] is not a form this file has. docs/configuration.md §1
      * says the scopes cannot collapse into one, because [digital] and

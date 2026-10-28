@@ -237,6 +237,9 @@ static void collect(unsigned ix, const uint32_t *a)
     case PL_TEXTABLE:
         bytes = (a[1] == GR_TEXTABLE_PALETTE) ? GR_PALETTE_BYTES
                                               : GR_NCCTABLE_BYTES;
+        /* The decoder reads the packed words after the unpacked fields. */
+        if (a[1] != GR_TEXTABLE_PALETTE)
+            bytes = GR_NCC_PACKED_OFF + GR_NCCTABLE_BYTES;
         want(VGLC_TAG_ARG(2), (const void *)(uintptr_t)a[2], bytes);
         break;
 

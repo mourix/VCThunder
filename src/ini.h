@@ -63,6 +63,11 @@ unsigned ini_uint_or(const char *v, unsigned lo, unsigned hi, unsigned fallback)
 int  ini_read_scoped(const char *path, const char *section, const char *key,
                      const char *fallback, char *out, DWORD out_size);
 
+/* The `<title>` of the precedence rule: the runtime profile's id, or, for a
+ * title that has no profile, the one named here. "" when neither exists. */
+void ini_set_title(const char *id);
+const char *ini_title(void);
+
 void ini_resolve_path(const char *in, char *out, size_t out_size);
 
 /* ---- devices: a name for one controller, and that controller's own keys, */

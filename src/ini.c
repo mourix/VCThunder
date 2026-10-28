@@ -121,14 +121,28 @@ unsigned ini_uint_or(const char *v, unsigned lo, unsigned hi, unsigned fallback)
     return ini_parse_uint(v, lo, hi, &n) ? n : fallback;
 }
 
+static const char *s_title;
+
+void ini_set_title(const char *id)
+{
+    s_title = id;
+}
+
+const char *ini_title(void)
+{
+    if (G && G->id[0])
+        return G->id;
+    return s_title ? s_title : "";
+}
+
 int ini_read_scoped(const char *path, const char *section, const char *key,
                     const char *fallback, char *out, DWORD out_size)
 {
     char scoped[64];
 
     /* 1. this game's own scoped section */
-    if (G && G->id[0]) {
-        snprintf(scoped, sizeof scoped, "%s.%s", G->id, section);
+    if (ini_title()[0]) {
+        snprintf(scoped, sizeof scoped, "%s.%s", ini_title(), section);
         GetPrivateProfileStringA(scoped, key, "", out, out_size, path);
         ini_strip_comment(out);
         if (out[0])
@@ -346,8 +360,9 @@ void ini_read_device_scoped(const char *path, const char *section,
     char scoped[64];
 
     if (label && *label && ini_label_ok(label)) {
-        if (G && G->id[0]) {
-            snprintf(scoped, sizeof scoped, "%s.%s.%s", G->id, section, label);
+        if (ini_title()[0]) {
+            snprintf(scoped, sizeof scoped, "%s.%s.%s", ini_title(), section,
+                     label);
             GetPrivateProfileStringA(scoped, key, "", out, out_size, path);
             ini_strip_comment(out);
             if (out[0])

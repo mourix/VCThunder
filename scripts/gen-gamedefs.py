@@ -15,12 +15,15 @@ found by scanning code patterns.
 """
 import bisect
 import os
+import posixpath
 import re
 import struct
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from titles import get, ets_titles, REPO, MAME_DISKS       # noqa: E402
+import hashlib                                             # noqa: E402
+from titles import win32_titles                            # noqa: E402
 from glide2_abi import FALLBACK_ARG_BYTES                  # noqa: E402
 from glide2_pushes import push_argbytes                    # noqa: E402
 
@@ -1910,6 +1913,511 @@ def d_hud_elements(t, log):
     log(f"HUD elements              : {len(out)} ({', '.join(n for _, _, _, n in out)})")
     return out
 
+MENU_CELLS = ("menu_steer", "menu_sel_active", "menu_sel_sub",
+              "menu_sel_cur_a", "menu_sel_cur_b", "menu_sel_states_a",
+              "menu_sel_states_b", "menu_sel_field", "menu_item_index",
+              "menu_band_a_lo", "menu_band_a_hi", "menu_band_b_lo",
+              "menu_band_b_hi", "menu_sel_index", "menu_sel_target",
+              "menu_sel_count", "menu_sel_filtered", "menu_sel_enabled", "menu_notch",
+              "menu_ini_state", "menu_ini_state_want", "menu_ini_state_kind",
+              "menu_ini_gate", "menu_ini_gate_want", "menu_ini_slot",
+              "menu_ini_wheel", "menu_ini_field",
+              "menu_sel_enable", "menu_list_a", "menu_stride_a", "menu_count_a",
+              "menu_list_b", "menu_stride_b", "menu_count_b", "menu_avail_a",
+              "menu_avail_lists", "menu_ini_count", "menu_ini_letters",
+              "menu_ini_k_off", "menu_ini_k_scale", "menu_ini_k_inv",
+              "menu_ini_k_bins", "menu_ini_k_hyst", "menu_ini_k_split",
+              "menu_ini_slot_max", "menu_ini_end_lo", "menu_ini_end_hi",
+              "menu_sel_k_off", "menu_sel_k_scale", "menu_remap_a",
+              "menu_remap_a_states", "menu_remap_b", "menu_remap_b_states",
+              "menu_en_count_off", "menu_en_flag_off", "menu_en_flag_mask",
+              "menu_en_lock_off", "menu_en_stride", "menu_ini_k_n",
+              "menu_ini_top", "menu_ini_rate_sign", "menu_ini_k_snap",
+              "menu_ini_k_slow")
+
+
+def d_menu_cells(t, log):
+    """The select screens' own state: which screen is up, which item it has,
+    and where the item sits on the wheel, for src/menu_wheel.c. Read, never
+    written.
+
+    Every select screen reads the steering as a POSITION through one field of
+    _Controls_InputState. Each cell comes from the shape of the one function that
+    owns it, matched instruction by instruction; a function that exists with a
+    different shape refuses rather than labelling the wrong cell.
+
+    Hydro: _wpr_select_GetCurrentSelection is the selection model whole,
+        mov eax,[active] ; test ; je ; mov eax,[sub] ; cmp eax,n ; ja ;
+        jmp [eax*4+table] ; mov eax,[item_a] ... ret ; mov eax,[item_b] ...
+    and the sub-screens whose case loads item_a (tracks) or item_b (boats)
+    are the two state masks. _wpr_select_Work then gives each list's band,
+    the two `fcomp [r+d8]` after its load of the item into r, and the item's
+    index word, the second `mov r16,[r+d8]`. Initials: _wpr_hiscore_Work's
+    gate and state; the entering state is the case that reads the wheel, and
+    the slot is the first `mov [abs],eax` after that read.
+
+    Offroad: _wrapper_Draw dispatches the select screens on _Wrapper_nState
+    and the states whose case calls __UpdateSelectionControls are the mask;
+    that function holds the target position (its first `fstp [abs]`), the
+    choice count and filtered position (`fld [count] ; fmul [pos] ; call`)
+    and the index (`mov [abs],edi`). Initials: _initials_Work's two gates and
+    __initials_WorkSelectionWheel's letter wheel and letter index.
+
+    A steering FIELD is an offset into _Controls_InputState, from the reading
+    function's first reference into it: Hydro's select reads +8 and its
+    initials +0, so it is per screen, not per title."""
+    import x86len
+    out = {k: None for k in MENU_CELLS}
+    d, base = t.read(), t.image_base
+    starts = func_table(t)
+    steer = t.va("_Controls_InputState")
+    if not steer:
+        return out
+    lo_data, hi_data = t.data_va, t.bss_va + t.bss_size
+    u32 = lambda va: struct.unpack_from("<I", d, va - base)[0]
+    abs32 = lambda b, at: struct.unpack_from("<I", b, at)[0]
+
+    def refuse(name, why):
+        raise SystemExit(f"gen-gamedefs: {t.id} {name}: {why}")
+
+    def insns(name):
+        """[(va, bytes)] over the function's extent; stops at what does not
+        decode, which is where a trailing jump table begins."""
+        return insns_at(t.va(name))
+
+    def insns_at(va):
+        if not va:
+            return []
+        end, out_ = starts[bisect.bisect_right(starts, va)], []
+        while va < end:
+            r = x86len.decode(d, va - base, base)
+            if not r:
+                break
+            out_.append((va, d[va - base:va - base + r[0]]))
+            va += r[0]
+        return out_
+
+    def cell(v, what):
+        if not lo_data <= v < hi_data:
+            raise SystemExit(f"gen-gamedefs: {t.id} {what} 0x{v:08X} is not "
+                             f"in DATA or .bss")
+        return v
+
+    def steer_ref(name, ins):
+        """(index, field) of the first instruction naming _Controls_InputState."""
+        for k, (va, b) in enumerate(ins):
+            for i in range(1, len(b) - 3):
+                v = abs32(b, i)
+                if steer <= v < steer + 0x20:
+                    return k, v - steer
+        refuse(name, "reads no _Controls_InputState field")
+
+    def op_abs(b, prefix):
+        """The abs32 after `prefix` when the instruction is exactly that."""
+        if b.startswith(prefix) and len(b) == len(prefix) + 4:
+            return abs32(b, len(prefix))
+        return None
+
+    def item_address(ins, k):
+        """(base, stride) of the item list the store at ins[k] addresses.
+        Walks back to the `and r,0xffff` that zero-extends the index, then
+        evaluates the chain forward with every register a multiple of the
+        index: mov, shl, sub, lea [b+i*s], lea [i*s+disp]."""
+        def zext(b):            # and r,0xffff; eax has its own short form
+            if b[:1] == b"\x25" and len(b) == 5 and abs32(b, 1) == 0xFFFF:
+                return 0
+            if b[:1] == b"\x81" and len(b) == 6 and (b[1] & 0xF8) == 0xE0 \
+                    and abs32(b, 2) == 0xFFFF:
+                return b[1] & 7
+            return None
+        st = next((j for j in range(k - 1, max(k - 14, -1), -1)
+                   if zext(ins[j][1]) is not None), None)
+        if st is None:
+            return None
+        coef, disp = {zext(ins[st][1]): 1}, None
+        for _, b in ins[st + 1:k]:
+            m = b[1] if len(b) > 1 else 0
+            if b[:1] == b"\x8b" and len(b) == 2 and m >= 0xC0:
+                coef[(m >> 3) & 7] = coef.get(m & 7, 0)
+            elif b[:1] == b"\xc1" and len(b) == 3 and (m & 0xF8) == 0xE0:
+                coef[m & 7] = coef.get(m & 7, 0) << b[2]
+            elif b[:1] == b"\x2b" and len(b) == 2 and m >= 0xC0:
+                r = (m >> 3) & 7
+                coef[r] = coef.get(r, 0) - coef.get(m & 7, 0)
+            elif b[:1] == b"\x8d" and (m & 7) == 4 and len(b) >= 3:
+                sib, mod = b[2], m >> 6
+                sc, ix, bs = 1 << (sib >> 6), (sib >> 3) & 7, sib & 7
+                c = coef.get(ix, 0) * sc
+                if mod == 0 and bs == 5 and len(b) == 7:
+                    disp = abs32(b, 3)
+                elif mod == 0 and len(b) == 3:
+                    c += coef.get(bs, 0)
+                else:
+                    return None
+                coef[(m >> 3) & 7] = c
+            else:
+                return None
+        last = ins[k - 1][1]
+        if disp is None or last[:1] != b"\x8d":
+            return None
+        return disp, coef[(last[1] >> 3) & 7]
+
+    def jump_table(ins, k):
+        """(n, table, k') from `cmp eax,imm8 ; ja ; jmp [eax*4+table]` at k."""
+        if k + 2 >= len(ins):
+            return None
+        cmpb, ja, jmp = ins[k][1], ins[k + 1][1], ins[k + 2][1]
+        if not (cmpb[:2] == b"\x83\xf8" and len(cmpb) == 3 and
+                ja[:1] in (b"\x77", b"\x0f") and jmp[:3] == b"\xff\x24\x85"):
+            return None
+        return cmpb[2], abs32(jmp, 3), k + 3
+
+    def states(tab, n, targets):
+        m = 0
+        for k in range(n + 1):
+            if u32(tab + 4 * k) in targets:
+                m |= 1 << k
+        return m
+
+    out["menu_steer"] = steer
+
+    # ---- Hydro: track and boat select -------------------------------------
+    ins = insns("_wpr_select_GetCurrentSelection")
+    if ins:
+        active = op_abs(ins[0][1], b"\xa1")
+        sub = op_abs(ins[3][1], b"\xa1") if len(ins) > 3 else None
+        jt = jump_table(ins, 4)
+        if active is None or sub is None or not jt or \
+                ins[1][1] != b"\x85\xc0" or ins[2][1][:1] != b"\x74":
+            refuse("_wpr_select_GetCurrentSelection", "not the shape the "
+                   "derivation reads")
+        n, tab, k = jt
+        loads = [(va, op_abs(b, b"\xa1")) for va, b in ins[k:]
+                 if op_abs(b, b"\xa1") is not None]
+        if len(loads) < 2:
+            refuse("_wpr_select_GetCurrentSelection", "one list, not two")
+        (case_a, item_a), (case_b, item_b) = loads[0], loads[1]
+        out["menu_sel_active"] = cell(active, "select active")
+        out["menu_sel_sub"] = cell(sub, "select sub-screen")
+        out["menu_sel_cur_a"] = cell(item_a, "track item")
+        out["menu_sel_cur_b"] = cell(item_b, "boat item")
+        out["menu_sel_states_a"] = states(tab, n, {case_a})
+        out["menu_sel_states_b"] = states(tab, n, {case_b})
+        if not out["menu_sel_states_a"] or not out["menu_sel_states_b"]:
+            refuse("_wpr_select_GetCurrentSelection", "the jump table does "
+                   "not split into the two lists")
+
+        w = insns("_wpr_select_Work")
+        if not w:
+            refuse("_wpr_select_Work", "absent beside its accessor")
+        out["menu_sel_field"] = steer_ref("_wpr_select_Work", w)[1]
+        idx, kload = set(), {}
+        for key, item in (("a", item_a), ("b", item_b)):
+            found = None
+            for k, (va, b) in enumerate(w):
+                if op_abs(b, b"\xa1") == item:
+                    reg = 0
+                elif b[:1] == b"\x8b" and len(b) == 6 and (b[1] & 0xC7) == 0x05 \
+                        and abs32(b, 2) == item:
+                    reg = (b[1] >> 3) & 7
+                else:
+                    continue
+                words, fc = [], []
+                for _, c in w[k + 1:k + 40]:
+                    if c[:2] == b"\x66\x8b" and len(c) == 4 and \
+                            (c[2] & 0xC0) == 0x40 and (c[2] & 7) == reg:
+                        words.append(c[3])
+                    if c[:1] == b"\xd8" and len(c) == 3 and \
+                            (c[1] & 0xF8) == 0x58 and (c[1] & 7) == reg:
+                        fc.append(c[2])
+                if len(words) >= 2 and len(fc) >= 2:
+                    found = (words[1], fc[0], fc[1])
+                    kload[key] = k
+                    break
+            if not found or found[2] != found[1] + 4:
+                refuse("_wpr_select_Work", f"list {key}'s block is not the "
+                       f"shape the derivation reads ({found})")
+            idx.add(found[0])
+            out[f"menu_band_{key}_lo"], out[f"menu_band_{key}_hi"] = found[1:]
+        if len(idx) != 1:
+            refuse("_wpr_select_Work", f"the two lists keep their index at "
+                   f"different offsets {sorted(idx)}")
+        out["menu_item_index"] = idx.pop()
+
+        # Each list: the store that makes item i current gives its base and
+        # stride; the `cmp r16,imm8 ; jae` before it, the last index. Only a
+        # list whose new item is tested with `cmp byte [r+d],r8` before it is
+        # taken has an availability byte (tracks; boats lock on a flag).
+        lists, odd = {}, t.va("_Gameloop_bOddFrame")
+        for key, item in (("a", item_a), ("b", item_b)):
+            stores = [k for k, (_, b) in enumerate(w) if op_abs(b, b"\xa3") == item]
+            if not stores:
+                refuse("_wpr_select_Work", f"list {key} is never made current")
+            stores = [k for k in stores if k > kload[key]]
+            if not stores:
+                refuse("_wpr_select_Work", f"list {key} is never made current")
+            addr = item_address(w, stores[0])
+            bounds = [w[j][1][3] for j in range(kload[key], stores[-1])
+                      if w[j][1][:2] == b"\x66\x83" and len(w[j][1]) == 4 and
+                      (w[j][1][2] & 0xF8) == 0xF8 and
+                      w[j + 1][1][:1] in (b"\x73", b"\x0f")]
+            bound = bounds[0] if len(set(bounds)) == 1 else None
+            if not addr or bound is None:
+                refuse("_wpr_select_Work", f"list {key}'s items are not "
+                       f"addressed the way the derivation reads ({addr}, {bound})")
+            avail = None
+            nxt = stores[1] if len(stores) > 1 else min(len(w), stores[0] + 30)
+            for _, b in w[stores[0] + 1:nxt]:
+                if b[:1] == b"\x38" and len(b) in (2, 3) and \
+                        (b[1] >> 6) in (0, 1) and (b[1] & 7) not in (4, 5):
+                    avail = b[2] if len(b) == 3 else 0
+                    break
+            lists[key] = (addr[0], addr[1], bound + 1, avail)
+        out["menu_list_a"], out["menu_stride_a"], out["menu_count_a"], av_a = lists["a"]
+        out["menu_list_b"], out["menu_stride_b"], out["menu_count_b"], av_b = lists["b"]
+        if av_b is not None:
+            refuse("_wpr_select_Work", "boats grew an availability byte")
+        out["menu_avail_a"] = av_a if av_a is not None else 0
+        out["menu_avail_lists"] = 1 if av_a is not None else 0
+        for key in "ab":
+            if not out[f"menu_band_{key}_hi"] < out[f"menu_stride_{key}"]:
+                refuse("_wpr_select_Work", f"list {key}'s band is outside its item")
+
+        # Selection changes are enabled: the cell each case tests just before
+        # it tests the odd frame.
+        en = set()
+        for k, (_, b) in enumerate(w):
+            if op_abs(b, b"\x39\x1d") == odd:
+                prev = [op_abs(c, b"\x39\x1d") for _, c in w[max(0, k - 6):k]]
+                prev = [v for v in prev if v is not None]
+                if prev:
+                    en.add(prev[-1])
+        if len(en) != 1:
+            refuse("_wpr_select_Work", f"no single enable gate ({sorted(en)})")
+        out["menu_sel_enable"] = cell(en.pop(), "selection changes enabled")
+
+    # ---- Hydro: initials ---------------------------------------------------
+    ins = insns("_wpr_hiscore_Work")
+    if ins:
+        gate = op_abs(ins[1][1], b"\xa1") if len(ins) > 1 else None
+        st = next((k for k in range(2, min(len(ins), 12))
+                   if op_abs(ins[k][1], b"\xa1") is not None), None)
+        # mov eax,[state] ; mov ecx,n ; cmp eax,ecx ; ja ; jmp [eax*4+table]
+        ok = st is not None and st + 4 < len(ins) and \
+            ins[st + 1][1][:1] == b"\xb9" and ins[st + 2][1] == b"\x3b\xc1" and \
+            ins[st + 4][1][:3] == b"\xff\x24\x85"
+        if gate is None or not ok:
+            refuse("_wpr_hiscore_Work", "not the shape the derivation reads")
+        n, tab = abs32(ins[st + 1][1], 1), abs32(ins[st + 4][1], 3)
+        k, fld = steer_ref("_wpr_hiscore_Work", ins)
+        rd_at = ins[k][0]
+        cases = sorted((u32(tab + 4 * s), s) for s in range(n + 1))
+        want = [s for c, s in cases if c <= rd_at]
+        slot = next((op_abs(b, b"\xa3") for _, b in ins[k:]
+                     if op_abs(b, b"\xa3") is not None), None)
+        if not want or slot is None:
+            refuse("_wpr_hiscore_Work", "no case reads the wheel into a slot")
+        out["menu_ini_gate"] = cell(gate, "initials gate")
+        out["menu_ini_gate_want"] = 0
+        out["menu_ini_state"] = cell(op_abs(ins[st][1], b"\xa1"), "initials state")
+        out["menu_ini_state_want"] = want[-1]
+        out["menu_ini_state_kind"] = 1                  # entering: state == want
+        out["menu_ini_slot"] = cell(slot, "initials slot")
+        out["menu_ini_field"] = fld
+
+        # The slot formula, in its own order: the letter count read before
+        # the wheel, `cmp eax,letters`, then fsub off, fmul scale, fmul inv,
+        # fmul bins, fsub hyst, `cmp eax,max`, fcomp split, and the two slots
+        # the last case picks between. menu_wheel.c computes each slot's band
+        # from these, so a formula of another shape must not reach it.
+        cnt = next((op_abs(b, b"\xa1") for _, b in ins[max(0, k - 3):k]
+                    if op_abs(b, b"\xa1") is not None), None)
+        cmps = [b[2] for _, b in ins[k:k + 60]
+                if b[:2] == b"\x83\xf8" and len(b) == 3]
+        fl = []
+        for _, b in ins[k:k + 60]:
+            if b[:1] == b"\xd8" and len(b) == 6 and b[1] in (0x25, 0x0D, 0x1D):
+                fl.append((b[1], abs32(b, 2)))
+                if b[1] == 0x1D:
+                    break
+        # After the split's fcomp: test ah,0x41 ; mov eax,left ; jne ;
+        # mov eax,right. The jne keeps `left` for a field at or below it.
+        fc = next((j for j in range(k, min(len(ins), k + 80))
+                   if ins[j][1][:2] == b"\xd8\x1d"), None)
+        tail = []
+        if fc is not None:
+            seq = [b for _, b in ins[fc + 1:fc + 8]]
+            movs = [j for j, b in enumerate(seq) if b[:1] == b"\xb8" and len(b) == 5]
+            if b"\xf6\xc4\x41" in seq and len(movs) >= 2 and \
+                    seq[movs[0] + 1][:1] == b"\x75":
+                tail = [abs32(seq[movs[0]], 1), abs32(seq[movs[1]], 1)]
+        if cnt is None or len(cmps) < 2 or len(tail) < 2 or \
+                [o for o, _ in fl] != [0x25, 0x0D, 0x0D, 0x0D, 0x25, 0x1D]:
+            refuse("_wpr_hiscore_Work", f"the slot formula is not the shape "
+                   f"menu_wheel.c computes ({cnt}, {cmps}, {fl}, {tail})")
+        out["menu_ini_count"] = cell(cnt, "initials letters entered")
+        out["menu_ini_letters"], out["menu_ini_slot_max"] = cmps[0], cmps[1]
+        (out["menu_ini_k_off"], out["menu_ini_k_scale"], out["menu_ini_k_inv"],
+         out["menu_ini_k_bins"], out["menu_ini_k_hyst"],
+         out["menu_ini_k_split"]) = [v for _, v in fl]
+        out["menu_ini_end_lo"], out["menu_ini_end_hi"] = tail[0], tail[1]
+
+    # ---- Offroad: the select screens ---------------------------------------
+    ins = insns("_wrapper_Draw")
+    upd, sub = t.va("__UpdateSelectionControls"), t.va("_Wrapper_nState")
+    if ins and upd and sub:
+        active = op_abs(ins[0][1], b"\xa1")
+        k = next((k for k, (_, b) in enumerate(ins) if op_abs(b, b"\xa1") == sub), None)
+        jt = jump_table(ins, k + 1) if k is not None else None
+        if active is None or ins[1][1] != b"\x85\xc0" or not jt:
+            refuse("_wrapper_Draw", "not the shape the derivation reads")
+        calls = {va for va, b in ins if b[:1] == b"\xe8" and len(b) == 5 and
+                 va + 5 + struct.unpack_from("<i", b, 1)[0] == upd}
+        out["menu_sel_active"] = cell(active, "wrapper active")
+        out["menu_sel_sub"] = cell(sub, "_Wrapper_nState")
+        out["menu_sel_states_a"] = states(jt[1], jt[0], calls)
+        if not out["menu_sel_states_a"]:
+            refuse("_wrapper_Draw", "no state runs __UpdateSelectionControls")
+        u = insns("__UpdateSelectionControls")
+        out["menu_sel_field"] = steer_ref("__UpdateSelectionControls", u)[1]
+        tgt = next((op_abs(b, b"\xd9\x1d") for _, b in u
+                    if op_abs(b, b"\xd9\x1d") is not None), None)
+        cnt = pos = None
+        for j in range(len(u) - 2):
+            c0, c1 = op_abs(u[j][1], b"\xd9\x05"), op_abs(u[j + 1][1], b"\xd8\x0d")
+            if c0 is not None and c1 is not None and u[j + 2][1][:1] == b"\xe8":
+                cnt, pos = c0, c1
+                break
+        ix = next((op_abs(b, b"\x89\x3d") for _, b in u
+                   if op_abs(b, b"\x89\x3d") is not None), None)
+        if tgt is None or cnt is None or ix is None:
+            refuse("__UpdateSelectionControls", "not the shape the derivation reads")
+        out["menu_sel_target"] = cell(tgt, "select target")
+        out["menu_sel_count"] = cell(cnt, "select count")
+        out["menu_sel_filtered"] = cell(pos, "select filtered position")
+        out["menu_sel_index"] = cell(ix, "select index")
+        out["menu_sel_enabled"] = t.va("__nNumEnabledChoices")
+        out["menu_notch"] = t.va("_ffbnew_VIFYPos")
+
+        # The target the filter settles on: fld [steer] ; fsub [off] ;
+        # ... ; fmul [scale], before its first store.
+        k0 = steer_ref("__UpdateSelectionControls", u)[0]
+        ops = [(c[1], abs32(c, 2)) for _, c in u[k0 + 1:k0 + 8]
+               if c[:1] == b"\xd8" and len(c) == 6 and c[1] in (0x25, 0x0D)]
+        if [o for o, _ in ops[:2]] != [0x25, 0x0D]:
+            refuse("__UpdateSelectionControls", f"the target is not "
+                   f"(steer - off) * scale ({ops})")
+        out["menu_sel_k_off"], out["menu_sel_k_scale"] = ops[0][1], ops[1][1]
+
+        # A screen that moves the index to the nearest enabled item: the
+        # call after __UpdateSelectionControls in its case is the screen,
+        # and the screen pushes its list for __NearestOneThatIsEnabled.
+        near = t.va("__NearestOneThatIsEnabled")
+        call_to = lambda va, c: va + 5 + struct.unpack_from("<i", c, 1)[0] \
+            if c[:1] == b"\xe8" and len(c) == 5 else None
+        lists = {}
+        for st_ in range(jt[0] + 1):
+            if not out["menu_sel_states_a"] >> st_ & 1:
+                continue
+            case = u32(jt[1] + 4 * st_)
+            j = next((j for j, (va, _) in enumerate(ins) if va == case), None)
+            fn = call_to(*ins[j + 1]) if j is not None and j + 1 < len(ins) \
+                else None
+            sc = insns_at(fn) if fn else []
+            for i in range(min(len(sc), 24) - 1):
+                if sc[i][1][:1] == b"\x68" and len(sc[i][1]) == 5 and \
+                        call_to(*sc[i + 1]) == near and near:
+                    lst = cell(abs32(sc[i][1], 1), "selection list")
+                    lists[lst] = lists.get(lst, 0) | 1 << st_
+                    break
+        if len(lists) > 2:
+            refuse("_wrapper_Draw", f"more than two lists remap ({lists})")
+        for key, (lst, mask) in zip("ab", sorted(lists.items())):
+            out[f"menu_remap_{key}"], out[f"menu_remap_{key}_states"] = lst, mask
+        if lists:
+            # __NearestOneThatIsEnabled's item test, as the code makes it:
+            # mov r16,[list+count] ... lea esi,[list+lock] ;
+            # test byte [esi-d],mask ; je ; cmp dword [esi],0 ... add esi,stride
+            n_ = insns("__NearestOneThatIsEnabled")
+            cnt_ = lea_ = flag_ = stride_ = None
+            for _, c in n_:
+                if c[:2] == b"\x66\x8b" and len(c) == 4 and (c[2] & 0xC0) == 0x40:
+                    cnt_ = cnt_ if cnt_ is not None else c[3]
+                elif c[:1] == b"\x8d" and len(c) == 3 and (c[1] & 0xC0) == 0x40:
+                    lea_ = c[2]
+                elif c[:2] == b"\xf6\x46" and len(c) == 4:
+                    flag_ = (struct.unpack_from("<b", c, 2)[0], c[3])
+                elif c[:2] == b"\x83\xc6" and len(c) == 3:
+                    stride_ = c[2]
+            if None in (cnt_, lea_, flag_, stride_) or \
+                    b"\x83\x3e\x00" not in [c for _, c in n_]:
+                refuse("__NearestOneThatIsEnabled", f"not the item test the "
+                       f"derivation reads ({cnt_}, {lea_}, {flag_}, {stride_})")
+            out["menu_en_count_off"] = cnt_
+            out["menu_en_lock_off"] = lea_
+            out["menu_en_flag_off"] = lea_ + flag_[0]
+            out["menu_en_flag_mask"] = flag_[1]
+            out["menu_en_stride"] = stride_
+
+    # ---- Offroad: initials -------------------------------------------------
+    ins, w = insns("_initials_Work"), insns("__initials_WorkSelectionWheel")
+    if ins and w:
+        act = op_abs(ins[0][1], b"\xa1")
+        gate = next((op_abs(b, b"\x8b\x0d") for _, b in ins[:8]
+                     if op_abs(b, b"\x8b\x0d") is not None), None)
+        gk = next((k for k, (_, b) in enumerate(ins[:8]) if op_abs(b, b"\x8b\x0d") is not None), None)
+        wheel = op_abs(w[1][1], b"\xd9\x05") if len(w) > 1 else None
+        slot = next((op_abs(b, b"\xa3") for _, b in w
+                     if op_abs(b, b"\xa3") is not None), None)
+        if act is None or gate is None or ins[gk + 1][1] != b"\x83\xf9\xff" or \
+                w[0][1] != b"\x83\xec\x08" or wheel is None or slot is None:
+            refuse("_initials_Work", "not the shape the derivation reads")
+        out["menu_ini_state"] = cell(act, "initials active")
+        out["menu_ini_state_want"] = 0
+        out["menu_ini_state_kind"] = 2                  # entering: state != want
+        out["menu_ini_gate"] = cell(gate, "initials gate")
+        out["menu_ini_gate_want"] = 0xFFFFFFFF
+        out["menu_ini_wheel"] = cell(wheel, "letter wheel")
+        out["menu_ini_slot"] = cell(slot, "letter index")
+        out["menu_ini_field"] = steer_ref("__initials_WorkSelectionWheel", w)[1]
+
+        # The letter: fld [wheel] ; fmul [N] ... mov eax,top ; sub eax,esi,
+        # so the letter falls as the wheel rises. The steering: fld [steer] ;
+        # fchs? ; fcom [0] ; ... fcom [snap] ; ... fcom [slow], and the wheel
+        # moves by its speed times the first fmul after them.
+        k_n = next((op_abs(c, b"\xd8\x0d") for _, c in w[2:5]
+                    if op_abs(c, b"\xd8\x0d") is not None), None)
+        top = next((abs32(c, 1) for j, (_, c) in enumerate(w[:-1])
+                    if c[:1] == b"\xb8" and len(c) == 5 and
+                    w[j + 1][1] == b"\x2b\xc6"), None)
+        ks = steer_ref("__initials_WorkSelectionWheel", w)[0]
+        flip = w[ks + 1][1] == b"\xd9\xe0"
+        coms = [(j, abs32(c, 2)) for j, (_, c) in enumerate(w[ks:ks + 30], ks)
+                if c[:2] == b"\xd8\x15" and len(c) == 6]
+        step = next((abs32(c, 2) for _, c in w[coms[2][0]:coms[2][0] + 30]
+                     if c[:2] == b"\xd8\x0d" and len(c) == 6), None) \
+            if len(coms) >= 3 else None
+        if k_n is None or top is None or step is None:
+            refuse("__initials_WorkSelectionWheel", f"not the letter wheel "
+                   f"the derivation reads ({k_n}, {top}, {coms}, {step})")
+        f32 = lambda va: struct.unpack_from("<f", d, va - base)[0]
+        # Steering right: the wheel moves by -speed * step * (flip ? -1 : 1)
+        # and the letter by minus the wheel.
+        sign = (1 if f32(step) < 0 else -1) * (-1 if flip else 1) * -1
+        out["menu_ini_k_n"] = k_n
+        out["menu_ini_top"] = top
+        out["menu_ini_rate_sign"] = sign & 0xFFFFFFFF
+        out["menu_ini_k_snap"], out["menu_ini_k_slow"] = coms[1][1], coms[2][1]
+
+    have = sum(1 for v in out.values() if v is not None)
+    log(f"select screens            : {have}/{len(out)} cells"
+        + ("" if out["menu_sel_field"] is None else
+           f", select reads steer +{out['menu_sel_field']}")
+        + ("" if out["menu_ini_field"] is None else
+           f", initials +{out['menu_ini_field']}"))
+    return out
+
+
 def _branch_targets(data, lo, hi, image_base):
     tg, i = set(), lo
     while i < hi - 6:
@@ -2151,6 +2659,7 @@ def emit(t, tables, log):
     gtext = d_gametext(t, log)
     hud_txt = d_hud_text_vars(t, log)
     hud_els = d_hud_elements(t, log)
+    menu = d_menu_cells(t, log)
     if len(hud_els) > MAX["hud"]:
         log(f"ERROR: HUD element table has {len(hud_els)} entries, ceiling is {MAX['hud']}")
         tables["over"].append(("hud", len(hud_els), MAX["hud"]))
@@ -2371,6 +2880,126 @@ def emit(t, tables, log):
          "R2 checksum: cell _r2file_GetComprehensiveChecksum returns"),
         ("cksum_r2_link", cks["cksum_r2_link"],
          "R2 checksum: __nMyR2Checksum, the value on the wire (Offroad)"),
+        ("menu_steer", menu["menu_steer"],
+         "_Controls_InputState, the select screens' steering source"),
+        ("menu_sel_active", menu["menu_sel_active"],
+         "select screens up: Hydro _wpr_select's flag, Offroad _wrapper_Draw's"),
+        ("menu_sel_sub", menu["menu_sel_sub"],
+         "the select sub-screen: Hydro's selection state, Offroad _Wrapper_nState"),
+        ("menu_sel_cur_a", menu["menu_sel_cur_a"],
+         "Hydro: the current track item, from _wpr_select_GetCurrentSelection"),
+        ("menu_sel_cur_b", menu["menu_sel_cur_b"],
+         "Hydro: the current boat item, from _wpr_select_GetCurrentSelection"),
+        ("menu_sel_states_a", menu["menu_sel_states_a"],
+         "mask of sub-screens reading list a (Hydro tracks; Offroad every select)"),
+        ("menu_sel_states_b", menu["menu_sel_states_b"],
+         "mask of sub-screens reading list b (Hydro boats)"),
+        ("menu_sel_field", menu["menu_sel_field"],
+         "offset into menu_steer the select screens read"),
+        ("menu_item_index", menu["menu_item_index"],
+         "Hydro: the item's index word, from _wpr_select_Work"),
+        ("menu_band_a_lo", menu["menu_band_a_lo"],
+         "Hydro: a track item's band, low edge offset"),
+        ("menu_band_a_hi", menu["menu_band_a_hi"],
+         "Hydro: a track item's band, high edge offset"),
+        ("menu_band_b_lo", menu["menu_band_b_lo"],
+         "Hydro: a boat item's band, low edge offset"),
+        ("menu_band_b_hi", menu["menu_band_b_hi"],
+         "Hydro: a boat item's band, high edge offset"),
+        ("menu_sel_index", menu["menu_sel_index"],
+         "Offroad: the selected index, from __UpdateSelectionControls"),
+        ("menu_sel_target", menu["menu_sel_target"],
+         "Offroad: the wheel's position as 0..1, before the filter"),
+        ("menu_sel_count", menu["menu_sel_count"],
+         "Offroad: the choice count (float) the index is scaled by"),
+        ("menu_sel_filtered", menu["menu_sel_filtered"],
+         "Offroad: the filtered position the index is taken from"),
+        ("menu_sel_enabled", menu["menu_sel_enabled"],
+         "Offroad: __nNumEnabledChoices"),
+        ("menu_notch", menu["menu_notch"],
+         "Offroad: _ffbnew_VIFYPos, the notch the motor is told to hold"),
+        ("menu_ini_state", menu["menu_ini_state"],
+         "initials: the state cell (Hydro) or active flag (Offroad)"),
+        ("menu_ini_state_want", menu["menu_ini_state_want"],
+         "initials: the value menu_ini_state_kind compares against"),
+        ("menu_ini_state_kind", menu["menu_ini_state_kind"],
+         "initials: 1 entering when state == want, 2 when state != want"),
+        ("menu_ini_gate", menu["menu_ini_gate"],
+         "initials: the gate the wheel case also needs"),
+        ("menu_ini_gate_want", menu["menu_ini_gate_want"],
+         "initials: the gate's value while entering"),
+        ("menu_ini_slot", menu["menu_ini_slot"],
+         "initials: the slot or letter the wheel selects"),
+        ("menu_ini_wheel", menu["menu_ini_wheel"],
+         "Offroad: the letter wheel's angle, 0..1"),
+        ("menu_ini_field", menu["menu_ini_field"],
+         "offset into menu_steer the initials read"),
+        ("menu_sel_enable", menu["menu_sel_enable"],
+         "Hydro: _wpr_select_EnableSelectionChanges, the wheel steps the list"),
+        ("menu_list_a", menu["menu_list_a"], "Hydro: the track items"),
+        ("menu_stride_a", menu["menu_stride_a"], "Hydro: a track item's size"),
+        ("menu_count_a", menu["menu_count_a"], "Hydro: track items"),
+        ("menu_list_b", menu["menu_list_b"], "Hydro: the boat items"),
+        ("menu_stride_b", menu["menu_stride_b"], "Hydro: a boat item's size"),
+        ("menu_count_b", menu["menu_count_b"], "Hydro: boat items"),
+        ("menu_avail_a", menu["menu_avail_a"],
+         "Hydro: a track item's available byte, beside menu_avail_lists bit 0"),
+        ("menu_avail_lists", menu["menu_avail_lists"],
+         "Hydro: lists with an available byte, bit 0 tracks, bit 1 boats"),
+        ("menu_ini_count", menu["menu_ini_count"],
+         "Hydro initials: letters entered so far"),
+        ("menu_ini_letters", menu["menu_ini_letters"],
+         "Hydro initials: letters, after which only two slots are offered"),
+        ("menu_ini_k_off", menu["menu_ini_k_off"],
+         "Hydro initials: the slot formula's offset (a float in the image)"),
+        ("menu_ini_k_scale", menu["menu_ini_k_scale"],
+         "Hydro initials: the slot formula's scale (a float in the image)"),
+        ("menu_ini_k_inv", menu["menu_ini_k_inv"],
+         "Hydro initials: one slot as a fraction (a float in the image)"),
+        ("menu_ini_k_bins", menu["menu_ini_k_bins"],
+         "Hydro initials: slots over the range (a float in the image)"),
+        ("menu_ini_k_hyst", menu["menu_ini_k_hyst"],
+         "Hydro initials: the hysteresis in slots (a float in the image)"),
+        ("menu_ini_k_split", menu["menu_ini_k_split"],
+         "Hydro initials: the two end slots' split (a float in the image)"),
+        ("menu_ini_slot_max", menu["menu_ini_slot_max"],
+         "Hydro initials: the last slot"),
+        ("menu_ini_end_lo", menu["menu_ini_end_lo"],
+         "Hydro initials: the end slot left of the split"),
+        ("menu_ini_end_hi", menu["menu_ini_end_hi"],
+         "Hydro initials: the end slot right of the split"),
+        ("menu_sel_k_off", menu["menu_sel_k_off"],
+         "Offroad: the select target is (steer - off) * scale; off (a float)"),
+        ("menu_sel_k_scale", menu["menu_sel_k_scale"],
+         "Offroad: the select target's scale (a float in the image)"),
+        ("menu_remap_a", menu["menu_remap_a"],
+         "Offroad: a list whose screens move to the nearest enabled item"),
+        ("menu_remap_a_states", menu["menu_remap_a_states"],
+         "Offroad: the states menu_remap_a's screen is up in"),
+        ("menu_remap_b", menu["menu_remap_b"],
+         "Offroad: a second such list"),
+        ("menu_remap_b_states", menu["menu_remap_b_states"],
+         "Offroad: the states menu_remap_b's screen is up in"),
+        ("menu_en_count_off", menu["menu_en_count_off"],
+         "Offroad: a list's item count (a word) at this offset"),
+        ("menu_en_flag_off", menu["menu_en_flag_off"],
+         "Offroad: item 0's enabled flag byte, from the list"),
+        ("menu_en_flag_mask", menu["menu_en_flag_mask"],
+         "Offroad: the enabled flag's bits"),
+        ("menu_en_lock_off", menu["menu_en_lock_off"],
+         "Offroad: item 0's lock word, from the list; enabled when 0"),
+        ("menu_en_stride", menu["menu_en_stride"],
+         "Offroad: a list item's size"),
+        ("menu_ini_k_n", menu["menu_ini_k_n"],
+         "Offroad initials: letters over the wheel (a float in the image)"),
+        ("menu_ini_top", menu["menu_ini_top"],
+         "Offroad initials: the letter is top - round(wheel * n)"),
+        ("menu_ini_rate_sign", menu["menu_ini_rate_sign"],
+         "Offroad initials: 1 when steering right raises the letter, -1 not"),
+        ("menu_ini_k_snap", menu["menu_ini_k_snap"],
+         "Offroad initials: inside this deflection the wheel snaps (float)"),
+        ("menu_ini_k_slow", menu["menu_ini_k_slow"],
+         "Offroad initials: below this it turns at its slowest (float)"),
     ]
     for f, v, note in derived:
         if v is None:
@@ -2536,12 +3165,12 @@ def emit_registry(tids):
     out.append("    0\n};\n")
     out.append("\nconst game_mame_disk_t g_mame_disks[] = {\n")
     for d in MAME_DISKS:
-        if d["title"] not in tids:
+        if d["title"] not in tids + win32_titles():
             continue
         out.append(f'    {{ "{d["set"]}", "{d["chd"]}", "{d["name"]}", '
-                   f'&g_profile_{d["title"]},\n'
+                   f'"{d["title"]}",\n'
                    f'      "{d["sha1"]}", "{d["rawsha1"]}",\n'
-                   f'      "{d["exe_sha256"]}" }},\n')
+                   f'      "{d["exe_sha256"] or ""}" }},\n')
     out.append("    { 0 }\n};\n")
     return "".join(out)
 
@@ -2563,6 +3192,1181 @@ def same_as_disk(path, src):
               f" rewrites it, and the diff is reviewed like code")
         return False
     return True
+
+
+def emit_win32_ids(t):
+    """A win32 title has no anchors: the host maps it as an ordinary image and
+    binds its imports. What it needs from the dump is IDENTITY, the executable
+    and each of the game's own DLLs pinned by SHA-256 and size, so the host
+    refuses a different build exactly as an ETS title refuses one."""
+    # Executable first, then the modules in REGISTRATION order: src/arctic.h
+    # names the slots by position (exe, goose.dll, gobj.dll).
+    files = [(t.exe, t.meta["sha256"])] + list(t.meta["modules"].items())
+    d = os.path.dirname(t.exe)
+    out = ["/* GENERATED by scripts/gen-gamedefs.py: do not edit. */\n",
+           '#include "../src/arctic.h"\n\n',
+           f'/* {t.name}, {t.meta["build"]}: the images the host maps. */\n',
+           f"const arctic_ids_t g_{t.id}_ids = {{\n",
+           f'    "{t.id}", "{t.name}", "{t.meta["build"]}",'
+           f' "{t.meta.get("settings", t.id)}",\n',
+           "    {\n"]
+    for name, sha in files:
+        path = os.path.join(d, os.path.basename(name))
+        size = os.path.getsize(path)
+        out.append(f'        {{ "{os.path.basename(name)}", "{sha}", {size}u }},\n')
+    out.append("    },\n")
+    out.append("    {\n")
+    for path, sha in win32_diag_files(t):
+        out.append(f'        {{ "{os.path.basename(path)}", "{sha}",'
+                   f' {os.path.getsize(path)}u }},\n')
+    disk = t.meta["disk_dir"]
+    diag = posixpath.normpath(posixpath.join(disk, t.meta["diag"]["dir"]))
+    out.append("    },\n")
+    out.append(f'    "{disk}",\n    "{diag}",\n')
+    upd = t.meta.get("update")
+    if upd:
+        out.append(f'    "{upd["base"]}", "{upd["file"][0]}", "{upd["file"][1]}"\n}};\n')
+    else:
+        out.append("    0, 0, 0\n};\n")
+    return "".join(out)
+
+
+def win32_diag_files(t):
+    """The operator system's two files, (path, sha256): diag.exe from the
+    package's diagnostics folder, then the game's diagdll.dll beside snow.exe.
+    The dump keeps diagnostics/ beside the game folder; a pack built from a
+    clone keeps it as data/<id>-diagnostics."""
+    g = t.meta["diag"]
+    d = os.path.dirname(t.exe)
+    ddir = os.path.normpath(os.path.join(d, g["dir"]))
+    if not os.path.isdir(ddir):
+        ddir = os.path.join(REPO, "data", f"{t.id}-diagnostics")
+    return [(os.path.join(ddir, g["exe"][0]), g["exe"][1]),
+            (os.path.join(d, g["dll"][0]), g["dll"][1])]
+
+
+def pe_layout(path):
+    """ImageBase, SizeOfImage and whether relocations are stripped, read from
+    the PE32 header by offset (no package needed)."""
+    b = open(path, "rb").read(4096)
+    pe = struct.unpack_from("<I", b, 0x3C)[0]
+    if b[pe:pe + 4] != b"PE\0\0":
+        raise ValueError(f"{path}: not a PE image")
+    chars = struct.unpack_from("<H", b, pe + 4 + 18)[0]
+    opt = pe + 24
+    if struct.unpack_from("<H", b, opt)[0] != 0x10B:
+        raise ValueError(f"{path}: not PE32")
+    base = struct.unpack_from("<I", b, opt + 28)[0]
+    size = struct.unpack_from("<I", b, opt + 56)[0]
+    return base, size, bool(chars & 0x0001)
+
+
+def pe_sections(b):
+    """(name, rva, vsize, raw_off, raw_size) of a PE32 image's sections."""
+    pe = struct.unpack_from("<I", b, 0x3C)[0]
+    nsec = struct.unpack_from("<H", b, pe + 6)[0]
+    optsz = struct.unpack_from("<H", b, pe + 20)[0]
+    out = []
+    for i in range(nsec):
+        o = pe + 24 + optsz + 40 * i
+        name = b[o:o + 8].rstrip(b"\0").decode("latin-1")
+        vsize, rva, rsize, roff = struct.unpack_from("<IIII", b, o + 8)
+        out.append((name, rva, vsize, roff, rsize))
+    return out
+
+
+def pe_rva_to_off(b, rva):
+    for _, va, vs, ro, rs in pe_sections(b):
+        if va <= rva < va + max(vs, rs):
+            return ro + (rva - va)
+    raise ValueError(f"RVA {rva:#x} is in no section")
+
+
+# The read-only constant pool the widescreen roles reach into: where the Intel
+# Reference Compiler 4.5 put every float literal. It is that COMPILER'S section
+# name, not the platform's, and every image this generator reads is one of its
+# builds -- measured: snow.exe, goose.dll, gobj.dll, diag.exe and diagdll.dll
+# all carry .text/.rdata/.data/.data1. An MSVC build of the same game has no
+# .data1 at all and keeps its literals in .rdata, so another compiler's win32
+# title needs its own pool name here, derived with its own signatures, or no
+# pool at all: Ultimate's MSVC build shares its literals, so its sites
+# redirect operands ("o") and never resolve this. Refuse by name rather than
+# falling back to .rdata: these images have both, and a
+# pool resolved to the wrong section would still pass the one-reader test,
+# on an unrelated constant, and generate a plausible table of wrong addresses.
+CONST_POOL = ".data1"
+
+
+def pe_range(ranges, name, what):
+    """ranges[name], or a refusal that says which image and which sections it
+    does have. An absent section is a real answer about the build, so it
+    stops the generator instead of raising KeyError out of a PE parser -- `what` is the image, for the message."""
+    if name not in ranges:
+        raise ValueError(f"{what}: no {name} section; it has "
+                         f"{', '.join(ranges)}. A build by another compiler "
+                         f"needs its own section names and its own signatures")
+    return ranges[name]
+
+
+def pe_exports(b):
+    """{name: rva} from a PE32 image's export table."""
+    pe = struct.unpack_from("<I", b, 0x3C)[0]
+    rva = struct.unpack_from("<I", b, pe + 24 + 96)[0]
+    if not rva:
+        return {}
+    d = pe_rva_to_off(b, rva)
+    n_names, funcs, names, ords = struct.unpack_from("<IIII", b, d + 24)
+    out = {}
+    for i in range(n_names):
+        nrva = struct.unpack_from("<I", b, pe_rva_to_off(b, names) + 4 * i)[0]
+        no = pe_rva_to_off(b, nrva)
+        name = b[no:b.index(b"\0", no)].decode("latin-1")
+        o = struct.unpack_from("<H", b, pe_rva_to_off(b, ords) + 2 * i)[0]
+        out[name] = struct.unpack_from("<I", b, pe_rva_to_off(b, funcs) + 4 * o)[0]
+    return out
+
+
+def pe_import_slot(b, name):
+    """The IAT RVA a PE32 image imports `name` through (by name), or None."""
+    pe = struct.unpack_from("<I", b, 0x3C)[0]
+    rva = struct.unpack_from("<I", b, pe + 24 + 96 + 8)[0]
+    d = pe_rva_to_off(b, rva)
+    while True:
+        ilt, _, _, _, iat = struct.unpack_from("<IIIII", b, d)
+        if not iat:
+            return None
+        o, k = pe_rva_to_off(b, ilt or iat), 0
+        while True:
+            e = struct.unpack_from("<I", b, o + 4 * k)[0]
+            if not e:
+                break
+            if not e & 0x80000000:
+                no = pe_rva_to_off(b, e) + 2
+                if b[no:b.index(b"\0", no)].decode("latin-1") == name:
+                    return iat + 4 * k
+            k += 1
+        d += 20
+
+
+def diag_exit_rva(path):
+    """diag.exe's exit routine: the one function that scans the I/O, reads the
+    DIP switches and tests switch 1 before it writes every changed game's CMOS
+    and calls ExitProcess(0) (diagmain.c). Found
+    as `call diag_io_scan; call read_dip_direct; test al,1` -- both exported
+    names -- and walked back to its `push ebp; mov ebp,esp` (55 8B EC). Exactly one
+    match, or nothing is generated."""
+    b = open(path, "rb").read()
+    ex = pe_exports(b)
+    text = [s for s in pe_sections(b) if s[0] == ".text"]
+    if len(text) != 1:
+        raise ValueError(f"{path}: {len(text)} .text sections, not 1")
+    _, va, vs, ro, rs = text[0]
+    code = b[ro:ro + rs]
+    hits = []
+    for i in range(len(code) - 12):
+        if code[i] != 0xE8 or code[i + 5] != 0xE8 or code[i + 10:i + 12] != b"\xA8\x01":
+            continue
+        here = va + i
+        t1 = (here + 5 + struct.unpack_from("<i", code, i + 1)[0]) & 0xFFFFFFFF
+        t2 = (here + 10 + struct.unpack_from("<i", code, i + 6)[0]) & 0xFFFFFFFF
+        if t1 == ex.get("diag_io_scan") and t2 == ex.get("read_dip_direct"):
+            back = code.rfind(b"\x55\x8B\xEC", max(0, i - 32), i)
+            if back >= 0:
+                hits.append(va + back)
+    if len(hits) != 1:
+        raise ValueError(f"{path}: the exit routine matched {len(hits)} times")
+    return hits[0]
+
+
+def emit_win32_diag_h(t):
+    """diag.exe's range: it has no relocations, so it loads at its ImageBase
+    or not at all, and the host places it there, inside VCThunder.exe's span
+    (src/arctic_diag.c, which checks the range against generated/span.h)."""
+    path = win32_diag_files(t)[0][0]
+    base, size, stripped = pe_layout(path)
+    if not stripped:
+        raise ValueError(f"{path}: carries relocations; the fixed-base host"
+                         f" design (src/arctic_diag.c) assumes none")
+    rva = diag_exit_rva(path)
+    return ("/* GENERATED by scripts/gen-gamedefs.py: do not edit. */\n"
+            f"/* {t.name}'s diag.exe: ImageBase and SizeOfImage from its PE\n"
+            " * header. No relocations, so this is the only place it can load. */\n"
+            f"#ifndef VCT_{t.id.upper()}_DIAG_H\n#define VCT_{t.id.upper()}_DIAG_H\n"
+            f"#define {t.id.upper()}_DIAG_BASE 0x{base:08X}u\n"
+            f"#define {t.id.upper()}_DIAG_SIZE 0x{size:08X}u\n"
+            "/* Its exit routine: writes each changed game's CMOS, then exits. */\n"
+            f"#define {t.id.upper()}_DIAG_EXIT_RVA 0x{rva:08X}u\n"
+            "#endif\n")
+
+
+# ---- Arctic Thunder's widescreen sites (src/arctic_widescreen.c) ----------
+#
+# snow.exe has no symbols. Each function below is found by the bytes at its
+# entry, relocated dwords masked (".."), and must match exactly once in .text;
+# each site is an offset from that entry and is checked for what its role
+# starts from. Kinds:
+#   c   an abs32 operand naming a CONST_POOL float the role rewrites; nothing
+#       else in .text may read it
+#   d   the same for a double
+#   i   the instruction's imm32, a float     n   the same, an integer
+#   o   an abs32 float operand pointed at a host float instead: the operand
+#       names the GR_VIEWPORT width (HI), or a read-only constant holding the
+#       value the role starts from
+#   q   the same for a double operand (ORIGIN, NORIGIN)
+#   x   `fldl d(%ebp|%esp); fchs`: t = -x0/(x1-x0) at a left plane of 0
+#   g   `flds d(%esp); fchs` in code shared by two planes: the entry adds
+#       (gdisp, gval, tail), the frame dword naming the plane and the left
+#       plane's value, checked against the switch that dispatches on it (the
+#       other left plane's case jumps to the site, or to an `fstp %st(0)`
+#       just before it); what follows the site must be `tail`, which writes
+#       the flags before it reads them
+#   v   `fdivrs (r0); movl $0,(r1)`, then `fchs` (after at most an `inc
+#       %ebp`): t = -x0/(x1-x0) and the new vertex's x, at a left plane of 0
+#   t   a jump-table entry whose case is `mov %ebp,(r); jmp`, the clamped x
+#       stored from the function's zero register; the function must zero ebp
+#   a   `fadds abs32` (the vertical bound) between `fld st0; fchs; fsts;
+#       fld st1` and two `fstps`: the left bound -m is st(1) there
+#   r   `test r,r; jl out; cmp r,w; jg out` on an integer x, rewritten as one
+#       unsigned range test that uses ecx: what follows, up to both returns,
+#       must be the title's WS_XRANGE_TAIL, which does not read ecx
+# Roles (src/arctic.h): LO/HI/NHI an x bound of 0/w/-w, FRUSTUM a corner's
+# +-1, RASTER/ORIGIN/NORIGIN moved into raster coordinates. XC and YC are read
+# only: the viewport's centre, which is where the screen size comes from.
+# Every "wholly inside, skip the clipper" test is left native: failing it only
+# sends a triangle to the widened planes.
+#
+# Ultimate Arctic Thunder (uarctic) is the same game rebuilt by MSVC, and the
+# compiler changed the shapes, not the roles: its literals are shared .rdata
+# constants (640.0 has 34 readers, 0.0 has 884), so a bound is an operand
+# redirected ("o"), never a constant rewritten; a corner's +-1 and the
+# viewport's centre are pushed immediates; the left planes divide by memory
+# ("v"); one clipper switches on its plane and shares the y and x left
+# planes' code ("g", "t"); hobj computes its margin bounds from one value
+# ("a"). Every uarctic function and site below was paired with 1.002's.
+WS_SITES = {"arctic": [
+    # camera_compute_camera_matrix: the viewport's x and y centre
+    ("81 ec c4 02 00 00 d9 05", [(0x1643, "c", "XC"), (0x16c2, "c", "YC")]),
+    # the culling frustum's corners, x of each (-1, -1, 1, 1)
+    ("83 ec 44 d9 05 .. .. ..", [(0x005, "c", "FRUSTUM"), (0x01d, "c", "FRUSTUM"),
+                                 (0x035, "c", "FRUSTUM"), (0x04d, "c", "FRUSTUM")]),
+    # clipper 1: the x<=w plane, the x>=0 plane, the clamped vertex's x
+    ("55 8b ec 81 ec d0 02 00", [(0x527, "c", "HI"), (0x549, "c", "HI"),
+                                 (0x57a, "c", "HI"), (0x588, "c", "NHI"),
+                                 (0x7c7, "c", "LO"), (0x7e9, "c", "LO"),
+                                 (0x81a, "c", "LO"), (0x826, "x", "LO"),
+                                 (0x5a8, "i", "HI"), (0x844, "i", "LO")]),
+    # clipper 2, the same planes
+    ("55 8b ec 81 ec 08 04 00", [(0x39b, "c", "HI"), (0x3b0, "c", "HI"),
+                                 (0x3d1, "c", "NHI"), (0x344, "c", "LO"),
+                                 (0x359, "c", "LO"), (0x378, "x", "LO"),
+                                 (0x857, "i", "HI"), (0x83c, "i", "LO")]),
+    # clipper 3, the same planes
+    ("55 8b ec 81 ec 20 03 00", [(0x577, "c", "HI"), (0x599, "c", "HI"),
+                                 (0x5ca, "c", "HI"), (0x5d8, "c", "NHI"),
+                                 (0x849, "c", "LO"), (0x86b, "c", "LO"),
+                                 (0x89a, "c", "LO"), (0x8a6, "x", "LO"),
+                                 (0x5f8, "i", "HI"), (0x8c4, "i", "LO")]),
+    # the line clipper (both ends per plane)
+    ("81 ec 84 00 00 00 d9 40", [(0x1a4, "c", "HI"), (0x1b4, "c", "HI"),
+                                 (0x1c6, "c", "HI"), (0x20a, "c", "HI"),
+                                 (0x218, "c", "HI"), (0x305, "c", "LO"),
+                                 (0x315, "c", "LO"), (0x367, "c", "LO"),
+                                 (0x325, "x", "LO"), (0x373, "x", "LO"),
+                                 (0x1da, "i", "HI"), (0x22c, "i", "HI"),
+                                 (0x337, "i", "LO"), (0x385, "i", "LO")]),
+    # hobj_give_vert_vis_class: the cull test of both branches (its
+    # "wholly inside" test stays native: failing it only means clipping)
+    ("57 56 55 53 81 ec 0c 01 00 00 8b", [(0x174, "c", "LO"), (0x188, "c", "HI"),
+                                          (0x3a0, "c", "LO"), (0x3b8, "c", "HI")]),
+    # the lens flare: the sun on screen; its occlusion read in raster x
+    ("83 ec 14 33 c0 d9 05 ..", [(0x4d8, "c", "LO"), (0x4e2, "c", "HI"),
+                                 (0x110, "d", "ORIGIN"), (0x219, "c", "RASTER"),
+                                 (0x213, "n", "RASTER")]),
+    # a ring of projected points, each drawn only on screen
+    ("53 8b dc 83 ec 08 83 e4 f0 83 c4 08 eb 03 53 8b dc 55 55 8b 6b 04 "
+     "89 6c 24 04 8b ec 81 ec 20", [(0x353, "c", "LO"), (0x379, "c", "HI")]),
+    # two projected markers, hidden off [0, screen width]
+    ("57 56 55 53 83 ec 44 dd", [(0xdb1, "c", "LO"), (0xdd5, "o", "HI")]),
+    ("53 8b 5c 24 08 83 ec 28 85", [(0x174, "c", "LO"), (0x198, "o", "HI")]),
+    # the midpoint of two projected track points: what is anchored there
+    # fades out while it is off [0, w] x [0, h]
+    ("d9 44 24 04 56 55 53 83 ec 40 d9 44 24 54", [(0xa9, "r", "HI")]),
+]}
+
+WS_SITES["uarctic"] = [
+    # the camera matrix: the viewport's x and y centre, pushed to the
+    # translate it ends with (320, 240, 0)
+    ("d9 05 .. .. .. .. d8 15 .. .. .. .. 81", [(0xe34, "i", "XC"), (0xe28, "i", "YC")]),
+    # the culling frustum's corners, x of each (-1, -1, 1, 1): pushed
+    ("68 .. .. .. .. 68 00 00 80 bf 68 00 00 80 bf",
+     [(0x00b, "i", "FRUSTUM"), (0x01f, "i", "FRUSTUM"),
+      (0x033, "i", "FRUSTUM"), (0x047, "i", "FRUSTUM")]),
+    # clipper 1: the x<=w plane, the clamped vertex's x, the x>=0 plane
+    ("8b 4c 24 04 8b 54 24 0c 81 ec 38",
+     [(0x41d, "o", "HI"), (0x435, "o", "HI"), (0x449, "o", "HI"),
+      (0x458, "o", "HI"), (0x46a, "i", "HI"),
+      (0x5df, "o", "LO"), (0x5f7, "o", "LO"), (0x60b, "o", "LO"),
+      (0x624, "v", "LO")]),
+    # clipper 2, the same planes, one case each of a switch on the plane
+    ("8b 4c 24 04 8b 54 24 0c 81 ec fc",
+     [(0x37d, "o", "HI"), (0x39b, "o", "HI"), (0x3c9, "o", "HI"),
+      (0x66c, "i", "HI"), (0x432, "o", "LO"), (0x450, "o", "LO"),
+      (0x474, "g", "LO", 0x28, 4, "d9 44 24 14 d8 64 24 10 de f9 3b"),
+      (0x7d8, "t", "LO")]),
+    # clipper 3, as clipper 1
+    ("8b 4c 24 04 8b 54 24 0c 81 ec 88",
+     [(0x438, "o", "HI"), (0x450, "o", "HI"), (0x464, "o", "HI"),
+      (0x473, "o", "HI"), (0x485, "i", "HI"),
+      (0x615, "o", "LO"), (0x62d, "o", "LO"), (0x641, "o", "LO"),
+      (0x65b, "v", "LO")]),
+    # the line clipper, which clips in place
+    ("8b 54 24 04 d9 42 08 d8",
+     [(0x16f, "o", "HI"), (0x179, "o", "HI"), (0x18f, "o", "HI"),
+      (0x1c6, "o", "HI"), (0x19b, "i", "HI"), (0x1d2, "i", "HI"),
+      (0x27b, "o", "LO"), (0x285, "o", "LO"),
+      (0x29b, "v", "LO"), (0x2d5, "v", "LO")]),
+    # hobj_give_vert_vis_class: the cull set's x bounds, 0 and w, or -m and
+    # w+m with a margin m (the "wholly inside" set stays native)
+    ("83 ec 40 53 55 56 57 e8 24",
+     [(0x0ba, "i", "LO"), (0x066, "o", "HI"), (0x30d, "a", "LO"),
+      (0x31d, "o", "HI")]),
+    # the lens flare's occlusion read, moved into raster x, and the sun on
+    # screen; neither function has a static caller in either build
+    ("a1 .. .. .. .. 81 ec 88",
+     [(0x038, "q", "NORIGIN"), (0x08d, "o", "RASTER"), (0x099, "n", "RASTER")]),
+    ("83 ec 20 53 55 57 e8 a5", [(0x05e, "o", "LO"), (0x073, "o", "HI")]),
+    # a ring of projected points, each drawn only on screen
+    ("8b 0d .. .. .. .. 53 56 85", [(0x2d3, "o", "LO"), (0x2f0, "o", "HI")]),
+    # two projected markers, hidden off [0, screen width]
+    ("8b 0d .. .. .. .. 56 8b 74 24 08 8b 46", [(0x0eb, "o", "LO"), (0x0fc, "o", "HI")]),
+    ("83 ec 1c 53 55 56 57 e8", [(0x254, "o", "LO"), (0x265, "o", "HI")]),
+    # the midpoint of two projected track points: what is anchored there
+    # fades out while it is off [0, w] x [0, h]
+    ("d9 44 24 04 56 e8 b6 10", [(0x015, "r", "HI")]),
+]
+
+# What follows an "r" site, up to both returns; it must not read ecx.
+WS_XRANGE_TAIL = {
+    "arctic": "85 d2 7c .. 81 fa .. .. .. .. 7e .. 83 c4 .. b8 01 00 00 00 5b 5d "
+              "5e c3 83 c4 .. 33 c0 5b 5d 5e c3",
+    "uarctic": "85 c0 7c .. 3d .. .. .. .. 7f .. 33 c0 5e c3 b8 01 00 00 00 5e c3",
+}
+
+# The width the game reads GR_VIEWPORT into: grGet(0x26, 16, buf), the size
+# checked, then the width converted and stored (`fildl; ...; fstps W`). The
+# markers' HI "o" sites name it.
+WS_VIEWPORT = {
+    "arctic": "c7 04 24 26 00 00 00 e8 .. .. .. .. 83 f8 10 0f 85 .. .. .. .. "
+              "db 45 .. db 45 .. d9 c9 d9 1d",
+    "uarctic": "6a 10 6a 26 e8 .. .. .. .. 83 f8 10 74 .. 6a .. 68 .. .. .. .. "
+               "68 .. .. .. .. 68 .. .. .. .. e8 .. .. .. .. 83 c4 10 "
+               "db 44 24 0c 5e d9 1d",
+}
+
+# An "a" site's x87 context: before it `fld st0; fchs; fsts d(%esp); fld
+# st1` (st0 m, st1 -m), after it `fstps; fstps`, the second storing st(1).
+WS_ST1_BEFORE = "d9 c0 d9 e0 d9 54 24 .. d9 c1"
+WS_ST1_AFTER = "d9 5c 24 .. d9 5c 24 .."
+
+
+# ---- Arctic Thunder's HUD at the screen's edges (src/arctic_widescreen.c) --
+#
+# [graphics] widescreen_hud = edges. The race HUD is gobj.dll sprites and
+# strings (a string draws as one sprite per glyph, each owning the string at
+# +0x08). A HUD element is one object CREATED by a call below; the host hooks
+# gobj's three create entries and remembers which objects these calls made.
+# Each function is found as WS_SITES finds one; each site is an offset to its
+# `call *slot(%reg)`, checked for the slot. Slots: 0x8c a sprite, 0x154 a
+# string, 0x168 a printf string. The line was drawn by a census of a race,
+# every draw keyed by the call that created its object: what is listed is
+# each race-HUD piece left or right of the centre; the timer, the messages,
+# the banners and the rival markers are not HUD and stay where they are.
+HUD_SITES = {"arctic": [
+    # the head-to-head icon (555, 310)
+    ("83 ec 1c 33 c0 ba 00 00", [(0x080, 0x8c)]),
+    # the special attack icon (68, 404)
+    ("83 ec 1c b8 00 00 80 42", [(0x07b, 0x8c)]),
+    # the HUD: speedometer, needle, turbo, glass, health and its pipe and
+    # glasses, missile, punch (all right); radar, place frame and glass (left)
+    ("57 56 55 53 83 ec 2c 33 c0", [(0x09b, 0x8c), (0x152, 0x8c), (0x1e2, 0x8c),
+                                    (0x27c, 0x8c), (0x307, 0x8c), (0x392, 0x8c),
+                                    (0x41d, 0x8c), (0x4c7, 0x8c), (0x58b, 0x8c),
+                                    (0x656, 0x8c), (0x750, 0x8c), (0x807, 0x8c),
+                                    (0x8be, 0x8c)]),
+    # the track map's blips, made at load, and the map and its blips at the
+    # race's start (left)
+    ("53 83 ec 28 8b 1d .. ..", [(0x284, 0x8c), (0x342, 0x8c), (0x3c9, 0x8c),
+                                 (0x42f, 0x8c), (0x478, 0x8c)]),
+    ("57 56 55 53 81 ec 8c 00 00 00 8b 2d", [(0x0bd, 0x8c), (0x56e, 0x8c),
+                                             (0x62f, 0x8c), (0x6ce, 0x8c),
+                                             (0x737, 0x8c), (0x780, 0x8c)]),
+    # the place: its digit (177, 427) and the field's size (235, 438) in the
+    # place frame, and "%d OF %d" (552, 281)
+    ("55 53 83 ec 3c 8b d8 8b", [(0x396, 0x154), (0x410, 0x168), (0x4a0, 0x168)]),
+    # the atomic snowball count beside the missile icon, a string at
+    # (475, 436) made again whenever the count changes (right); the census
+    # race took none, so it was never drawn there
+    ("53 8b 5c 24 08 83 ec 08 85 db 7c", [(0x1ae, 0x154)]),
+]}
+
+# Ultimate's calls. MSVC mostly loads `lea slot(%t),%reg` and calls
+# `*(%reg)` (or `*0x0(%ebp)`), so the call does not name its slot: the
+# generator finds the lea before it, and at run time a wrong claim can only
+# fail to match, since the thunk for a slot sees the call's return address.
+# The track map's three blip calls of 1.002 are one shared call here.
+HUD_SITES["uarctic"] = [
+    # the head-to-head icon (555, 310)
+    ("a1 .. .. .. .. 56 c7 05 .. .. .. .. .. .. .. .. c7 05 .. .. .. .. 00 00 80 43",
+     [(0x080, 0x8c)]),
+    # the special attack icon (68, 404)
+    ("a1 .. .. .. .. 56 c7 05 .. .. .. .. .. .. .. .. c7 05 .. .. .. .. 00 00 80 42",
+     [(0x080, 0x8c)]),
+    # the HUD, the same thirteen pieces as 1.002's
+    ("a1 .. .. .. .. 83 ec 08 c7", [(0x09e, 0x8c), (0x162, 0x8c), (0x205, 0x8c),
+                                    (0x2b0, 0x8c), (0x353, 0x8c), (0x3f5, 0x8c),
+                                    (0x498, 0x8c), (0x527, 0x8c), (0x608, 0x8c),
+                                    (0x70a, 0x8c), (0x800, 0x8c), (0x8c3, 0x8c),
+                                    (0x98a, 0x8c)]),
+    # the track map at the race's start, then its blips
+    ("53 55 56 57 8b 3d .. .. .. .. 33 db", [(0x0c2, 0x8c)]),
+    ("83 ec 08 56 57 8b 7c 24", [(0x0a9, 0x8c), (0x0eb, 0x8c), (0x1bc, 0x8c),
+                                 (0x253, 0x8c)]),
+    # the place: its digit, the field's size, and "%d OF %d"
+    ("83 ec 18 56 8b 74 24 20 57 8b 7c", [(0x2eb, 0x154), (0x34e, 0x168),
+                                          (0x3c1, 0x168)]),
+    # the atomic snowball count, as 1.002's
+    ("6a ff 68 e4 07 00 00 ff", [(0x0f0, 0x154)]),
+]
+
+# What gobj.dll is, checked by bytes: the function table its export
+# get_function_table_ptr returns, and in it each create entry (HUD_SLOTS:
+# the slot, its signature, the argument dwords it reads). Then the facts the
+# host reads an object by: FACTS, each matching once in .text, with the
+# offset a fact names at (byte, its offset within the match).
+HUD_SLOTS = [
+    # a sprite: (desc, x, y, z, ?) with no owner (0 at the internal create's
+    # first argument)
+    (0x8c, "83 ec 2c a1 .. .. .. .. c7 44 24 18 01 00 00 00 c7 04 24 00 00 00 00 "
+           "8b 54 24 30 8b 4c 24 34 89 54 24 04 8b 54 24 38 89 4c 24 08 "
+           "8b 4c 24 3c 89 54 24 0c 8b 54 24 40", 5),
+    # a string: (text); its glyphs are made, then the text state copied in
+    (0x154, "57 56 55 53 8b 6c 24 14 83 ec 0c 89 2c 24 e8 .. .. .. .. 8b d8 85 db "
+            "74 .. 89 2c 24 89 5c 24 04 e8 .. .. .. .. 8d bb 98 00 00 00 be .. .. .. .. "
+            "b9 10 00 00 00 f3 a5", 1),
+    # a printf string: (format, ...) formatted into a buffer, then the string
+    # entry's own function; room for eight dwords, where the HUD passes three
+    (0x168, "83 ec 14 c7 04 24 .. .. .. .. 8b 44 24 18 8d 54 24 1c 89 44 24 04 "
+            "89 54 24 08 ff 15 .. .. .. .. c7 04 24 .. .. .. .. e8", 8),
+]
+HUD_FACTS = {
+    # the internal create: x to +0x78, the owner (its first argument) to +0x08
+    "sprite_x": ("8b 55 10 89 b3 e4 00 00 00 8b 4d 14 89 53 78", 14),
+    "owner": ("8b 4d 08 66 89 53 12 88 93 f9 00 00 00 89 93 f0 00 00 00 89 4b 08", 21),
+    # a glyph is made with its string as the owner: (string, desc, x, 0, y, 0)
+    "glyph": ("8b 44 24 64 89 6c 24 04 d9 5c 24 10 d9 5c 24 08 c7 44 24 0c 00 00 00 00 "
+              "89 04 24 c7 44 24 14 00 00 00 00 e8", None),
+    # the text position (x, y, z): x is the first dword of the text state,
+    # which the string entry copies to +0x98
+    "text_pos": ("8b 44 24 0c 8b 54 24 08 83 ec 1c 89 54 24 08 a3 .. .. .. .. "
+                 "db 44 24 08 db 44 24 20 d9 1d", None),
+    # every vertex layout gobj sets puts x first: grVertexLayout(XY, 0, on)
+    "xy": ("b8 01 00 00 00 89 44 24 08 c7 44 24 04 00 00 00 00 89 04 24 e8", None),
+    # the draw loop: each sprite's four vertices at +0x20, 20 bytes apart, as
+    # one fan through grDrawVertexArrayContiguous
+    "draw": ("8d 43 20 c7 44 24 0c 14 00 00 00 89 44 24 08 c7 44 24 04 04 00 00 00 "
+             "c7 04 24 05 00 00 00 c7 05 .. .. .. .. 00 00 00 00 e8", 2),
+}
+
+
+def emit_win32_hud(t, img, base, text, rel):
+    """The HUD half of generated/<id>_widescreen.c (HUD_SITES, HUD_SLOTS,
+    HUD_FACTS), every value found and checked, or a ValueError."""
+    gpath = os.path.join(os.path.dirname(t.exe), "gobj.dll")
+    gb = open(gpath, "rb").read()
+    gimg, gbase, granges, _ = pe_image(gb)
+    gtext = pe_range(granges, ".text", gpath)
+    u32 = lambda m, rva: struct.unpack_from("<I", m, rva)[0]
+    once = lambda m, rng, sig, what: (lambda h: h[0] if len(h) == 1 else
+                                      (_ for _ in ()).throw(ValueError(
+                                          f"{what}: '{sig[:40]}...' matched {len(h)} times")))(
+        ws_find(m, rng, sig))
+
+    exp = pe_exports(gb)["get_function_table_ptr"]
+    if gimg[exp] != 0xB8 or gimg[exp + 5] != 0xC3:
+        raise ValueError(f"{gpath}: get_function_table_ptr is not `mov $t,%eax; ret`")
+    table = u32(gimg, exp + 1) - gbase
+    slots = []
+    for slot, sig, words in HUD_SLOTS:
+        target = u32(gimg, table + slot) - gbase
+        if once(gimg, gtext, sig, f"{gpath} slot {slot:#x}") != target:
+            raise ValueError(f"{gpath}: table slot {slot:#x} is not the function"
+                             f" its signature finds")
+        slots.append((slot, target, words))
+    # the printf string's call is the string entry's own function
+    pf = slots[2][1] + len(HUD_SLOTS[2][1].split())
+    if pf + 4 + struct.unpack_from("<i", gimg, pf)[0] != slots[1][1]:
+        raise ValueError(f"{gpath}: the printf string does not call the string entry")
+    # the string entry copies the text state to +0x98 from the address the
+    # position entry stores x at
+    st = slots[1][1] + 43
+    if u32(gimg, st - 4) != 0x98 or gimg[st] != 0xBE:
+        raise ValueError(f"{gpath}: the string entry's state copy moved")
+    state = u32(gimg, st + 1)
+    tp = once(gimg, gtext, HUD_FACTS["text_pos"][0], gpath)
+    if u32(gimg, tp + len(HUD_FACTS["text_pos"][0].split())) != state:
+        raise ValueError(f"{gpath}: the text position's x is not the state's first dword")
+    once(gimg, gtext, HUD_FACTS["glyph"][0], gpath)
+    sx = once(gimg, gtext, HUD_FACTS["sprite_x"][0], gpath)
+    ow = once(gimg, gtext, HUD_FACTS["owner"][0], gpath)
+    sprite_x, owner = gimg[sx + HUD_FACTS["sprite_x"][1]], gimg[ow + HUD_FACTS["owner"][1]]
+    for at in ws_find(gimg, gtext, HUD_FACTS["xy"][0]) or [None]:
+        call = None if at is None else at + len(HUD_FACTS["xy"][0].split()) - 1
+        if call is None or pe_import_slot(gb, "_grVertexLayout@12") != \
+                u32(gimg, call + 5 + struct.unpack_from("<i", gimg, call + 1)[0] + 2) - gbase:
+            raise ValueError(f"{gpath}: no grVertexLayout(XY, 0) where it was")
+    dr = once(gimg, gtext, HUD_FACTS["draw"][0], gpath)
+    vert_off = gimg[dr + HUD_FACTS["draw"][1]]
+    call = dr + len(HUD_FACTS["draw"][0].split()) - 1
+    thunk = call + 5 + struct.unpack_from("<i", gimg, call + 1)[0]
+    if gimg[thunk:thunk + 2] != b"\xff\x25":
+        raise ValueError(f"{gpath}: the draw loop's call is not an import thunk")
+    if pe_import_slot(gb, "_grDrawVertexArrayContiguous@16") != u32(gimg, thunk + 2) - gbase:
+        raise ValueError(f"{gpath}: the draw loop does not call grDrawVertexArrayContiguous")
+    draw_ret = call + 5
+
+    sites = []
+    for sig, entries in HUD_SITES[t.id]:
+        at = once(img, text, sig, t.exe)
+        for off, slot in entries:
+            rva = at + off
+            m = img[rva:rva + 6]
+            if m[0] == 0xFF and 0x90 <= m[1] <= 0x97 and m[1] != 0x94 and \
+                    struct.unpack_from("<I", m, 2)[0] == slot:
+                n = 6
+            elif m[0] == 0xFF and (0x10 <= m[1] <= 0x17 and m[1] not in (0x14, 0x15)
+                                   or m[1:3] == b"\x55\x00"):
+                # `call *(%reg)`: a `lea slot(%t),%reg` comes first
+                n, reg = (2, m[1] & 7) if m[1] != 0x55 else (3, 5)
+                if not any(img[k] == 0x8D and img[k + 1] & 0xC0 == 0x80 and
+                           (img[k + 1] >> 3) & 7 == reg and img[k + 1] & 7 != 4 and
+                           struct.unpack_from("<I", img, k + 2)[0] == slot
+                           for k in range(rva - 0x200, rva)):
+                    raise ValueError(f"{t.exe}: +{rva:#x} calls through a register"
+                                     f" no `lea {slot:#x}(..)` loaded")
+            else:
+                raise ValueError(f"{t.exe}: +{rva:#x} is not a call of slot {slot:#x}")
+            sites.append((rva, [s for s, _, _ in slots].index(slot), n))
+
+    out = ["\n/* The race HUD (widescreen_hud = edges): gobj.dll's create entries and"
+           " the\n * snow.exe calls whose objects are the HUD. RVAs; each is checked"
+           " again at\n * run time. */\n",
+           "static const arctic_hud_site_t k_hud_site[] = {\n"]
+    for rva, k, n in sorted(sites):
+        out.append(f"    {{ 0x{rva:06X}u, {k}, {n} }},\n")
+    out.append("};\n\n")
+    out.append(f"const arctic_hud_table_t g_{t.id}_hud = {{\n"
+               f"    0x{table:06X}u,\n"
+               + "    { " + ", ".join(f"0x{s:03X}u" for s, _, _ in slots) + " },\n"
+               + "    { " + ", ".join(f"0x{g:06X}u" for _, g, _ in slots) + " },\n"
+               + "    { " + ", ".join(f"{w}" for _, _, w in slots) + " },\n"
+               f"    0x{draw_ret:06X}u, 0x{vert_off:02X}, 0x{owner:02X},"
+               f" 0x{sprite_x:02X}, 0x98,\n"
+               f"    sizeof k_hud_site / sizeof k_hud_site[0], k_hud_site\n}};\n")
+    return "".join(out)
+
+
+# ---- Arctic Thunder's force-feedback cells (src/arctic_ffb.c) --------------
+#
+# What the cabinet's feel is made of, read by the host and never written. Each
+# function is found as WS_SITES finds one; each cell is the abs32 operand of
+# the instruction at an offset, checked for its opcode. Cells:
+#   JOLT       the handlebar jolt, 0..1: the game's impact sites set it, the
+#              effects callback decays it (read there, `flds JOLT`)
+#   SHAKE      the handlebar shake multiplier, -1..1 (`fmuls SHAKE`)
+#   SHAKER_ON  the seat shaker thread's run flag (`mov SHAKER_ON,%eax`)
+#   PATTERN    the pattern it plays (`mov PATTERN,%eax`)
+#   BOOST      the PATTERN value the shaker's own test mode labels "BOOST":
+#              `movl $id,PATTERN` then the label handed to its printer,
+#              `movl $"BOOST",(%esp)` (Intel) or `push $"BOOST"` (MSVC)
+FFB_CELLS = {"arctic": [
+    # the handlebar effects callback, run by the feedback thread
+    ("83 ec 34 a1 .. .. .. .. ba ff ff ff ff 03 d0 85 c0 89 15",
+     [(0x0e0, "d9 05", "JOLT"), (0x1b5, "d8 0d", "SHAKE")]),
+    # the seat shaker thread: one pattern byte every 32 ms
+    ("55 8b ec 83 ec 0c ff 15 .. .. .. .. 83 c4 f8 c7 44 24 04 0f 00 00 00",
+     [(0x030, "a1", "SHAKER_ON"), (0x04a, "a1", "PATTERN")]),
+    # the shaker's per-frame process, which picks the pattern
+    ("56 55 53 83 ec 08 a1 .. .. .. .. 85 c0 75 .. 8b 15",
+     [(0x2f6, "c7 05", "BOOST")]),
+], "uarctic": [
+    # the same three functions, rebuilt by MSVC: the cells' roles, clamps and
+    # decay steps (jolt 0.04, shake timer 0.13 per 32 ms) are 1.002's
+    ("a1 .. .. .. .. 8b c8 48 85 c9 a3 .. .. .. .. 0f 8f",
+     [(0x0f5, "d9 05", "JOLT"), (0x1d1, "d9 05", "SHAKE")]),
+    ("56 57 6a 0f ff 15 .. .. .. .. 50 ff 15 .. .. .. .. 8b 35 .. .. .. .. 8b 3d"
+     " .. .. .. .. a1 .. .. .. .. 85 c0 74",
+     [(0x01d, "a1", "SHAKER_ON"), (0x045, "a1", "PATTERN")]),
+    ("a1 .. .. .. .. 53 55 56 33 f6 57 3b c6 74",
+     [(0x125, "c7 05", "BOOST")]),
+]}
+
+
+def emit_win32_ffb(t):
+    """generated/<id>_ffb.c: the cells src/arctic_ffb.c reads, each found and
+    checked here (FFB_CELLS), or nothing is generated."""
+    b = open(t.exe, "rb").read()
+    img, base, ranges, rel = pe_image(b)
+    text = pe_range(ranges, ".text", t.exe)
+    data = pe_range(ranges, ".data", t.exe)
+    u32 = lambda rva: struct.unpack_from("<I", img, rva)[0]
+    cell, site = {}, {}
+    for sig, entries in FFB_CELLS[t.id]:
+        hits = ws_find(img, text, sig)
+        if len(hits) != 1:
+            raise ValueError(f"{t.exe}: '{sig}' matched {len(hits)} times")
+        for off, op, name in entries:
+            at = hits[0] + off
+            opb = bytes(int(x, 16) for x in op.split())
+            if img[at:at + len(opb)] != opb or at + len(opb) not in rel:
+                raise ValueError(f"{t.exe}: +{at:#x} is not '{op}' on an address")
+            rva = u32(at + len(opb)) - base
+            if not data[0] <= rva < data[1]:
+                raise ValueError(f"{t.exe}: {name} {rva + base:#x} is not in .data")
+            cell[name], site[name] = rva, at
+    # BOOST names PATTERN, stores an id, and the next instruction hands the
+    # shaker test's printer the string "BOOST".
+    at = site["BOOST"]
+    if cell["BOOST"] != cell["PATTERN"]:
+        raise ValueError(f"{t.exe}: +{at:#x} stores somewhere other than PATTERN")
+    boost = u32(at + 6)
+    label = lambda o: o in rel and bytes(img[u32(o) - base:][:7]) == b"BOOST\n\0"
+    if not any(img[o:o + len(op)] == op and label(o + len(op))
+               for o in range(at + 10, at + 24)
+               for op in (b"\xc7\x04\x24", b"\x68")):
+        raise ValueError(f"{t.exe}: no \"BOOST\" label follows the store at"
+                         f" +{at:#x}")
+    return ("/* GENERATED by scripts/gen-gamedefs.py: do not edit. */\n"
+            '#include "../src/arctic.h"\n\n'
+            f"/* {t.name}, {t.meta['build']}: the cells the cabinet's feel is"
+            f" made of\n * (src/arctic_ffb.c). RVAs in snow.exe; each site is"
+            f" the instruction that\n * names its cell, checked again at run"
+            f" time. */\n"
+            f"const arctic_ffb_cells_t g_{t.id}_ffb = {{\n"
+            f"    {{ 0x{cell['JOLT']:06X}u, 0x{cell['SHAKE']:06X}u,"
+            f" 0x{cell['SHAKER_ON']:06X}u, 0x{cell['PATTERN']:06X}u }},\n"
+            f"    {{ 0x{site['JOLT'] + 2:06X}u, 0x{site['SHAKE'] + 2:06X}u,"
+            f" 0x{site['SHAKER_ON'] + 1:06X}u, 0x{site['PATTERN'] + 1:06X}u }},\n"
+            f"    {boost}\n}};\n")
+
+
+# The select screens' notches (src/menu_wheel.c). feedback_set_notching(n)
+# stores the count (0 in a race, 2..32 on a select screen) and resets the
+# current notch to -1; the feedback thread maps the bars' position into one of
+# the n equal slots, with hysteresis, and the screens read that slot back.
+# POS is the position it maps, -1..1.
+MENU_SIGS = {"arctic": [
+    # feedback_set_notching: 0 <= n <= 32, n != 1
+    ("83 ec 14 8b 44 24 18 85 c0 7c .. 8b 44 24 18 83 f8 01 74 .. 8b 44 24 18"
+     " 83 f8 20 7f .. 8b 44 24 18 3b 05",
+     [(0x2d, "c7 05", "INDEX"), (0x37, "a3", "COUNT")]),
+    # the feedback thread's notch branch: count > 1, then (pos + 1) ...
+    ("8b 15 .. .. .. .. 83 fa 01 0f 8e .. .. .. .. a1 .. .. .. .. d9 05 .. .. .."
+     " .. d8 05",
+     [(0x00, "8b 15", "COUNT"), (0x1a, "d8 05", "POS")]),
+    # its hysteresis: the current notch is kept while |pos - its centre| is
+    # under HYST notch widths (fld [0] ; fld [HYST] ; fmul st(3) ; ...)
+    ("d9 05 .. .. .. .. d9 05 .. .. .. .. d8 cb d9 c2 d9 e0",
+     [(0x06, "d9 05", "HYST")]),
+], "uarctic": [
+    # the same two, rebuilt by MSVC
+    ("56 8b 74 24 08 85 f6 7c .. 83 fe 01 74 .. 83 fe 20 7e .. 68 7d 03 00 00",
+     [(0x38, "89 35", "COUNT"), (0x3e, "c7 05", "INDEX")]),
+    ("8b 0d .. .. .. .. 83 f9 01 0f 8e .. .. .. .. a1 .. .. .. .. 89 44 24 14"
+     " db 44 24 14 d8 3d .. .. .. .. d9 05",
+     [(0x00, "8b 0d", "COUNT"), (0x22, "d9 05", "POS")]),
+    # (fld st(1) ; fmul [HYST] ; fxch ; fcompp ...)
+    ("d9 c1 d8 0d .. .. .. .. d9 c9 de d9 df e0 f6 c4 01",
+     [(0x02, "d8 0d", "HYST")]),
+]}
+
+
+def emit_win32_menu(t):
+    """generated/<id>_menu.c: the notch cells src/menu_wheel.c reads, each
+    found and checked here (MENU_SIGS), or nothing is generated. COUNT is
+    named by both functions and must be one cell."""
+    b = open(t.exe, "rb").read()
+    img, base, ranges, rel = pe_image(b)
+    text = pe_range(ranges, ".text", t.exe)
+    data = pe_range(ranges, ".data", t.exe)
+    # A constant is a literal: .rdata, or .data1 where that compiler put its
+    # literals.
+    consts = [ranges[k] for k in (".rdata", ".data1") if k in ranges]
+    u32 = lambda rva: struct.unpack_from("<I", img, rva)[0]
+    cell, site = {}, {}
+    for sig, entries in MENU_SIGS[t.id]:
+        hits = ws_find(img, text, sig)
+        if len(hits) != 1:
+            raise ValueError(f"{t.exe}: '{sig}' matched {len(hits)} times")
+        for off, op, name in entries:
+            at = hits[0] + off
+            opb = bytes(int(x, 16) for x in op.split())
+            if img[at:at + len(opb)] != opb or at + len(opb) not in rel:
+                raise ValueError(f"{t.exe}: +{at:#x} is not '{op}' on an address")
+            rva = u32(at + len(opb)) - base
+            where = consts if name == "HYST" else [data]
+            if not any(lo <= rva < hi for lo, hi in where):
+                raise ValueError(f"{t.exe}: {name} {rva + base:#x} is not in"
+                                 f" {'a literal section' if name == 'HYST' else '.data'}")
+            if name in cell and cell[name] != rva:
+                raise ValueError(f"{t.exe}: two {name} cells, {cell[name] + base:#x}"
+                                 f" and {rva + base:#x}")
+            if name not in cell:
+                cell[name], site[name] = rva, at + len(opb)
+    return ("/* GENERATED by scripts/gen-gamedefs.py: do not edit. */\n"
+            '#include "../src/arctic.h"\n\n'
+            f"/* {t.name}, {t.meta['build']}: the select screens' notches"
+            f" (src/menu_wheel.c).\n * RVAs in snow.exe; each site is the"
+            f" operand that names its cell, checked\n * again at run time. */\n"
+            f"const arctic_menu_cells_t g_{t.id}_menu = {{\n"
+            f"    {{ 0x{cell['COUNT']:06X}u, 0x{cell['INDEX']:06X}u,"
+            f" 0x{cell['POS']:06X}u, 0x{cell['HYST']:06X}u }},\n"
+            f"    {{ 0x{site['COUNT']:06X}u, 0x{site['INDEX']:06X}u,"
+            f" 0x{site['POS']:06X}u, 0x{site['HYST']:06X}u }}\n}};\n")
+
+
+def pe_image(b):
+    """(image, base, {section: (rva, end)}, relocated-dword rvas): the file
+    laid out at its RVAs, unrelocated. The caller names the sections it needs
+    through pe_range(), so an image built by another compiler is refused by
+    name instead of raising out of here."""
+    pe = struct.unpack_from("<I", b, 0x3C)[0]
+    opt = pe + 24
+    base = struct.unpack_from("<I", b, opt + 28)[0]
+    size = struct.unpack_from("<I", b, opt + 56)[0]
+    img = bytearray(size)
+    ranges = {}
+    for name, va, vs, ro, rs in pe_sections(b):
+        img[va:va + min(vs, rs)] = b[ro:ro + min(vs, rs)]
+        ranges[name] = (va, va + vs)
+    rel = set()
+    rrva, rsize = struct.unpack_from("<II", b, opt + 96 + 5 * 8)
+    o = pe_rva_to_off(b, rrva) if rrva else 0
+    end = o + rsize
+    while rrva and o < end:
+        page, n = struct.unpack_from("<II", b, o)
+        if n < 8:
+            break
+        for k in range((n - 8) // 2):
+            e = struct.unpack_from("<H", b, o + 8 + 2 * k)[0]
+            if e >> 12 == 3:
+                rel.add(page + (e & 0xFFF))
+        o += n
+    return img, base, ranges, rel
+
+
+def ws_find(img, text, sig):
+    """Every RVA in .text where the signature matches, ".." matching any
+    byte."""
+    pat = [None if t == ".." else int(t, 16) for t in sig.split()]
+    head = bytes(pat[:next(i for i, v in enumerate(pat) if v is None)]
+                 if None in pat else pat)
+    hits, i = [], img.find(head, text[0])
+    while 0 <= i < text[1]:
+        if all(v is None or img[i + k] == v for k, v in enumerate(pat)):
+            hits.append(i)
+        i = img.find(head, i + 1)
+    return hits
+
+
+def pe_writable(b, rva):
+    """Whether the section holding `rva` is writable (IMAGE_SCN_MEM_WRITE)."""
+    pe = struct.unpack_from("<I", b, 0x3C)[0]
+    nsec = struct.unpack_from("<H", b, pe + 6)[0]
+    optsz = struct.unpack_from("<H", b, pe + 20)[0]
+    for i in range(nsec):
+        o = pe + 24 + optsz + 40 * i
+        vsize, va = struct.unpack_from("<II", b, o + 8)
+        if va <= rva < va + vsize:
+            return bool(struct.unpack_from("<I", b, o + 36)[0] & 0x80000000)
+    raise ValueError(f"RVA {rva:#x} is in no section")
+
+
+def ws_dispatch(img, base, fn, end, table):
+    """The register a `jmp *table(,%r,4)` in [fn, end) dispatches on, or
+    None: FF 24 85+8r <table>."""
+    for at in range(fn, end - 7):
+        if img[at] == 0xFF and img[at + 1] == 0x24 and \
+                img[at + 2] & 0xC7 == 0x85 and \
+                struct.unpack_from("<I", img, at + 3)[0] == table + base:
+            return (img[at + 2] >> 3) & 7, at
+    return None, None
+
+
+def emit_win32_widescreen(t):
+    """generated/<id>_widescreen.c: every snow.exe site the host widens, each
+    found and checked here (WS_SITES), or nothing is generated."""
+    b = open(t.exe, "rb").read()
+    img, base, ranges, rel = pe_image(b)
+    text = pe_range(ranges, ".text", t.exe)
+    u32 = lambda rva: struct.unpack_from("<I", img, rva)[0]
+    f32 = lambda rva: struct.unpack_from("<f", img, rva)[0]
+    f64 = lambda rva: struct.unpack_from("<d", img, rva)[0]
+    once = lambda rng, sig, what: (lambda h: h[0] if len(h) == 1 else
+                                   (_ for _ in ()).throw(ValueError(
+                                       f"{t.exe}: {what} matched {len(h)} times")))(
+        ws_find(img, rng, sig))
+    readers = {}
+    for r in rel:
+        if text[0] <= r < text[1]:
+            readers.setdefault(u32(r), []).append(r)
+
+    vsig = WS_VIEWPORT[t.id]
+    width_va = u32(once(text, vsig, "the GR_VIEWPORT store") + len(vsig.split()))
+
+    sites, centre = [], {}
+    for sig, entries in WS_SITES[t.id]:
+        fn = once(text, sig, f"'{sig}'")
+        for off, kind, role, *extra in entries:
+            at = fn + off
+            if kind in "cdoqt" and at not in rel:
+                raise ValueError(f"{t.exe}: +{at:#x} is not an address")
+            if kind in "cd":
+                # the pool is resolved only for a title that rewrites its
+                # constants in place (CONST_POOL)
+                pool = pe_range(ranges, CONST_POOL, t.exe)
+                rva = u32(at) - base
+                if not pool[0] <= rva < pool[1] or len(readers[u32(at)]) != 1:
+                    raise ValueError(f"{t.exe}: {u32(at):#x} is not a"
+                                     f" {CONST_POOL} constant with one reader")
+            else:
+                rva = at
+            if role in ("XC", "YC"):
+                centre[role] = f32(rva)
+                continue
+            if kind == "x":
+                m = img[rva:rva + 6]
+                if m[0:2] == b"\xdd\x45" and m[3:5] == b"\xd9\xe0":
+                    reg, disp = 5, m[2]
+                elif m[0:3] == b"\xdd\x44\x24" and m[4:6] == b"\xd9\xe0":
+                    reg, disp = 4, m[3]
+                else:
+                    raise ValueError(f"{t.exe}: +{rva:#x} is not fld; fchs")
+                sites.append((rva, "AWS_XSUB", role, reg, disp, u32(rva), 0, 0, 0))
+                continue
+            if kind == "g":
+                gdisp, gval, tail = extra
+                m = img[rva:rva + 6]
+                if m[0:3] != b"\xd9\x44\x24" or m[4:6] != b"\xd9\xe0" or \
+                        not ws_find(img, (rva + 6, rva + 7), tail):
+                    raise ValueError(f"{t.exe}: +{rva:#x} is not flds; fchs"
+                                     f" before '{tail}'")
+                # the plane is switched on from gdisp(%esp): the case for
+                # gval is the last before the site, and the case before it
+                # (the other left plane) jumps to the site
+                disp_at = None
+                for k in range(fn, rva):
+                    if img[k] == 0x8B and img[k + 1] & 0xC7 == 0x44 and \
+                            img[k + 2] == 0x24 and img[k + 3] == gdisp:
+                        r = (img[k + 1] >> 3) & 7
+                        for j in range(k + 4, k + 0x30):
+                            if img[j] == 0xFF and img[j + 1] == 0x24 and \
+                                    img[j + 2] == (0x85 | r << 3):
+                                disp_at = j
+                if disp_at is None:
+                    raise ValueError(f"{t.exe}: no switch on {gdisp:#x}(%esp)"
+                                     f" before +{rva:#x}")
+                tab = u32(disp_at + 3) - base
+                cases = [u32(tab + 4 * k) - base for k in range(gval + 1)]
+                mine, other = cases[gval], cases[gval - 1]
+                if not mine < rva or any(mine < c <= rva for c in cases) or \
+                        not any(img[k] == 0xEB and
+                                bytes(img[k + 2 + _s8(img[k + 1]):rva]) in
+                                (b"", b"\xdd\xd8")      # fstp %st(0) first
+                                for k in range(other, mine)):
+                    raise ValueError(f"{t.exe}: +{rva:#x} is not plane {gval}'s"
+                                     f" tail of the switch at +{disp_at:#x}")
+                sites.append((rva, "AWS_XSUBG", role, 4, m[3], u32(rva), 0,
+                              gdisp, gval))
+                continue
+            if kind == "v":
+                m = img[rva:rva + 11]
+                r0, r1 = m[1] & 7, m[3]
+                if (m[0] != 0xD8 or m[1] & 0xF8 != 0x38 or m[2] != 0xC7 or
+                        r1 > 7 or r0 in (4, 5) or r1 in (4, 5) or
+                        u32(rva + 4) != 0 or
+                        m[8:10] != b"\xd9\xe0" and m[8:11] != b"\x45\xd9\xe0"):
+                    raise ValueError(f"{t.exe}: +{rva:#x} is not fdivrs;"
+                                     f" movl $0; fchs")
+                sites.append((rva, "AWS_XDIV", role, r0, r1, u32(rva), 0, 0, 0))
+                continue
+            if kind == "t":
+                case = u32(at) - base
+                m = img[case:case + 4]
+                if not text[0] <= case < text[1] or m[0] != 0x89 or \
+                        m[1] & 0xF8 != 0x28 or m[1] & 7 in (4, 5) or m[2] != 0xEB:
+                    raise ValueError(f"{t.exe}: +{at:#x} does not name a"
+                                     f" `mov %ebp,(r); jmp` case")
+                # a table some switch of this function dispatches on holds
+                # it, and the function zeroes ebp before that switch
+                tab = max((u32(k + 3) - base for k in range(fn, at - 7)
+                           if img[k] == 0xFF and img[k + 1] == 0x24 and
+                           img[k + 2] & 0xC7 == 0x85 and
+                           u32(k + 3) - base <= at), default=None)
+                reg, sw = ws_dispatch(img, base, fn, at, tab) if tab else (None, None)
+                if sw is None or (at - tab) % 4 or \
+                        not any(img[k:k + 2] == b"\x33\xed" for k in range(fn, sw)):
+                    raise ValueError(f"{t.exe}: +{at:#x} is not an entry of a"
+                                     f" table switched on after ebp is zeroed")
+                sites.append((rva, "AWS_JTAB", role, m[1] & 7, 0, u32(at), 0, 0, 0))
+                continue
+            if kind == "a":
+                if (img[rva:rva + 2] != b"\xd8\x05" or rva + 2 not in rel or
+                        not ws_find(img, (rva - 10, rva - 9), WS_ST1_BEFORE) or
+                        not ws_find(img, (rva + 6, rva + 7), WS_ST1_AFTER)):
+                    raise ValueError(f"{t.exe}: +{rva:#x} is not the margin's"
+                                     f" fadds between its bounds")
+                sites.append((rva, "AWS_ST1LO", role, 0, 0, u32(rva + 2), 0, 0, 0))
+                continue
+            if kind == "r":
+                m = img[rva:rva + 12]
+                r = m[1] & 7
+                tail = ws_find(img, (rva + 12, rva + 13), WS_XRANGE_TAIL[t.id])
+                if (m[0] != 0x85 or m[1] != (0xC0 | r << 3 | r) or r in (1, 4) or
+                        m[2] != 0x7c or m[4] != 0x81 or m[5] != (0xF8 | r) or
+                        m[10] != 0x7f or rva + 4 + m[3] != rva + 12 + m[11] or
+                        not tail):
+                    raise ValueError(f"{t.exe}: +{rva:#x} is not the x range test")
+                sites.append((rva, "AWS_XRANGE", role, r, 0, u32(rva + 6), 0, 0, 0))
+                continue
+            if kind in "oq":
+                # a float (D8/D9) or double (DC/DD) memory operand, mod 00 rm 101
+                op = img[at - 2]
+                if img[at - 1] & 0xC7 != 0x05 or \
+                        op not in ((0xD8, 0xD9) if kind == "o" else (0xDC, 0xDD)):
+                    raise ValueError(f"{t.exe}: +{at:#x} is not a"
+                                     f" {'float' if kind == 'o' else 'double'}"
+                                     f" operand")
+            kinds = {"c": "AWS_F32", "i": "AWS_F32", "d": "AWS_F64",
+                     "n": "AWS_I32", "o": "AWS_OPND", "q": "AWS_OPND64"}
+            sites.append((rva, kinds[kind], role, 0, 0, u32(rva),
+                          u32(rva + 4) if kind == "d" else 0, 0, 0))
+
+    w, h = 2 * centre["XC"], 2 * centre["YC"]
+    want = {"LO": 0.0, "HI": w, "NHI": -w, "RASTER": w}
+    def operand_ok(va, role, size):
+        """An "o"/"q" operand: the GR_VIEWPORT width (HI), or a read-only
+        constant holding what the role starts from."""
+        if va == width_va:
+            return role == "HI" and size == 4
+        if pe_writable(b, va - base):
+            return False
+        v = f32(va - base) if size == 4 else f64(va - base)
+        if role == "FRUSTUM":
+            return abs(v) == 1.0
+        if role in ("ORIGIN", "NORIGIN"):
+            return size == 8 and 0 < abs(v) < w
+        return size == 4 and v == want.get(role)
+    for rva, kind, role, _, _, raw, _, _, _ in sites:
+        v = struct.unpack("<f", struct.pack("<I", raw))[0]
+        ok = {"AWS_F32": lambda: (abs(v) == 1.0) if role == "FRUSTUM" else v == want.get(role),
+              "AWS_F64": lambda: role == "ORIGIN",
+              "AWS_I32": lambda: role == "RASTER" and 0 < raw < w,
+              "AWS_OPND": lambda: operand_ok(raw, role, 4),
+              "AWS_OPND64": lambda: operand_ok(raw, role, 8),
+              "AWS_XSUB": lambda: role == "LO",
+              "AWS_XSUBG": lambda: role == "LO",
+              "AWS_XDIV": lambda: role == "LO",
+              "AWS_JTAB": lambda: role == "LO",
+              "AWS_ST1LO": lambda: role == "LO" and not pe_writable(b, raw - base) and
+                           f32(raw - base) == h,
+              "AWS_XRANGE": lambda: role == "HI" and raw == w}[kind]()
+        if not ok:
+            raise ValueError(f"{t.exe}: +{rva:#x} ({kind} {role}) holds {raw:#x}")
+
+    out = ["/* GENERATED by scripts/gen-gamedefs.py: do not edit. */\n",
+           '#include "../src/arctic.h"\n\n',
+           f"/* {t.name}, {t.meta['build']}: what decides visibility in the"
+           f" game's own\n * {int(w)}x{int(h)} coordinates"
+           f" (src/arctic_widescreen.c). */\n",
+           "static const arctic_ws_site_t k_site[] = {\n"]
+    for rva, kind, role, reg, disp, raw, hi, gdisp, gval in sorted(sites):
+        out.append(f"    {{ 0x{rva:06X}u, {kind}, AWS_{role}, {reg}, {disp:#04x},"
+                   f" 0x{raw:08X}u, 0x{hi:08X}u, {gdisp:#04x}, {gval} }},\n")
+    out.append("};\n\n")
+    out.append(f"const arctic_ws_table_t g_{t.id}_ws = {{\n"
+               f"    {int(w)}, {int(h)}, sizeof k_site / sizeof k_site[0], k_site\n}};\n")
+    NATIVE[t.id] = (int(w), int(h))
+    if t.id in HUD_SITES:
+        out.append(emit_win32_hud(t, img, base, text, rel))
+    return "".join(out)
+
+
+# What each title's widescreen pass derived the composed picture to be, filled
+# by emit_win32_widescreen as it runs. A title with no signatures of its own
+# can only inherit from a title already in here, which is why win32_main does
+# the titles that have them first.
+NATIVE = {}
+# The titles this run actually wrote a ws table for, which is what the
+# registry lists.
+MADE_WS = set()
+
+
+def emit_win32_native(t, peer):
+    """generated/<id>_widescreen.c for a title with no widescreen signatures.
+
+    The host opens its window before the game runs, so it needs the size of
+    the picture the game composes even when it will never widen it -- and
+    refusing the title outright over a feature it is not using would be the
+    wrong trade (src/arctic.c, THE WIN32 game_require()).
+
+    The size is not assumed here, it is inherited, and only from a title whose
+    gobj.dll holds THE SAME CODE: gobj.dll is what creates the Glide window
+    and opens it at the game's resolution (src/arctic.c b_CreateWindowExA), so
+    two titles whose gobj.dll .text is byte-identical compose the same
+    picture. The table has
+    no sites, which is what makes widescreen refuse for this title rather than
+    claim to work (src/arctic_widescreen.c, arctic_ws_arm)."""
+    w, h = NATIVE[peer]
+    return ("/* GENERATED by scripts/gen-gamedefs.py: do not edit. */\n"
+            '#include "../src/arctic.h"\n\n'
+            f"/* {t.name}, {t.meta['build']}: no widescreen signatures match this\n"
+            f" * build, so there are no sites and widescreen refuses. The"
+            f" {w}x{h}\n * picture is {peer}'s: the two titles' gobj.dll hold"
+            f" the same .text, and that\n * is the module that opens the Glide"
+            f" window (src/arctic_widescreen.c). */\n"
+            "static const arctic_ws_site_t k_site[1];\n\n"
+            f"const arctic_ws_table_t g_{t.id}_ws = {{\n"
+            f"    {w}, {h}, 0, k_site\n}};\n")
+
+
+def win32_gobj_text(t):
+    """gobj.dll's .text, as bytes: the code that creates the Glide window and
+    opens it at the game's resolution. Whole-file hashes are no use for this
+    -- two builds of the same code differ in the PE header's timestamp and
+    checksum and in the debug directory's timestamp, and in nothing else."""
+    path = os.path.join(os.path.dirname(t.exe), "gobj.dll")
+    img, _, ranges, _ = pe_image(open(path, "rb").read())
+    lo, hi = pe_range(ranges, ".text", path)
+    return img[lo:hi]
+
+
+def win32_native_peer(t):
+    """The derived title this one may take its picture size from: one with
+    widescreen signatures whose gobj.dll runs the same code as this title's."""
+    mine = win32_gobj_text(t)
+    for peer in NATIVE:
+        if win32_gobj_text(get(peer)) == mine:
+            return peer
+    return None
+
+
+def emit_win32_registry(tids):
+    """generated/win32_titles.c: the win32 titles the build links, each with
+    the tables derived for it. The same reason profiles.c is generated -- a
+    hand-written list can reference a table that failed to generate -- and one
+    more: A TABLE A TITLE HAS NO SIGNATURES FOR IS 0 HERE, which is what makes
+    the feature refuse instead of reading another title's RVAs.
+    `tids` is what this run generated, so a title that was refused is absent
+    rather than listed with stale tables. A ws table is listed when one was
+    WRITTEN (MADE_WS), not when the title has signatures: a title with none
+    still gets a sites-free table carrying the picture size."""
+    out = ["/* GENERATED by scripts/gen-gamedefs.py: do not edit. */\n",
+           '#include "../src/arctic.h"\n']
+    tables = (("ws", MADE_WS), ("hud", HUD_SITES), ("ffb", FFB_CELLS),
+              ("menu", MENU_SIGS))
+    for t in tids:
+        out.append(f"\nextern const arctic_ids_t g_{t}_ids;\n")
+        for field, have in tables:
+            if t in have:
+                ty = {"ws": "arctic_ws_table_t", "hud": "arctic_hud_table_t",
+                      "ffb": "arctic_ffb_cells_t",
+                      "menu": "arctic_menu_cells_t"}[field]
+                out.append(f"extern const {ty} g_{t}_{field};\n")
+        out.append(f"static const arctic_title_t k_{t} = {{\n"
+                   f"    &g_{t}_ids,\n")
+        for field, have in tables:
+            out.append(f"    {f'&g_{t}_{field}' if t in have else '0'},"
+                       f"{'' if t in have else '  /* no signatures */'}\n")
+        out.append("};\n")
+    out.append("\nconst arctic_title_t *const g_arctic_titles[] = {\n")
+    for t in tids:
+        out.append(f"    &k_{t},\n")
+    out.append("    0\n};\n")
+    return "".join(out)
+
+
+def win32_main(check):
+    """Verify every pinned file of every win32 title, then write (or --check)
+    generated/<title>_ids.c and the registry. Returns the names that failed."""
+    failed, ok = [], []
+    MADE_WS.clear()
+    NATIVE.clear()
+    # Signature-bearing titles first: a title with none inherits the size of
+    # the picture it composes from one of them (emit_win32_native).
+    order = sorted(win32_titles(), key=lambda tid: tid not in WS_SITES)
+    for tid in order:
+        t = get(tid)
+        print(f"\n=== {tid} ({t.name}, win32) ===")
+        d = os.path.dirname(t.exe)
+        bad = []
+        for name, sha in [(os.path.basename(t.exe), t.meta["sha256"])] + \
+                list(t.meta["modules"].items()):
+            got = hashlib.sha256(open(os.path.join(d, name), "rb").read()).hexdigest()
+            if got != sha:
+                bad.append(name)
+                print(f"  {name}: sha256 {got} is not the registered {sha}")
+        for path, sha in win32_diag_files(t):
+            got = hashlib.sha256(open(path, "rb").read()).hexdigest()
+            if got != sha:
+                bad.append(os.path.basename(path))
+                print(f"  {path}: sha256 {got} is not the registered {sha}")
+        if bad:
+            failed.append(tid)
+            print(f"  REFUSING to generate {tid}: not the registered build")
+            continue
+        outs = [(f"{tid}_ids.c", emit_win32_ids(t)),
+                (f"{tid}_diag.h", emit_win32_diag_h(t))]
+        if tid in WS_SITES:
+            outs.append((f"{tid}_widescreen.c", emit_win32_widescreen(t)))
+            MADE_WS.add(tid)
+        else:
+            peer = win32_native_peer(t)
+            if peer:
+                outs.append((f"{tid}_widescreen.c", emit_win32_native(t, peer)))
+                MADE_WS.add(tid)
+                print(f"  no widescreen signatures match; the {NATIVE[peer][0]}x"
+                      f"{NATIVE[peer][1]} picture is {peer}'s, whose gobj.dll"
+                      f" holds the same .text")
+            else:
+                print(f"  no widescreen signatures and no title shares its"
+                      f" gobj.dll: {tid} has no picture size and the host will"
+                      f" refuse it")
+        if tid in FFB_CELLS:
+            outs.append((f"{tid}_ffb.c", emit_win32_ffb(t)))
+        if tid in MENU_SIGS:
+            outs.append((f"{tid}_menu.c", emit_win32_menu(t)))
+        ok.append(tid)
+        for name, src in outs:
+            path = os.path.join(OUTDIR, name)
+            if check:
+                if not same_as_disk(path, src):
+                    failed.append(name)
+                continue
+            open(path, "w").write(src)
+            print(f"wrote generated/{name}")
+
+    # The registry last, and only when every win32 title generated: written
+    # from a short list it would drop a title the build still has tables for.
+    src = emit_win32_registry(ok)
+    path = os.path.join(OUTDIR, "win32_titles.c")
+    if check:
+        if not same_as_disk(path, src):
+            failed.append("win32_titles.c")
+    elif not failed:
+        open(path, "w").write(src)
+        print(f"wrote generated/win32_titles.c "
+              f"({len(ok)} title{'' if len(ok) == 1 else 's'})")
+    return failed
 
 
 def main():
@@ -2620,6 +4424,8 @@ def main():
             print("wrote generated/span.h")
         else:
             print("skipped span.h (regenerate with no --title to update it)")
+    if "--title" not in argv:
+        failed += win32_main(check)
     if failed:
         sys.exit(1)
 

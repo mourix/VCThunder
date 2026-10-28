@@ -675,8 +675,7 @@ static const char *item_text(const binding_item_t *item, char *out,
 static const char *action_name(unsigned action)
 {
     const action_desc_t *a = &k_actions[action];
-    const char *label = launcher_binding_title() ? a->offroad_label :
-                                                   a->hydro_label;
+    const char *label = a->label[launcher_binding_title()];
 
     return label ? label : a->key;
 }
@@ -913,16 +912,14 @@ static int report_duplicate_binding(int pad)
     unsigned i, j;
     for (i = 0; i < ACTION_COUNT; i++) {
         int have_i = pad ? k_actions[i].has_pad :
-            (launcher_binding_title() ? k_actions[i].offroad_key :
-                               k_actions[i].hydro_key) != NULL;
+            k_actions[i].key_default[launcher_binding_title()] != NULL;
         if (!action_visible(i) || !have_i)
             continue;
         for (j = i + 1; j < ACTION_COUNT; j++) {
             char one[64], rendered[224], why[256];
             const char *li, *lj, *what;
             int have_j = pad ? k_actions[j].has_pad :
-                (launcher_binding_title() ? k_actions[j].offroad_key :
-                                   k_actions[j].hydro_key) != NULL;
+                k_actions[j].key_default[launcher_binding_title()] != NULL;
 
             if (!action_visible(j) || !have_j)
                 continue;
@@ -933,10 +930,8 @@ static int report_duplicate_binding(int pad)
                           model_key_binding(launcher_binding_title(), j),
                     pad, one, sizeof one))
                 continue;
-            li = launcher_binding_title() ? k_actions[i].offroad_label
-                                 : k_actions[i].hydro_label;
-            lj = launcher_binding_title() ? k_actions[j].offroad_label
-                                 : k_actions[j].hydro_label;
+            li = k_actions[i].label[launcher_binding_title()];
+            lj = k_actions[j].label[launcher_binding_title()];
             /* THE RENDERED BINDING, not the raw value with "Button " glued in
              * front: a device-qualified value came out as "Button 9, th8:1",
              * which reads as one button with a comma in its name. */
@@ -1006,7 +1001,7 @@ static void handle_key_capture(WPARAM key, LPARAM detail)
                                                    NULL, 1);
         return;
     }
-    if (!(launcher_binding_title() ? a->offroad_key : a->hydro_key)) {
+    if (!a->key_default[launcher_binding_title()]) {
         /* Offroad's two shifter paddles have no keyboard half at all: they are
          * a controller gate and the three gears are the keyboard's answer. */
         MessageBeep(MB_ICONWARNING);
@@ -1063,7 +1058,7 @@ void restore_all_bindings(void)
     mark_dirty();
     snprintf(said, sizeof said, "Every %s button is back to its default. "
              "Press Apply to write it to vcthunder.ini.",
-             launcher_binding_title() ? "Offroad Thunder" : "Hydro Thunder");
+             model_title_name(launcher_binding_title()));
     /* A shared [digital] line can still put one input on two rows. */
     if (!report_duplicate_binding(0) && !report_duplicate_binding(1))
         set_status(said);

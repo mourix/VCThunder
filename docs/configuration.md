@@ -8,10 +8,10 @@ every shipped setting with its own help text. To get back to the shipped default
 
 ## 1. The file model
 
-One pack, one file, both cabinets:
+One pack, one file, every cabinet:
 
 ```
-[section]            both titles
+[section]            every title
 [<title>.section]    one title only; wins key by key
 [analog.<label>]     one CONTROLLER only; wins over both (§4.1.1)
 
@@ -19,7 +19,8 @@ built-in defaults  ->  [section]  ->  [<title>.section]  ->  command line
 ```
 
 So `[offroad.audio] output = cabinet` leaves Hydro alone; anything a title section does not name
-falls through to the plain one. There is no flat `[offroad]` section.
+falls through to the plain one. There is no flat `[offroad]` section. Ultimate Arctic Thunder runs
+in Arctic Thunder's cabinet, so it reads the `[arctic.*]` sections; it has none of its own.
 
 - **The log names where each value came from.** An illegal value is refused with a reason and
   the previous one stands. An unknown key is ignored; only the launcher names it.
@@ -38,9 +39,9 @@ falls through to the plain one. There is no flat `[offroad]` section.
 - **Restore default settings**, on *Help*, replaces `vcthunder.ini` with a clean copy
   of the shipped one, the file a fresh download starts with, keeping the old file as
   `vcthunder.ini.bak`. Deleting `vcthunder.ini` does the same on the next start.
-- **Per-title values are shown, not edited**, except control bindings and the controller each
-  game uses (§4.1.4). A key set in `[<title>.<section>]` says so on its row, as the shipped
-  `[hydro.ffb]` rumble trims do.
+- **Per-title values are shown, not edited**, except control bindings, the controller each
+  game uses (§4.1.4) and force feedback and rumble (§4.3). Anywhere else a key set in
+  `[<title>.<section>]` says so on its row.
 - ***Help* lists lines nothing reads** (unknown keys, duplicate sections) and never
   changes them.
 - **Set up... measures your axes**: move each control when asked. It listens on **every**
@@ -53,6 +54,16 @@ falls through to the plain one. There is no flat `[offroad]` section.
   stays listed while `[link] link` is not `off`).
 - **Show the log files**, on *Help*, opens Explorer on `vcthunder.log`, the file a problem report
   needs.
+- **Keyboard and controller.** Tab and Shift+Tab move between controls, Ctrl+Tab and
+  Ctrl+Shift+Tab (or Ctrl+PgDn/PgUp) change page, Space or Enter presses, and Escape closes the
+  launcher. The arrow keys work as the D-pad: Up and Down move to the next control, Left and
+  Right change a slider or a list and move between buttons, and Right goes from the page list
+  into the page. Alt+Down or F4 opens a list. On a controller
+  the D-pad moves; left and right change a slider or a list. On an Xbox pad, **A** presses, **B**
+  goes back to the page list or closes an open list, **LB**/**RB** change page, and **Start**
+  plays the game whose card is selected, or applies on any other page. On a wheel or any other
+  controller, buttons 1 and 2 are A and B. A controller does nothing while a binding is being
+  captured or *Set up...* is running, or while another window is in front.
 
 ### 1.2 The command line and the shipped file
 
@@ -204,6 +215,20 @@ anything is plugged in.
 
 `pov_digital = auto` lets a D-pad steer on a pad but not on a force-feedback wheel, where a
 bumped hat would jolt to full lock. `true` or `false` overrides it.
+
+**The select screens** (track, boat, truck, driver and initials) read the wheel's *position*,
+so a key or a stick that springs back used to drag the choice back to the middle.
+
+- With `menu_wheel = auto`, the arrow keys, the hat, the D-pad and a pad's stick move one item
+  a press there, and the item stays where you leave it. A held key steps on one item at a time.
+  **Previous item** and **Next item** (`menu_prev`/`menu_next`, LB/RB by default) do the same
+  from buttons. In Offroad, LB/RB are also the paddles; on a select screen they leave the gear
+  alone.
+- A wheel takes the screen back as soon as it is turned `menu_takeover_percent` (8%, about 11°
+  at 270°) from where it was when you pressed a key. While the keys have the screen, the wheel
+  gets no force.
+- `menu_wheel = off` is the old behaviour. `wheel` and `pad` say which kind of device you
+  have when `auto` guesses wrong: `auto` takes a device with force feedback for a wheel.
 
 **If an axis does not work, turn on `[diagnostics] input_trace`** (launcher *Controls*, advanced).
 The log then lists every axis and button the device reports, warns about a configured axis it
@@ -408,7 +433,11 @@ surface trim does not touch it.
 `rumble_events = false` filters the raw force instead, as Offroad's menus always do.
 
 **The titles need different numbers**, which is why the shipped ini sets `[hydro.ffb]` and
-`[offroad.ffb]` separately. Tune rumble in those sections, not in `[ffb]`.
+`[offroad.ffb]` separately. Tune rumble in those sections, not in `[ffb]`. The launcher's
+*Force Feedback* page does exactly that: the **Game** row at its top (the same row as on
+*Controls*) picks the game, every row shows what that game reads (`[<title>.ffb]`, then `[ffb]`,
+then the default), and a change is written to that game's `[<title>.ffb]` only. `[ffb]` is what a
+game with no line of its own falls through to; the launcher no longer edits it.
 
 ## 5. Audio
 
@@ -544,6 +573,8 @@ Most `dinput_`, `xinput_` and `winmm_` keys may also go in `[analog.<label>]` (�
 | `provider` | `auto` | `auto` \| `dinput` \| `xinput` \| `winmm` \| `none` (§4.1) |
 | `deadzone_percent` | `12` | 0..49 |
 | `pov_digital` | `auto` | `auto` \| `true` \| `false`: let a hat or D-pad steer (§4.1) |
+| `menu_wheel` | `auto` | `auto` \| `wheel` \| `pad` \| `off`: keys and pads on the select screens (§4.1) |
+| `menu_takeover_percent` | `8` | 2..50: how far a wheel turns before it takes a select screen back |
 | `xinput_device` / `winmm_device` | `0` | device number, from 0 |
 | `dinput_name` | empty | part of the device name or id (§4.1.1); empty = the first controller with force feedback, or none |
 | `dinput_deadzone_percent` | `0` | DirectInput's own deadzone |
@@ -597,7 +628,7 @@ A value is a comma list of up to four `[<label>:]<number>` (§4.1.2).
 | `view_low` | `3` | | `coin2` | `0` |
 | `view_pilot` | `4` | | `service1` / `service_mode` | `0` |
 | `shift1` / `shift2` / `shift3` | `0` | | `volume_down` / `volume_up` | `0` |
-| `shift_up` / `shift_down` | `0`; **Offroad `6` / `5`** | | | |
+| `shift_up` / `shift_down` | `0`; **Offroad `6` / `5`** | | `menu_prev` / `menu_next` | `5` / `6` |
 
 A binding written into the shared `[gamepad]` beats a per-title default, so setting `shift_up` there takes the paddles
 away from Offroad.

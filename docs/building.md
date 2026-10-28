@@ -174,8 +174,10 @@ imports it from your own MAME CHD itself, four ways:
 - the launcher: **Import...** on a game's card (which looks next to the exe first), or
   **Import from CHD...** on *Files & Logging* (listed once *Show advanced settings* is on);
 - dropping one or more `.chd` files onto `VCThunder.exe`, which opens the launcher and imports;
-- `VCThunder.exe import [--replace] [--data DIR] [FILE.chd...]` from a command line, which prints
-  what it does and exits non-zero on any refusal; with no file, the CHDs next to the exe.
+- `VCThunder.exe import [--replace] [--data DIR] [FILE.chd|FOLDER...]` from a command line,
+  which prints what it does and exits non-zero on any refusal; with no file, the CHDs next to
+  the exe. A FOLDER is Arctic Thunder's disk already extracted: its drive, or any folder down
+  to the game's own.
 
 The importer (`src/chd.c`, `src/fat.c`, `src/ingest.c`) reads a CHD version 5 directly and
 decodes only the hunks the game's files occupy: no chdman, no MAME, no unpacked disk image.
@@ -193,25 +195,43 @@ In order:
 4. The files go to `data/<title>.part/`, and **only once the executable written there verifies
    is it renamed into place**. A failure, a cancel or a full disk leaves nothing behind.
 
+**Arctic Thunder's disk is a Windows 2000 install on one NTFS volume**, read by `src/ntfs.c`.
+Nothing is merged: the plaintext install package's game folder becomes `data/arctic/` and its
+operator system's folder `data/arctic-diagnostics/`, and both are swapped in only once every
+file the host pins (the game's three images and the operator system's two) has verified.
+Everything the game writes goes to `save/arctic/`; the imported folders are never written.
+
+**Ultimate Arctic Thunder is imported from its update CD**, laid over Arctic Thunder: MAME's
+`040503_1309.chd` (set `ultarctcup`), or the disc's own `.cue` and `.bin`. The disc carries only
+what the 2004 update changed, so its package is copied over `data/arctic/` and
+`data/arctic-diagnostics/` into `data/uarctic/` and `data/uarctic-diagnostics/`, with the disc's
+`version` file, and verified as the other titles are. If Arctic Thunder is not imported yet, a CHD
+of it beside the disc or beside `VCThunder.exe` is imported first; otherwise the import says to
+import it. The cabinet's own disk, MAME's `uarctict`, cannot be imported (its game files are
+encrypted to that cabinet's drive), and the import says so.
+
 A title folder that already holds the supported build is left alone; one that holds something
 else is replaced only with `--replace`, or when the launcher's prompt is answered yes. A folder
 that cannot be written, such as one under Program Files, is refused with a sentence saying so.
 A CHD older than version 5, or one with a parent, is declined by name: MAME's `chdman copy`
 makes a whole version 5 CHD of either.
 
-Both games together are about 1.4 GB written, in a few seconds on a recent machine.
+Hydro and Offroad together are about 1.4 GB written, the two Arctic titles about 0.5 GB, each in
+a few seconds on a recent machine.
 
 ## The run directory
 
 `make pack` delivers into `run/vcthunder/` inside the clone, which `.gitignore` covers and
-`make clean` does not touch. **One pack holds both titles**, chosen by a command-line word:
+`make clean` does not touch. **One pack holds every title**, chosen by a command-line word:
 
 ```
 run/vcthunder/  VCThunder.exe  VCThunder.dll  vcglide.dll  SDL3.dll
                 vcthunder.ini
                 data/hydro/     HYDRO.EXE  HT.R2  *.CSH
                 data/offroad/   OFFROAD.EXE  GD3.R2  *.omf
-                save/           htlowres.bin  *.NVR
+                data/arctic/    snow.exe  goose.dll  gobj.dll
+                data/uarctic/   the same, with the 2004 update laid over it
+                save/           htlowres.bin  *.NVR  arctic/  uarctic/
 ```
 
 **The run directory is yours, not build output.** `make pack` overwrites the binaries and
@@ -232,19 +252,21 @@ A clone that has a `data/` of its own, from an older build, still works:
 **`make pack` copies that game data into the pack**: each title in the clone's `data/` that
 `run/vcthunder/data/` does not have yet, while the ini's `data_dir` is the default `data`. The
 pack then stands alone, and moving or deleting the clone does not break it. That costs the
-data's size a second time (1.4 GB for both titles); `make pack LINK_DATA=1` on the first pack
+data's size a second time (about 1.9 GB for all four); `make pack LINK_DATA=1` on the first pack
 points `data_dir` at the clone's `data/` instead. The data is your own lawful copy and never
 leaves your machine.
 
 ## Smoke test
 
 `--dry-run` maps, patches and unpacks without starting the game. Under WSL, interop runs the exe
-directly, so both titles can be checked without leaving the shell:
+directly, so every title can be checked without leaving the shell:
 
 ```sh
 cd run/vcthunder
 ./VCThunder.exe hydro   --dry-run
 ./VCThunder.exe offroad --dry-run
+./VCThunder.exe arctic  --dry-run
+./VCThunder.exe uarctic --dry-run
 ```
 
 This is the fastest regression test there is: it exercises the loader, the Win32 binding, the

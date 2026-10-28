@@ -9,6 +9,7 @@
 #include "vcthunder.h"
 #include "io.h"
 #include "ini.h"
+#include "arctic.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -447,7 +448,7 @@ static input_provider_t ini_provider(const char *path)
     if (ini_read_scoped(path, "analog", "provider", "auto", text,
                         sizeof text))
         LOGI("io: provider = %s, from [%s.analog]: this game has its own "
-             "controller", text, G->id);
+             "controller", text, ini_title());
     if (!_stricmp(text, "auto")) return PROVIDER_AUTO;
     if (!_stricmp(text, "xinput")) return PROVIDER_XINPUT;
     if (!_stricmp(text, "winmm") || !_stricmp(text, "joystick"))
@@ -479,6 +480,23 @@ static pov_digital_mode_t ini_pov_digital(const char *path)
     return POV_DIGITAL_AUTO;
 }
 
+static menu_wheel_mode_t ini_menu_wheel(const char *path)
+{
+    char text[32];
+
+    ini_read_scoped(path, "analog", "menu_wheel", "auto", text, sizeof text);
+    if (!_stricmp(text, "auto"))
+        return MENU_WHEEL_AUTO;
+    if (!_stricmp(text, "wheel"))
+        return MENU_WHEEL_WHEEL;
+    if (!_stricmp(text, "pad"))
+        return MENU_WHEEL_PAD;
+    if (!_stricmp(text, "off"))
+        return MENU_WHEEL_OFF;
+    LOGW("io: unknown [analog] menu_wheel=%s; using auto", text);
+    return MENU_WHEEL_AUTO;
+}
+
 /* THE ANSWER, as opposed to the setting. `auto` resolves against the device the
  * host actually opened, so it cannot be resolved in controls_load_ini(), which
  * runs a step BEFORE di_preload(). Resolved on each call rather than cached for
@@ -508,6 +526,32 @@ int io_config_pov_digital(void)
     return on;
 }
 
+/* The select screens' half of the same question. A device that publishes
+ * force feedback is taken for a wheel, which holds where it is left; anything
+ * else, an XInput pad included, springs back, so its stick steps like a key. */
+menu_wheel_mode_t io_config_menu_wheel(void)
+{
+    static int reported = -1;
+    menu_wheel_mode_t m;
+    int wheel;
+
+    if (s_cfg.menu_wheel != MENU_WHEEL_AUTO)
+        return s_cfg.menu_wheel;
+    wheel = di_publishes_ffb();
+    m = wheel ? MENU_WHEEL_WHEEL : MENU_WHEEL_PAD;
+    if (reported != (int)m) {
+        reported = (int)m;
+        LOGI("io: [analog] menu_wheel = auto resolves to %s: %s",
+             wheel ? "wheel" : "pad",
+             wheel ? "the open device publishes force-feedback effects, so it "
+                     "holds its position and turning it takes a select screen "
+                     "back"
+                   : "no force-feedback device is open, so a stick springs "
+                     "back and steps a select screen like a key");
+    }
+    return m;
+}
+
 /* Nonzero for Offroad's MagicBus (_mb_io_comm_) board. Read from the profile rather than
  * from s_board_mb, which is only set at install: the key defaults are needed
  * one step earlier, in diego_preload(). */
@@ -535,22 +579,42 @@ static void controls_defaults(void)
      * exactly the change that makes two spellings disagree.
      * controls_load_ini() reaches every row through bindings.def. */
     s_cfg.pov_digital = POV_DIGITAL_AUTO;
+    s_cfg.menu_wheel = MENU_WHEEL_AUTO;
+    s_cfg.menu_takeover_percent = 8;
+}
+
+/* Which column of bindings.def this run takes: 0 Hydro, 1 Offroad, 2 Arctic.
+ * The ETS titles are told apart by their board; a win32 title has no profile
+ * and is known by the title the ini is scoped to. Column 2 is the Arctic
+ * CABINET, not one title: every win32 title here is that cabinet, driven
+ * through the same goose.dll, so they share its controls. Asking the registry
+ * rather than naming ids keeps that true for the next one -- and a win32
+ * title on different hardware would need a column of its own, not this one. */
+static int binding_column(void)
+{
+    if (G)
+        return io_board_is_magicbus() ? 1 : 0;
+    return arctic_title_by_id(ini_title()) ? 2 : 0;
 }
 
 /* Default key NAME for an ini fallback, so a missing key logs and defaults to
- * the same thing the table above chose. Only the keys that differ per board
- * need this. */
-static const char *dflt(const char *hydro, const char *offroad)
+ * the same thing the table above chose. */
+static const char *dflt(const char *hydro, const char *offroad,
+                        const char *arctic)
 {
-    return io_board_is_magicbus() ? offroad : hydro;
+    int c = binding_column();
+
+    return c == 2 ? arctic : c == 1 ? offroad : hydro;
 }
 
 /* The same choice for the controller half. It is a separate function rather
- * than a macro over dflt() because the two columns are different types and a
+ * than a macro over dflt() because the columns are different types and a
  * cast between them would compile on either mistake. */
-static unsigned pad_dflt(unsigned hydro, unsigned offroad)
+static unsigned pad_dflt(unsigned hydro, unsigned offroad, unsigned arctic)
 {
-    return io_board_is_magicbus() ? offroad : hydro;
+    int c = binding_column();
+
+    return c == 2 ? arctic : c == 1 ? offroad : hydro;
 }
 
 static void controls_load_ini(const char *path)
@@ -564,14 +628,15 @@ static void controls_load_ini(const char *path)
     /* Every control, from src/bindings.def, in one pass. `key` names the ini
      * key in both sections and the two members that hold what it resolved to,
      * so a row cannot bind half of itself. */
-#define BINDING(key, hydro, offroad, pad_hydro, pad_offroad, button, hl, ol)  \
-    ini_key(path, #key, dflt(hydro, offroad), &s_cfg.key);                    \
-    ini_pad_bind(path, #key, pad_dflt(pad_hydro, pad_offroad),                \
+#define BINDING(key, hydro, offroad, arctic, pad_hydro, pad_offroad,       \
+                pad_arctic, button, hl, ol, al)                               \
+    ini_key(path, #key, dflt(hydro, offroad, arctic), &s_cfg.key);            \
+    ini_pad_bind(path, #key, pad_dflt(pad_hydro, pad_offroad, pad_arctic),    \
                  &s_cfg.pad_##key);
-#define BINDING_AXIS(key, hydro, offroad, hl, ol)                             \
-    ini_key(path, #key, dflt(hydro, offroad), &s_cfg.key);
-#define BINDING_PAD(key, pad_hydro, pad_offroad, hl, ol)                      \
-    ini_pad_bind(path, #key, pad_dflt(pad_hydro, pad_offroad),                \
+#define BINDING_AXIS(key, hydro, offroad, arctic, hl, ol, al)                 \
+    ini_key(path, #key, dflt(hydro, offroad, arctic), &s_cfg.key);
+#define BINDING_PAD(key, pad_hydro, pad_offroad, pad_arctic, hl, ol, al)      \
+    ini_pad_bind(path, #key, pad_dflt(pad_hydro, pad_offroad, pad_arctic),    \
                  &s_cfg.pad_##key);
 #include "bindings.def"
 #undef BINDING
@@ -627,11 +692,26 @@ static void controls_load_ini(const char *path)
     s_cfg.mm_brake_invert = ini_analog_bool(path, mm_label, "winmm_brake_invert", 0);
 
     s_cfg.pov_digital = ini_pov_digital(path);
+    s_cfg.menu_wheel = ini_menu_wheel(path);
+    s_cfg.menu_takeover_percent =
+        ini_unsigned(path, "analog", "menu_takeover_percent", 8);
+    if (s_cfg.menu_takeover_percent < 2)
+        s_cfg.menu_takeover_percent = 2;
+    if (s_cfg.menu_takeover_percent > 50)
+        s_cfg.menu_takeover_percent = 50;
     s_ffb_trace = ini_bool(path, "diagnostics", "ffb_trace", 0);
     s_ffb_events = ini_bool(path, "diagnostics", "ffb_events", 0);
     s_input_trace = ini_bool(path, "diagnostics", "input_trace", 0);
-    ini_read_scoped(path, "diagnostics", "ffb_record", "",
-                    s_ffb_record, sizeof s_ffb_record);
+    {
+        /* Absolute now: the file is opened on the first tick, and an Arctic
+         * title has changed directory into its read-only package by then. */
+        char rec[sizeof s_ffb_record];
+
+        ini_read_scoped(path, "diagnostics", "ffb_record", "", rec, sizeof rec);
+        s_ffb_record[0] = '\0';
+        if (rec[0])
+            ini_resolve_path(rec, s_ffb_record, sizeof s_ffb_record);
+    }
     {
         unsigned i;
         for (i = 0; i < 4; i++) {
@@ -724,10 +804,11 @@ void io_config_bind_devices(void)
 {
     unsigned slots = di_slot_count();
 
-#define BINDING(key, hydro, offroad, pad_hydro, pad_offroad, button, hl, ol)  \
+#define BINDING(key, hydro, offroad, arctic, pad_hydro, pad_offroad,       \
+                pad_arctic, button, hl, ol, al)                               \
     bind_one(#key, &s_cfg.pad_##key);
-#define BINDING_AXIS(key, hydro, offroad, hl, ol)     /* no controller half */
-#define BINDING_PAD(key, pad_hydro, pad_offroad, hl, ol)                      \
+#define BINDING_AXIS(key, hydro, offroad, arctic, hl, ol, al) /* no pad half */
+#define BINDING_PAD(key, pad_hydro, pad_offroad, pad_arctic, hl, ol, al)      \
     bind_one(#key, &s_cfg.pad_##key);
 #include "bindings.def"
 #undef BINDING
@@ -769,7 +850,9 @@ static void report_key_map(void)
     key_bind_name(&s_cfg.shift1,     n[6], sizeof n[6]);
     key_bind_name(&s_cfg.shift2,     n[7], sizeof n[7]);
     key_bind_name(&s_cfg.shift3,     n[8], sizeof n[8]);
-    if (io_board_is_magicbus())
+    if (binding_column() == 2)
+        LOGI("io: keys  throttle %s  Attack %s", n[0], n[2]);
+    else if (io_board_is_magicbus())
         LOGI("io: keys  gas %s  brake %s  NITRO %s  "
              "SLAM/CHASE/CHOPPER CAM %s/%s/%s  SHIFT 1/2/3 %s/%s/%s "
              "(none held = neutral)",
@@ -790,9 +873,10 @@ static void report_key_map(void)
          * a three-digit ordinal, the `(absent)` mark and the separators. */
         char b[11][112];
 
-        LOGI("io: buttons  start %s  boost/nitro %s  views %s/%s/%s  "
+        LOGI("io: buttons  start %s  %s %s  views %s/%s/%s  "
              "coin %s/%s  credit %s  test %s  volume %s/%s",
              pad_desc(&s_cfg.pad_start1, b[0], sizeof b[0]),
+             binding_column() == 2 ? "Attack" : "boost/nitro",
              pad_desc(&s_cfg.pad_boost, b[1], sizeof b[1]),
              pad_desc(&s_cfg.pad_view_high, b[2], sizeof b[2]),
              pad_desc(&s_cfg.pad_view_low, b[3], sizeof b[3]),

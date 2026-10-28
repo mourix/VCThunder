@@ -14,6 +14,8 @@
 #include "vcthunder.h"
 /* For INI_LABEL_CAP: a binding may name its device by its [devices] label. */
 #include "ini.h"
+/* For menu_input_t: the select screens' model is pure and has its own header. */
+#include "menu_model.h"
 
 /* Longest board frame: Diego 8, MagicBus 16. One size for both, so frame
  * length is the payload builder's property and never the caller's. */
@@ -42,6 +44,14 @@ typedef enum {
     POV_DIGITAL_ON,
     POV_DIGITAL_OFF
 } pov_digital_mode_t;
+
+/* The select screens: what the device steering them is, or off. */
+typedef enum {
+    MENU_WHEEL_AUTO = 0,
+    MENU_WHEEL_WHEEL,       /* holds its position; turning it takes over    */
+    MENU_WHEEL_PAD,         /* springs back; its stick steps like a key     */
+    MENU_WHEEL_OFF
+} menu_wheel_mode_t;
 
 typedef enum {
     PROVIDER_NONE = 0,
@@ -133,12 +143,19 @@ typedef struct {
     io_pad_bind_t pad_shift1, pad_shift2, pad_shift3;
     /* Offroad's gate as a pair of paddles. See sequential_shift(). */
     io_pad_bind_t pad_shift_up, pad_shift_down;
+    /* The select screens' previous and next item (menu_wheel.c). */
+    io_pad_bind_t pad_menu_prev, pad_menu_next;
     /* A wheel's hat is at thumb height and a full-lock override on it is a
      * crash; a pad's D-pad IS the steering. So it is a key, defaulting to
      * ASKING THE DEVICE. NEVER READ THIS FIELD; it is the setting, not the
      * answer; io_config_pov_digital() is, and it cannot resolve here because
      * no device is open when the file is read. */
     pov_digital_mode_t pov_digital;
+    /* [analog] menu_wheel and menu_takeover_percent. The same rule as
+     * pov_digital: never read menu_wheel, io_config_menu_wheel() is the
+     * answer. */
+    menu_wheel_mode_t menu_wheel;
+    unsigned menu_takeover_percent;
 } controls_config_t;
 
 /* Read the map. `ini` is the pack's file; per-title sections win, through
@@ -149,6 +166,10 @@ void io_config_load(const char *ini);
  * READER of cfg->pov_digital: `auto` is unanswerable until a device is open,
  * so call this at sample time, never at load time. */
 int io_config_pov_digital(void);
+
+/* What steers the select screens: MENU_WHEEL_WHEEL, _PAD or _OFF, never
+ * _AUTO. Called at sample time for the same reason as above. */
+menu_wheel_mode_t io_config_menu_wheel(void);
 
 /* A MAME key NAME as the ini spells it -> its virtual-key code; 0 for NONE and
  * for anything unparsable. The door to KEY_NAMES, so the launcher never grows
@@ -176,6 +197,10 @@ void io_config_drop_axis(input_provider_t provider, axis_role_t role);
 
 /* [diagnostics] input_trace, read once here for all three backends. */
 int  io_config_input_trace(void);
+
+/* menu_wheel.c: one line per change of the select screen the game has up,
+ * behind input_trace, with the steering byte the board is sending. */
+void menu_wheel_trace(unsigned steer_byte);
 
 int  io_config_ffb_trace(void);
 /* The [diagnostics] ffb_record path, or NULL when off. */
@@ -209,6 +234,16 @@ typedef struct {
     uint32_t buttons[IO_MAX_SLOTS][IO_BUTTON_WORDS];
     int left, right, up, down;            /* POV/D-pad digital overrides   */
 } host_state_t;
+
+/* menu_wheel.c: the steering byte with the select screen the game has up,
+ * if any, stepped by menu_model.c from the keys, the hat, the D-pad and a
+ * pad's stick; `byte` itself when none is up or [analog] menu_wheel = off.
+ * *mute says the keys own the screen and the wheel must get no force. The
+ * board writers call it, io_board.c and arctic_io.c. */
+unsigned menu_wheel_steer(const host_state_t *host, unsigned byte, int *mute);
+/* Whether the last menu_wheel_steer() had a select screen up and steering
+ * it: Offroad's paddles leave the gear alone there. */
+int menu_wheel_screen_up(void);
 
 /* One-based; out of range is DOWN=false, not an index off the end. An ordinal
  * comes from the user's ini, where 0 means "unbound". */
@@ -497,6 +532,8 @@ typedef struct {
 } ffb_event_state_t;
 
 int  ffb_events_take(ffb_event_state_t *out);
+/* Hand ffb_events_take() to a title's own source instead (NULL undoes it). */
+void ffb_events_set_source(int (*take)(ffb_event_state_t *out));
 /* The channels rumble.c's last step consumed and the motors it commanded,
  * and whether it took the events path. For [diagnostics] ffb_record. */
 int  rumble_record_state(ffb_event_state_t *ev, unsigned *lo, unsigned *hi);

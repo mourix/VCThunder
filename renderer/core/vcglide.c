@@ -277,6 +277,16 @@ void vgl_init(void)
     cfg_str("VCGLIDE_FRAMES", vgl_cfg.frames, sizeof vgl_cfg.frames, "");
     cfg_str("VCGLIDE_DISPLAY_DUMP", vgl_cfg.display_dump,
             sizeof vgl_cfg.display_dump, "");
+    /* Set by hand, not by the host, and written frames later: absolute now,
+     * before an Arctic title changes directory into its package. */
+    if (vgl_cfg.display_dump[0]) {
+        char full[sizeof vgl_cfg.display_dump];
+        DWORD got = GetFullPathNameA(vgl_cfg.display_dump, sizeof full, full,
+                                     NULL);
+
+        if (got && got < sizeof full)
+            memcpy(vgl_cfg.display_dump, full, got + 1);
+    }
     cfg_str("VCGLIDE_DISPLAY_FRAMES", vgl_cfg.display_frames,
             sizeof vgl_cfg.display_frames, "");
     cfg_str("VCGLIDE_TITLE", vgl_cfg.title, sizeof vgl_cfg.title, "unknown");

@@ -60,13 +60,99 @@ TITLES = {
         "glide":   2,
     },
 }
+# Arctic Thunder is "win32" and that is not a detail. Its disk is a Windows 2000
+# install and snow.exe imports KERNEL32/USER32/DSOUND/glide3x/goose.dll: the
+# host maps it as an ordinary image and binds its imports (src/pe_host.c,
+# src/arctic.c).
+# `modules` are the game's own DLLs the host maps beside the executable; each
+# is pinned exactly as the executable is.
+TITLES["arctic"] = {
+    "name":    "Arctic Thunder",
+    "kind":    "win32",
+    "exe":     "snow.exe",
+    "sha256":  "de69623f143a200eee50bb0fde3a7c9d106ff659b55cd02ab67e4e7890763b28",
+    "modules": {
+        "goose.dll": "bc35d6abfb798c9b826a4469d1f4336afcbebf42fc75ca7ac8dbb594826bd57d",
+        "gobj.dll":  "a0e9b48196ea732bd4dd4b4900904b4c497ec127cd86a6bb3162f9d99908d473",
+    },
+    "build":   "v1.002, 2000-12-18",
+    # Where the game folder is on MAME's disk: the PLAINTEXT install package,
+    # never "Midway games/", whose .wms art the cabinet's install encrypted
+    # under the drive's serial. The import copies it
+    # to data/<id>/ and the diagnostics folder beside it to
+    # data/<id>-diagnostics/.
+    "disk_dir": "Installation Directory/Arctic Thunder/Package/Arctic Thunder",
+    # The cabinet's operator system: diag.exe from the package's diagnostics
+    # folder (beside the game folder), and the game's own diagdll.dll it loads.
+    # diag.exe has no relocations, so it is placed at its own base inside
+    # VCThunder.exe's span (src/arctic_diag.c); its base, size and exit
+    # routine are generated, never typed.
+    "diag": {
+        "dir":  "../diagnostics",
+        "exe":  ("diag.exe",
+                 "8c21121d132eb7aa629a2e6ee410a7ae5d718367ba4cfc4c941f548098662112"),
+        "dll":  ("diagdll.dll",
+                 "5200a269a3cff791be0d8d154d8cfcc68d3bccb8c26b198ee9107c3ab7080642"),
+    },
+    "assets":  ["*.mif", "*.bnk", "*.sal"],
+    "io":      "goose",     # goose.dll
+    "glide":   3,
+}
+
+# Ultimate Arctic Thunder, the 2004 conversion: the same platform with a
+# different compiler's snow.exe, so every table derived from that executable
+# has to be derived again and none of 1.002's carries over.
+# Its plaintext install does not exist on one disc. The cabinet's own disk
+# (MAME's uarctict) has no package and its art is encrypted to that
+# cabinet's drive; the update CD (MAME's 040503_1309) carries the package,
+# but only what the update changed. So the import is the update laid over
+# 1.002's imported package, as the cabinet's own doUpdate.bat laid it:
+# `disk_dir` and the diagnostics folder are where the CD keeps them, and
+# `update` says what it is laid over and what else it copies.
+TITLES["uarctic"] = {
+    "name":    "Ultimate Arctic Thunder",
+    "kind":    "win32",
+    "exe":     "snow.exe",
+    "sha256":  "e2ba002abb585079553df678fe8183bd3324598bf4045ad06479c4eafa4dd894",
+    "modules": {
+        "goose.dll": "2f74e34bed6a3f9c9019d0639f7d7277e0252eb24bcf2456b3bac49b8a766337",
+        "gobj.dll":  "5a641fae941d2d8d39acc3d654123bfe54828d89faf06e66290040f45b966bb6",
+    },
+    "build":   "v1.9.5.0, 2004-05-03",
+    # It runs in the Arctic Thunder cabinet, so it takes that cabinet's
+    # configuration: every [arctic.*] section, not one of its own. Only the
+    # game's own files (data/, save/) are per title.
+    "settings": "arctic",
+    "disk_dir": "Installation Directory/Arctic Thunder/Package/Arctic Thunder",
+    # `base`: the title whose imported folders the CD is laid over. `file`:
+    # doUpdate.bat's second copy, the disc's own version file into the game
+    # folder (on the disc, then in the game folder).
+    "update": {
+        "base": "arctic",
+        "file": ("Installation Directory/Arctic Thunder/version", "version"),
+    },
+    "diag": {
+        "dir":  "../diagnostics",
+        "exe":  ("diag.exe",
+                 "52d23c74e834c4dd7a59f8544726acdfe09309ce71d25d2fa44773420ae8e3a7"),
+        "dll":  ("diagdll.dll",
+                 "4bd9737eb4eb2b24b49ddfcfb2e7c4715bb751158ff960b5ec32151e3ea8caf3"),
+    },
+    "assets":  ["*.mif", "*.bnk", "*.sal"],
+    "io":      "goose",     # goose.dll
+    "glide":   3,
+}
+
+
+def win32_titles():
+    return [t for t in TITLES if TITLES[t]["kind"] == "win32"]
 
 # --- the disks MAME lists ---------------------------------------------------
 #
-# Every Hydro and Offroad hard disk in MAME's driver, so the importer can say
-# which set a CHD is and point at the one that runs. A LABEL, NEVER THE GATE:
-# a disk that has been booted once (NVRAM, high scores) has another SHA-1 and
-# can still hold the registered executable, so the build is decided by
+# Every Hydro, Offroad and Arctic hard disk in MAME's driver, so the importer
+# can say which set a CHD is and point at the one that runs. A LABEL, NEVER THE
+# GATE: a disk that has been booted once (NVRAM, high scores) has another SHA-1
+# and can still hold the registered executable, so the build is decided by
 # hashing the executable exactly as before.
 #
 #   set, chd, name  MAME's set name, CHD file name and description, from
@@ -76,8 +162,13 @@ TITLES = {
 #   rawsha1         the header's SHA-1 of the data alone: the same disk
 #                   re-made with other metadata (MAME notes the geometry of
 #                   two of these as wrong) still matches on this
-#   exe_sha256      the executable on it, measured here; equal to the
-#                   title's sha256 above is what makes a set the one to use
+#   exe_sha256      the executable the import reads from it, measured here;
+#                   equal to the title's sha256 above is what makes a set the
+#                   one to use. None for a disk the import cannot use at
+#                   all, which is named so the refusal can say why.
+#
+# A CD is listed too: Ultimate Arctic Thunder's update disc, which MAME keeps
+# as a CD CHD beside the cabinet's disk in its ultarctcup set.
 MAME_DISKS = [
     {"set": "hydrthnd101b", "chd": "hydro_101b", "title": "hydro",
      "name": "Hydro Thunder (v1.01b)",
@@ -99,6 +190,28 @@ MAME_DISKS = [
      "sha1": "d88f1c5b75361a1e310565a8a5a09c674a4a1a22",
      "rawsha1": "5a35b98fffa96dc3c21da2c136a5909a2f3d9341",
      "exe_sha256": "fa739d0f1a80c6e429ca73fdee04c3d6d6325bb95848cb701114f74bf2a5e9bf"},
+    # A bare NTFS volume; exe_sha256 is snow.exe's in the install package.
+    {"set": "arctthnd", "chd": "arctthnd", "title": "arctic",
+     "name": "Arctic Thunder (v1.002)",
+     "sha1": "f4373e57c3f453ac09c735b5d8d99ff811416a23",
+     "rawsha1": "655bb9d6315d58d6115bc92f8831bd153754b7fc",
+     "exe_sha256": "de69623f143a200eee50bb0fde3a7c9d106ff659b55cd02ab67e4e7890763b28"},
+    # The cabinet's own disk: no install package, and every installed file's
+    # art encrypted to that cabinet's drive, so nothing on it is imported.
+    {"set": "ultarctc", "chd": "uarctict", "title": "uarctic",
+     "name": "Ultimate Arctic Thunder",
+     "sha1": "8557a1d7ae8dc41c879350cb1c228f4c27a0dd09",
+     "rawsha1": "92aecfc8949e080b5ff9719cad8961e531282be7",
+     "exe_sha256": None},
+    # The update CD; exe_sha256 is snow.exe in its package. rawsha1 is of a
+    # CD CHD made from the very image MAME's driver names (the same .bin
+    # SHA-1); MAME's own CHD carries other metadata, so its sha1 is the
+    # driver's and only the data's is measured.
+    {"set": "ultarctcup", "chd": "040503_1309", "title": "uarctic",
+     "name": "Ultimate Arctic Thunder Update CD ver 1.950 (5/3/04)",
+     "sha1": "453adb81e204b0580ad02c2d98f68525757ec2a1",
+     "rawsha1": "7225e63d7e7cadb3d39bb14dfcbfe7a9f69ac381",
+     "exe_sha256": "e2ba002abb585079553df678fe8183bd3324598bf4045ad06479c4eafa4dd894"},
 ]
 
 

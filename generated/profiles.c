@@ -11,17 +11,26 @@ const game_profile_t *const g_profiles[] = {
 };
 
 const game_mame_disk_t g_mame_disks[] = {
-    { "hydrthnd101b", "hydro_101b", "Hydro Thunder (v1.01b)", &g_profile_hydro,
+    { "hydrthnd101b", "hydro_101b", "Hydro Thunder (v1.01b)", "hydro",
       "182a7966c40676031c92dbfbd1b8e594a505a930", "1dea185530d361f38b4bacd43845dcc54bc1c8ca",
       "a421f5fd4ee0d90f57815975d4a47bb784f2b46d48085e42b422605a029f8e3f" },
-    { "hydrthnd", "hydro", "Hydro Thunder", &g_profile_hydro,
+    { "hydrthnd", "hydro", "Hydro Thunder", "hydro",
       "d481d178782943c066b41764628a419cd55f676d", "3e9956dd4a62f540ea2900f857611ff9f035b76a",
       "a421f5fd4ee0d90f57815975d4a47bb784f2b46d48085e42b422605a029f8e3f" },
-    { "hydrthnd100d", "hydro_100d", "Hydro Thunder (v1.00d)", &g_profile_hydro,
+    { "hydrthnd100d", "hydro_100d", "Hydro Thunder (v1.00d)", "hydro",
       "5462f7197b3c510b791093e938a614e706aaed4a", "98656c94e9f2765fb92eacc8d0f86d5ceca37b5a",
       "323eb5d23541c233285d8c071c2c32c13aad34c03c53a7c016f839bcdc67da6e" },
-    { "offrthnd", "offrthnd", "Offroad Thunder", &g_profile_offroad,
+    { "offrthnd", "offrthnd", "Offroad Thunder", "offroad",
       "d88f1c5b75361a1e310565a8a5a09c674a4a1a22", "5a35b98fffa96dc3c21da2c136a5909a2f3d9341",
       "fa739d0f1a80c6e429ca73fdee04c3d6d6325bb95848cb701114f74bf2a5e9bf" },
+    { "arctthnd", "arctthnd", "Arctic Thunder (v1.002)", "arctic",
+      "f4373e57c3f453ac09c735b5d8d99ff811416a23", "655bb9d6315d58d6115bc92f8831bd153754b7fc",
+      "de69623f143a200eee50bb0fde3a7c9d106ff659b55cd02ab67e4e7890763b28" },
+    { "ultarctc", "uarctict", "Ultimate Arctic Thunder", "uarctic",
+      "8557a1d7ae8dc41c879350cb1c228f4c27a0dd09", "92aecfc8949e080b5ff9719cad8961e531282be7",
+      "" },
+    { "ultarctcup", "040503_1309", "Ultimate Arctic Thunder Update CD ver 1.950 (5/3/04)", "uarctic",
+      "453adb81e204b0580ad02c2d98f68525757ec2a1", "7225e63d7e7cadb3d39bb14dfcbfe7a9f69ac381",
+      "e2ba002abb585079553df678fe8183bd3324598bf4045ad06479c4eafa4dd894" },
     { 0 }
 };

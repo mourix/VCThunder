@@ -54,6 +54,13 @@
 #define GR_TEXTABLE_NCC1      0x1
 #define GR_TEXTABLE_PALETTE   0x2
 #define GR_NCCTABLE_BYTES     (12 * 4)
+/* A GuNccTable's twelve PACKED words (the nccTable register image: Voodoo2
+ * Graphics Specification 1.16 §5.92, Voodoo3 Specification 1.0 §8.72) follow
+ * 64 bytes of unpacked fields. Measured: all three tables Arctic Thunder sends
+ * hold zeros in the first 64 bytes and the register image after them. The
+ * packed words are what
+ * the hardware decodes, so they are what this provider reads. */
+#define GR_NCC_PACKED_OFF     64
 #define GR_PALETTE_BYTES      (256 * 4)
 
 /* The fog table is one byte per entry over the 64 W ranges the hardware

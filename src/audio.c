@@ -191,6 +191,28 @@ void audio_route_buses(float front, float seat, float *left, float *right)
     }
 }
 
+void audio_route_config(const char *routing, unsigned balance,
+                        unsigned volume_percent)
+{
+    if (routing && _stricmp(routing, "cabinet") == 0)
+        s_route = ROUTE_CABINET;
+    else
+        s_route = ROUTE_MIX;
+    balance_set(balance);
+    s_user_gain = (float)volume_percent / 100.0f;
+    if (s_user_gain > 4.0f) s_user_gain = 4.0f;
+}
+
+void audio_route_gains(int *cabinet, float *front, float *seat, float *mix,
+                       float *user)
+{
+    *cabinet = s_route == ROUTE_CABINET;
+    *front = s_bal_front;
+    *seat = s_bal_seat;
+    *mix = s_mix_gain;
+    *user = s_user_gain;
+}
+
 static const char *route_description(void)
 {
     static char text[96];
@@ -1331,17 +1353,9 @@ int audio_preload(unsigned dcs_us, unsigned volume_percent, const char *routing,
                          AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
                          AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
 
-    if (routing && _stricmp(routing, "cabinet") == 0)
-        s_route = ROUTE_CABINET;
-    else
-        s_route = ROUTE_MIX;
-    balance_set(balance);
-
+    audio_route_config(routing, balance, volume_percent);
     if (dcs_us)
         s_dcs_period_us = dcs_us;
-    s_user_gain = (float)volume_percent / 100.0f;
-    if (s_user_gain < 0.0f) s_user_gain = 0.0f;
-    if (s_user_gain > 4.0f) s_user_gain = 4.0f;
 
     pan_table_init();
     InitializeCriticalSection(&s_voice_cs);

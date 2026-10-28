@@ -37,6 +37,18 @@ void *glide_provider_proc(const char *decorated);
  * frame drew into them. A no-op on a provider without vglBlackMargins. */
 void glide_black_margins(void);
 
+/* ---- the geometry, for a title that opens its own surface (Arctic) ------ */
+
+/* The nearest integer 16:9 width for a raster height. */
+int  glide_widescreen_width(int height);
+/* The smallest legal surface enum containing a raster, else `requested`, and
+ * that enum's size. */
+int  glide_surface_for_raster(int requested, int raster_w, int raster_h,
+                              int *surface_w, int *surface_h);
+/* Hand the provider the visible raster and the native field centred in it,
+ * before the surface is opened. */
+void glide_publish_field(int raster_w, int raster_h, int native_w);
+
 /* ---- what the binding needs from widescreen.c --------------------------- */
 
 /* Decide whether the mode allows Hor+ at all and install the title-scoped

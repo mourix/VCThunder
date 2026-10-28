@@ -78,8 +78,10 @@ typedef enum {
     THEME_BUTTON_PLAIN = 0,
     THEME_BUTTON_TAB,           /* one of a row, and not the one you are on */
     THEME_BUTTON_TAB_LIT,       /* ...and the one you are                   */
-    THEME_BUTTON_HYDRO,         /* the two Play buttons, in the cabinets'   */
-    THEME_BUTTON_OFFROAD,       /* own colours                              */
+    THEME_BUTTON_HYDRO,         /* the Play buttons, in the games' own      */
+    THEME_BUTTON_OFFROAD,       /* colours                                  */
+    THEME_BUTTON_ARCTIC,
+    THEME_BUTTON_UARCTIC,
     THEME_BUTTON_LIT,           /* a binding slot held, or being captured   */
     THEME_BUTTON_EMPTY          /* a binding slot with nothing in it        */
 } theme_button_t;
@@ -99,5 +101,30 @@ typedef enum {
 } theme_tone_t;
 
 theme_tone_t launcher_control_tone(int id);
+
+/* ---- the Graphics page's summary card ------------------------------------ */
+
+#define THEME_READOUT_COLUMNS 5
+
+/* One fact in a column: a size, aligned on its multiplication sign, then
+ * `text`; or `text` alone where there is no size. */
+typedef struct {
+    int w, h;
+    char text[48];
+    int warn;                   /* amber: a choice that did not hold        */
+} theme_cell_t;
+
+/* One game's line: its stripe, its name and a cell per column. */
+typedef struct {
+    theme_button_t game;        /* THEME_BUTTON_HYDRO, _OFFROAD, _ARCTIC     */
+    const char *name;
+    theme_cell_t cell[THEME_READOUT_COLUMNS];
+} theme_readout_t;
+
+/* A heading line over `count` game lines, `columns` of them aligned. Columns
+ * that do not fit are left off from the right, down to one: half a size
+ * reads as a different number. */
+void draw_readout(HDC dc, const RECT *rc, const char *const *head,
+                  int columns, const theme_readout_t *line, int count);
 
 #endif /* VCT_LAUNCHER_THEME_H */

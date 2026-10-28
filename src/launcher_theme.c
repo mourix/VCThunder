@@ -10,6 +10,7 @@
 
 #include <commctrl.h>
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 static HINSTANCE s_instance;
@@ -128,6 +129,18 @@ void theme_control(HWND h)
     }
 }
 
+/* A game's own colour: its Play button's face, and its stripe on a readout. */
+static COLORREF game_face(theme_button_t kind)
+{
+    switch (kind) {
+    case THEME_BUTTON_HYDRO:   return RGB(0, 134, 165);
+    case THEME_BUTTON_OFFROAD: return RGB(189, 12, 16);
+    case THEME_BUTTON_ARCTIC:  return RGB(214, 51, 132);
+    case THEME_BUTTON_UARCTIC: return RGB(96, 64, 176);
+    default:                   return s_control_color;
+    }
+}
+
 int draw_dark_button(const DRAWITEMSTRUCT *draw)
 {
     RECT rc;
@@ -156,7 +169,7 @@ int draw_dark_button(const DRAWITEMSTRUCT *draw)
     } else if (!(draw->itemState & ODS_DISABLED) &&
         kind == THEME_BUTTON_HYDRO) {
         face = draw->itemState & ODS_SELECTED ? RGB(0, 107, 132) :
-                                                RGB(0, 134, 165);
+                                                game_face(kind);
     } else if (kind == THEME_BUTTON_EMPTY) {
         /* AN OUTLINE, NOT A FACE: a filled box reads as a button that does
          * something, and an empty slot is a place to put something. */
@@ -169,7 +182,15 @@ int draw_dark_button(const DRAWITEMSTRUCT *draw)
     } else if (!(draw->itemState & ODS_DISABLED) &&
                kind == THEME_BUTTON_OFFROAD) {
         face = draw->itemState & ODS_SELECTED ? RGB(151, 10, 13) :
-                                                RGB(189, 12, 16);
+                                                game_face(kind);
+    } else if (!(draw->itemState & ODS_DISABLED) &&
+               kind == THEME_BUTTON_ARCTIC) {
+        face = draw->itemState & ODS_SELECTED ? RGB(171, 41, 106) :
+                                                game_face(kind);
+    } else if (!(draw->itemState & ODS_DISABLED) &&
+               kind == THEME_BUTTON_UARCTIC) {
+        face = draw->itemState & ODS_SELECTED ? RGB(77, 51, 141) :
+                                                game_face(kind);
     } else {
         face = draw->itemState & ODS_DISABLED ? RGB(38, 38, 40) :
                draw->itemState & ODS_SELECTED ? RGB(58, 58, 62) :
@@ -231,6 +252,125 @@ int draw_dark_button(const DRAWITEMSTRUCT *draw)
     if (old_font)
         SelectObject(draw->hDC, old_font);
     return 1;
+}
+
+static int text_width(HDC dc, const char *text)
+{
+    SIZE size;
+
+    return text && GetTextExtentPoint32A(dc, text, (int)strlen(text), &size)
+           ? size.cx : 0;
+}
+
+/* RAISED ONE SHADE OFF THE PAGE, in the outline every box has. Under High
+ * Contrast the system's colours and no stripes: the name says which game it
+ * is. */
+void draw_readout(HDC dc, const RECT *rc, const char *const *head,
+                  int columns, const theme_readout_t *line, int count)
+{
+    COLORREF text = s_dark_mode ? s_text_color : GetSysColor(COLOR_WINDOWTEXT);
+    COLORREF dim = s_dark_mode ? RGB(176, 176, 180) : text;
+    COLORREF amber = s_dark_mode ? RGB(240, 185, 70) : text;
+    HBRUSH frame = s_dark_mode ? s_border_brush :
+                                 GetSysColorBrush(COLOR_WINDOWTEXT);
+    HGDIOBJ old_font = SelectObject(dc, s_font);
+    UINT flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
+    int pad = scale_px(4), gap = scale_px(24), after = scale_px(8);
+    int right = rc->right - scale_px(8), name_x = rc->left + scale_px(14);
+    int w_w[THEME_READOUT_COLUMNS] = { 0 }, h_w[THEME_READOUT_COLUMNS] = { 0 };
+    int size_w[THEME_READOUT_COLUMNS] = { 0 };
+    int x[THEME_READOUT_COLUMNS + 1];
+    int pitch, name_w = 0, times_w, shown, c, i;
+    SIZE times;
+    char number[16];
+    RECT r;
+
+    FillRect(dc, rc, s_dark_mode ? s_control_brush :
+                                   GetSysColorBrush(COLOR_WINDOW));
+    FrameRect(dc, rc, frame);
+    if (count <= 0 || columns <= 0)
+        goto done;
+    pitch = (rc->bottom - rc->top - 2 * pad) / (count + 1);
+    GetTextExtentPoint32W(dc, L" \x00d7 ", 3, &times);
+    times_w = times.cx;
+    for (i = 0; i < count; i++) {
+        name_w = max(name_w, text_width(dc, line[i].name));
+        for (c = 0; c < columns; c++) {
+            if (!line[i].cell[c].w)
+                continue;
+            snprintf(number, sizeof number, "%d", line[i].cell[c].w);
+            w_w[c] = max(w_w[c], text_width(dc, number));
+            snprintf(number, sizeof number, "%d", line[i].cell[c].h);
+            h_w[c] = max(h_w[c], text_width(dc, number));
+        }
+    }
+    /* A column is as wide as its heading or its widest cell: the aligned
+     * size, and the text after it. */
+    x[0] = name_x + name_w + gap;
+    for (c = 0; c < columns; c++) {
+        int w = text_width(dc, head[c]);
+
+        if (w_w[c])
+            size_w[c] = w_w[c] + times_w + h_w[c];
+        for (i = 0; i < count; i++) {
+            const theme_cell_t *cell = &line[i].cell[c];
+            int t = text_width(dc, cell->text);
+
+            w = max(w, cell->w ? size_w[c] + (t ? after + t : 0) : t);
+        }
+        x[c + 1] = x[c] + w + gap;
+    }
+    for (shown = columns; shown > 1 && x[shown] - gap > right;
+         shown--)
+        ;
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, dim);
+    for (c = 0; c < shown; c++) {
+        SetRect(&r, x[c], rc->top + pad, right, rc->top + pad + pitch);
+        DrawTextA(dc, head[c], -1, &r, flags | DT_END_ELLIPSIS);
+    }
+    for (i = 0; i < count; i++) {
+        int top = rc->top + pad + (i + 1) * pitch;
+
+        if (s_dark_mode) {
+            HBRUSH stripe = CreateSolidBrush(game_face(line[i].game));
+
+            SetRect(&r, rc->left + scale_px(4), top + scale_px(2),
+                    rc->left + scale_px(8), top + pitch - scale_px(2));
+            FillRect(dc, &r, stripe);
+            DeleteObject(stripe);
+        }
+        SetRect(&r, name_x, top, x[0] - gap, top + pitch);
+        SetTextColor(dc, text);
+        DrawTextA(dc, line[i].name, -1, &r, flags | DT_END_ELLIPSIS);
+        for (c = 0; c < shown; c++) {
+            const theme_cell_t *cell = &line[i].cell[c];
+            int at = x[c], end = c == shown - 1 ? right : x[c + 1] - gap;
+
+            if (cell->w) {
+                snprintf(number, sizeof number, "%d", cell->w);
+                SetRect(&r, at, top, at + w_w[c], top + pitch);
+                SetTextColor(dc, text);
+                DrawTextA(dc, number, -1, &r, flags | DT_RIGHT);
+                SetRect(&r, at + w_w[c], top, at + w_w[c] + times_w,
+                        top + pitch);
+                SetTextColor(dc, dim);
+                DrawTextW(dc, L" \x00d7 ", 3, &r, flags);
+                snprintf(number, sizeof number, "%d", cell->h);
+                SetRect(&r, at + w_w[c] + times_w, top, end, top + pitch);
+                SetTextColor(dc, text);
+                DrawTextA(dc, number, -1, &r, flags);
+                at += size_w[c] + after;
+            }
+            if (!cell->text[0] || at >= end)
+                continue;
+            SetRect(&r, at, top, end, top + pitch);
+            SetTextColor(dc, cell->warn ? amber : cell->w ? dim : text);
+            DrawTextA(dc, cell->text, -1, &r, flags | DT_END_ELLIPSIS);
+        }
+    }
+done:
+    SelectObject(dc, old_font);
 }
 
 LRESULT control_colour(int on_page, UINT message, WPARAM wparam,
