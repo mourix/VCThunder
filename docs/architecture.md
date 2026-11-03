@@ -112,7 +112,7 @@ calls `ExitProcess`.
 | `src/game.h`, `src/game.c` | The multi-title contract: the profile type, the active profile `G`, title selection. Read the header comment before touching any installer. |
 | `generated/` | **Generated from the registered dumps and committed; never edited.** Building needs no game data; `make check` compares it byte for byte with what a present dump produces. Image layout, named anchors, the Glide/`__imp__`/Win32/hardware tables, and the span. Produced by `scripts/gen-gamedefs.py`. |
 | `src/stub.c` | `VCThunder.exe`. Reserves the span via its own `SizeOfImage`, verifies the loader honoured it, hands off to the DLL. |
-| `src/launcher.c` | The native no-argument launcher: settings, per-title bindings, live device testing. Its settings model is `launcher_model.c` (no window in it, so a test reaches it), Add/Detect/Set up are `launcher_capture.c`, and the palette and fonts are `launcher_theme.c`. |
+| `src/launcher.c` | The native no-argument launcher: settings, per-title bindings, live device testing. Its settings model is `launcher_model.c` (no window in it, so a test reaches it), Add/Detect/Set up are `launcher_capture.c`, the palette and fonts are `launcher_theme.c`, and the Controls page and the CHD import are `launcher_controls.c` and `launcher_import.c`, which reach the window through `launcher_page.h`. |
 | `src/loader.c` | Maps the span, copies CODE, calls `__pl_unpackrom`, enters the game. |
 | `src/patch.c` | The patch primitives: slot, jmp, single call site, cdecl→stdcall thunk, prologue-relocating hook. |
 | `src/win32_bind.c` | Replaces the ETS kernel. Unresolved entries fall back to ETS's own code, logged. |

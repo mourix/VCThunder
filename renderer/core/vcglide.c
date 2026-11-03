@@ -339,6 +339,14 @@ void vgl_init(void)
                        "using bilinear");
         snprintf(vgl_cfg.texmag, sizeof vgl_cfg.texmag, "bilinear");
     }
+    cfg_str("VCGLIDE_VSYNC", vgl_cfg.vsync, sizeof vgl_cfg.vsync, "auto");
+    if (_stricmp(vgl_cfg.vsync, "off") == 0)
+        snprintf(vgl_cfg.vsync, sizeof vgl_cfg.vsync, "off");
+    else {
+        if (_stricmp(vgl_cfg.vsync, "auto") != 0)
+            vgl_log(0, "config: VCGLIDE_VSYNC value is invalid; using auto");
+        snprintf(vgl_cfg.vsync, sizeof vgl_cfg.vsync, "auto");
+    }
     vgl_cfg.capture_frames = cfg_num("VCGLIDE_CAPTURE_FRAMES", 0);
     vgl_cfg.verbose        = (int)cfg_num("VCGLIDE_VERBOSE", 0);
     vgl_cfg.present        = (int)cfg_num("VCGLIDE_PRESENT", 1);

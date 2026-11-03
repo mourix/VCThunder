@@ -70,12 +70,16 @@ static const game_profile_t k_hydro   = { .id = "hydro" };
 static const game_profile_t k_offroad = { .id = "offroad" };
 const game_profile_t *const g_profiles[] = { &k_hydro, &k_offroad, NULL };
 const game_profile_t *g_game;
-/* A win32 title has no profile; its sections are named by its identity. One
- * entry is enough here: what is under test is that the registry is consulted
- * at all, not how many titles it holds. */
-static const arctic_ids_t   k_arctic_ids = { .id = "arctic" };
-static const arctic_title_t k_arctic     = { .ids = &k_arctic_ids };
-const arctic_title_t *const g_arctic_titles[] = { &k_arctic, NULL };
+/* A win32 title has no profile; its sections are named by its identity.
+ * Ultimate is the title that reads another's sections. */
+static const arctic_ids_t   k_arctic_ids  = { .id = "arctic",
+                                              .settings = "arctic" };
+static const arctic_title_t k_arctic      = { .ids = &k_arctic_ids };
+static const arctic_ids_t   k_uarctic_ids = { .id = "uarctic",
+                                              .settings = "arctic" };
+static const arctic_title_t k_uarctic     = { .ids = &k_uarctic_ids };
+const arctic_title_t *const g_arctic_titles[] = { &k_arctic, &k_uarctic,
+                                                  NULL };
 
 static int failures;
 
@@ -386,6 +390,82 @@ static void test_per_title_sections(void)
 }
 
 
+/* ULTIMATE ARCTIC THUNDER READS [arctic.*], AND ITS OWN SECTIONS CARRY ONLY
+ * ITS BEZEL ART: the same cabinet, a different screen. Anything else there
+ * would be a setting the launcher cannot show, so it is refused and said. */
+static void ultimate(shim_config_t *c)
+{
+    config_defaults(c);
+    config_load_shared(c, s_path);
+    config_load_title(c, s_path, "arctic");
+    config_load_own(c, s_path, "uarctic", "arctic");
+    config_report_notes();
+}
+
+static void test_own_sections(void)
+{
+    shim_config_t c;
+
+    write_ini("[graphics]\nbezel = bezels/shared.png\n"
+              "[arctic.graphics]\nbezel = bezels/arctic.png\n");
+    log_count = 0;
+    ultimate(&c);
+    check(!strcmp(c.bezel, "bezels/arctic.png"),
+          "with no line of its own, Ultimate's bezel is Arctic's");
+    check(log_count == 0, "and nothing is said about it");
+
+    write_ini("[arctic.graphics]\nbezel = bezels/arctic.png\n"
+              "[uarctic.graphics]\nbezel = bezels/uarctic.png\n");
+    log_count = 0;
+    config_defaults(&c);
+    config_load_shared(&c, s_path);
+    config_load_title(&c, s_path, "arctic");
+    config_report_notes();
+    check(!strcmp(c.bezel, "bezels/arctic.png"),
+          "Arctic's run never reads Ultimate's line");
+    ultimate(&c);
+    check(!strcmp(c.bezel, "bezels/uarctic.png"),
+          "Ultimate's own line beats Arctic's");
+    check(log_count == 0, "and is not a note");
+
+    write_ini("[arctic.graphics]\nbezel = bezels/arctic.png\n"
+              "[uarctic.graphics]\nbezel = off\n");
+    ultimate(&c);
+    check(!_stricmp(c.bezel, "off"), "Ultimate can have none while Arctic has art");
+
+    write_ini("[arctic.graphics]\nrender_scale = 2\n"
+              "[uarctic.graphics]\nrender_scale = 4\nbezel = bezels/u.png\n");
+    log_count = 0;
+    ultimate(&c);
+    check(c.render_scale == 2, "any other key in Ultimate's section is refused");
+    check(!strcmp(c.bezel, "bezels/u.png"), "while its bezel still applies");
+    check_says("reads [arctic.graphics]",
+               "and the refusal names the section it is read from");
+
+    write_ini("[uarctic.audio]\nrender_scale = 4\n");
+    log_count = 0;
+    ultimate(&c);
+    check_says("reads [arctic.graphics]",
+               "a key in the wrong one of Ultimate's sections is pointed at "
+               "its own section, not at the one it was written in");
+
+    write_ini("[arctic.graphics]\nbezel = bezels/arctic.png\n"
+              "[uarctic]\nbezel = bezels/u.png\n");
+    log_count = 0;
+    ultimate(&c);
+    check(!strcmp(c.bezel, "bezels/arctic.png"),
+          "Ultimate's bezel outside [uarctic.graphics] is not applied, "
+          "as the launcher does not read it there");
+    check_says("[uarctic.graphics]", "and the warning says where it belongs");
+
+    log_count = 0;
+    config_defaults(&c);
+    config_load_shared(&c, s_path);
+    config_report_notes();
+    check(c.render_scale == 1 && !_stricmp(c.bezel, "off") && log_count == 0,
+          "the shared pass skips Ultimate's sections in silence");
+}
+
 /* A DEVICE PROFILE IS NOT THIS PARSER'S, AND THE OLD WARNING WAS WORSE THAN
  * SILENCE. Before Phase 3, [analog.tmx] reached setting_lookup(), which
  * resolves a key by NAME from any section, found dinput_throttle_axis in
@@ -550,6 +630,7 @@ int main(void)
     test_unknown_key_is_silent();
     test_comments_and_whitespace();
     test_per_title_sections();
+    test_own_sections();
     test_device_profile_is_not_this_parsers();
     test_notes_are_consumed();
     test_note_overflow_is_announced();

@@ -20,7 +20,8 @@ built-in defaults  ->  [section]  ->  [<title>.section]  ->  command line
 
 So `[offroad.audio] output = cabinet` leaves Hydro alone; anything a title section does not name
 falls through to the plain one. There is no flat `[offroad]` section. Ultimate Arctic Thunder runs
-in Arctic Thunder's cabinet, so it reads the `[arctic.*]` sections; it has none of its own.
+in Arctic Thunder's cabinet, so it reads the `[arctic.*]` sections; of its own it has only its
+bezel art (§3.2).
 
 - **The log names where each value came from.** An illegal value is refused with a reason and
   the previous one stands. An unknown key is ignored; only the launcher names it.
@@ -34,6 +35,19 @@ in Arctic Thunder's cabinet, so it reads the `[arctic.*]` sections; it has none 
 
 ### 1.1 The launcher
 
+- **Display: Windowed or Fullscreen**, on *Graphics*, is one setting for the launcher and every
+  game (`[graphics] fullscreen`). The launcher opens the way the games will start, and Apply
+  moves it at once. Fullscreen is borderless on the monitor the launcher is on.
+- **It fits any screen.** The launcher's design is fitted to its window, never smaller than
+  Windows' own scale: a larger window, a maximised one or a fullscreen one shows the same pages
+  bigger, from a Steam Deck's 1280x800 to a 4K television. A window too small for the two-column
+  layout gets the compact one, with the page list as a dropdown.
+- **Touch-sized for everyone.** Every control is large enough for a finger, and dragging a
+  page's background scrolls it.
+- **Play hands over to the game**: a black screen with the game's name stays in the launcher's
+  place until the game's first picture, and the game opens on the launcher's monitor. When a game
+  started from the launcher is closed (Escape, or its window closed) the launcher opens again;
+  `VCThunder.exe hydro` and the like exit as before.
 - **Apply writes only what changed**, keeping ordering, comments, unknown keys and line endings.
   Every save first copies the old file to `vcthunder.ini.bak`.
 - **Restore default settings**, on *Help*, replaces `vcthunder.ini` with a clean copy
@@ -89,7 +103,7 @@ VCThunder.exe hydro --link local --save save2 --log link2.log --glide-log vcglid
 ```
 
 `--trace` raises the log level for one run; `--dry-run` stops after loading, without starting the
-game. See [`building.md`](building.md).
+game. See [`building.md`](building.md). `VCThunder.exe --help` lists all of these.
 
 **The shipped `vcthunder.ini` is built into `VCThunder.dll`** and written out whenever the pack has
 none; an existing file is never overwritten. That is why a release zip carries no ini: extracting
@@ -119,7 +133,8 @@ The cabinet's picture is 512x400. Keep `raster_height = 400` and `video_mode = a
 ### 3.2 Window, fullscreen and aspect
 
 - **Fullscreen is a borderless window** over the game's monitor; Alt+Enter toggles it. The display
-  mode never changes; exclusive fullscreen would hang the game.
+  mode never changes; exclusive fullscreen would hang the game. The launcher follows the same
+  key (its *Display* row, §1.1), and a game started from it opens on the launcher's monitor.
 - `aspect`: `raster` keeps the game's own shape, `4:3` and `16:9` force that ratio, `stretch` fills
   the screen. The others add black bars.
 - `window_scale` sizes the window as a multiple of the raster; it cannot be resized. `auto`, the
@@ -145,6 +160,13 @@ The cabinet's picture is 512x400. Keep `raster_height = 400` and `video_mode = a
   [offroad.graphics]
   bezel = bezels/offroad.png
   ```
+
+  Ultimate Arctic Thunder runs in Arctic's cabinet and reads `[arctic.*]`, so it uses Arctic's
+  art until it has its own: `bezel` is the one key its own `[uarctic.graphics]` takes, a path or
+  `off`, and it is read there only. Any other key there, or `bezel` in another `[uarctic.*]`
+  section, is not read, and the log and the launcher say so. Its launcher row
+  starts as *Same as Arctic Thunder* and has a button to go back to that, which takes the line
+  out.
 
   The hole is found from the art itself: the transparent area around its centre. The art keeps
   its own shape and is fitted to the window or screen, with black outside it. The picture keeps
@@ -180,6 +202,15 @@ image. Real frames reach the screen about 17 ms later. When an
 in-between would make the game's tick late it is skipped, so a machine that cannot keep up shows
 30 fps rather than slowing the game. Some motion stays at 30: particles, the water's own animation,
 HUD animation.
+
+`vsync` is `auto` (the default) or `off`, and acts on the GPU renderer. `auto` shows each picture
+at the display's next refresh, so the screen never tears, without making the game wait for the
+display: its speed is unchanged. `off` puts each picture up the moment it is ready. That tears on
+an ordinary monitor and is the right choice for a G-Sync or FreeSync one, which only follows the
+game's own timing when tearing is allowed. Where the system cannot show `auto`'s way, the picture
+waits for the display instead, which never tears but can slow the game, and the graphics log
+warns about it; `off` takes `auto`'s way when its own is not offered, and waits only when neither
+is (Wine today).
 
 ### 3.5 GPU or CPU
 
@@ -502,14 +533,15 @@ trims (§4.3.1).
 | `vcglide_renderer` | `auto` | `auto` \| `gpu` \| `cpu` (§3.5) |
 | `vcglide_threads` | `0` | CPU renderer threads; 0 = one per physical core, 1 = off |
 | `vcglide_log` / `vcglide_verbose` | `vcglide.log` / `false` | the renderer's log |
-| `fullscreen` | `false` | borderless; Alt+Enter toggles |
+| `fullscreen` | `false` | borderless, for the launcher too; Alt+Enter toggles a game |
 | `window_scale` | `auto` | 1..8 or `auto` |
 | `render_scale` | `1` | 1..8, GPU only |
 | `upscale_2d` | `catmull_rom` | `bilinear` \| `catmull_rom` \| `fsr1`; above `render_scale` 1 (§3.2) |
 | `texmag` | `catmull_rom` | `bilinear` \| `catmull_rom`; 3D textures above `render_scale` 1 (§3.2) |
 | `frame_rate` | `30` | `30` \| `60`; 60 draws an interpolated picture between the game's own (§3.4) |
+| `vsync` | `auto` | `auto` \| `off`; `auto` never tears, `off` is for G-Sync/FreeSync; GPU only (§3.4) |
 | `aspect` | `raster` | `raster` \| `4:3` \| `16:9` \| `stretch`; `4:3` turns `widescreen` off |
-| `bezel` | `off` | a PNG path, relative to the pack; usually per title (§3.2) |
+| `bezel` | `off` | a PNG path, relative to the pack; usually per title, and the one `[uarctic.*]` key (§3.2) |
 | `widescreen` | `false` | 711x400 Hor+ (§3.3) |
 | `widescreen_hud` | `centre` | `centre` \| `edges`; race HUD and attract overlay under `widescreen` (§3.3) |
 | `raster_height` | `400` | `auto` gives 512x384 and **cuts the top off full-screen bitmaps** |

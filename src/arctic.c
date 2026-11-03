@@ -369,7 +369,10 @@ int arctic_spawn(int operator_system)
     si.cb = sizeof si;
     snprintf(token, sizeof token, "%lu", (unsigned long)GetCurrentProcessId());
     SetEnvironmentVariableA(OPERATOR_VAR, operator_system ? token : NULL);
+    /* The launcher's monitor and the way back go with it. */
+    handoff_env(1);
     ok = CreateProcessA(path, cmd, NULL, NULL, FALSE, 0, NULL, dir, &si, &pi);
+    handoff_env(0);
     SetEnvironmentVariableA(OPERATOR_VAR, NULL);
     if (!ok) {
         LOGE("arctic: cannot start %s (error %lu)", path, GetLastError());
@@ -421,6 +424,7 @@ static __attribute__((noreturn)) void arctic_exit(int code)
     }
     LOGI("arctic: exit %d", code);
     log_close();
+    handoff_exit(code);
     ExitProcess((UINT)code);
 }
 
@@ -667,10 +671,16 @@ static DWORD WINAPI window_thread(LPVOID p)
     r.right = s_client_w;
     r.bottom = s_client_h;
     AdjustWindowRect(&r, style, FALSE);
-    s_wnd = CreateWindowExA(0, wc.lpszClassName, AT->ids->name,
-                            style | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
-                            r.right - r.left, r.bottom - r.top, NULL, NULL,
-                            wc.hInstance, NULL);
+    /* Centred on the launcher's monitor, or the primary one's work area. */
+    {
+        int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+
+        handoff_centre(r.right - r.left, r.bottom - r.top, &x, &y);
+        s_wnd = CreateWindowExA(0, wc.lpszClassName, AT->ids->name,
+                                style | WS_VISIBLE, x, y, r.right - r.left,
+                                r.bottom - r.top, NULL, NULL, wc.hInstance,
+                                NULL);
+    }
     SetEvent(s_wnd_ready);
     if (!s_wnd)
         return 1;
@@ -707,6 +717,17 @@ static uint32_t __stdcall b_grSstWinOpen(uint32_t hwnd, uint32_t res,
     return r;
 }
 
+/* The first picture lifts the launcher's curtain (handoff.c); before it the
+ * window is there but shows whatever was behind it. */
+typedef void (__stdcall *swap_fn)(uint32_t);
+static swap_fn s_real_swap;
+
+static void __stdcall b_grBufferSwap(uint32_t interval)
+{
+    s_real_swap(interval);
+    handoff_lift(s_wnd);
+}
+
 /* gobj.dll creates its Glide window and hands it to grSstWinOpen; it gets the
  * host's instead, created once, sized from [graphics] window_scale. */
 static HWND WINAPI b_CreateWindowExA(DWORD ex, LPCSTR cls, LPCSTR name, DWORD style,
@@ -727,7 +748,7 @@ static HWND WINAPI b_CreateWindowExA(DWORD ex, LPCSTR cls, LPCSTR name, DWORD st
          * frame wider than the work area takes a smaller one. */
         if (window_bezel(&aw, &ah, &hole)) {
             RECT work;
-            int fits = SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
+            int fits = handoff_work_area(&work);
 
             for (;;) {
                 bezel_client_size(aw, ah, hole, 480, (int)scale,
@@ -784,6 +805,11 @@ static void *resolve(const char *importer, const char *dll, const char *name,
             s_real_open = (win_open_fn)(ws ? ws : fn);
             *kind = PE_BIND_HOST;
             return (void *)b_grSstWinOpen;
+        }
+        if (name && fn && !strcmp(name, "_grBufferSwap@4")) {
+            s_real_swap = (swap_fn)(ws ? ws : fn);
+            *kind = PE_BIND_HOST;
+            return (void *)b_grBufferSwap;
         }
         *kind = ws ? PE_BIND_HOST : PE_BIND_PROVIDER;
         return ws ? ws : fn;
@@ -958,7 +984,7 @@ static void resolve_window_scale(void)
     unsigned want = g_cfg.window_scale, fit;
     RECT work, r;
 
-    if (!SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0)) {
+    if (!handoff_work_area(&work)) {
         g_cfg.window_scale = want ? want : 1;
         return;
     }
@@ -990,6 +1016,14 @@ void arctic_prepare(char *data, size_t cap)
 
     LOGI("config: %d [%s.*] key%s applied", n, AT->ids->settings,
          n == 1 ? "" : "s");
+    /* A title in another's cabinet still has its own screen, so its bezel
+     * art is its own when its sections name one. */
+    if (_stricmp(AT->ids->settings, AT->ids->id)) {
+        n = config_load_own(&g_cfg, "vcthunder.ini", AT->ids->id,
+                            AT->ids->settings);
+        LOGI("config: %d [%s.*] key%s applied", n, AT->ids->id,
+             n == 1 ? "" : "s");
+    }
     config_report_notes();
     g_log_level = g_cfg.log_level;
     gate_settings();

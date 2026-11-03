@@ -15,18 +15,32 @@
 const setting_desc_t vct_setting[VCT_SETTING_COUNT] = {
 #define SETTING(section, key, store, show)  { section, key, store, show },
 #define SETTING_DEV(section, key, store)    { section, key, store, SHOW_NEVER },
+#define SETTING_OWN(section, key, store)    { section, key, store, SHOW_OWN },
 #include "settings.def"
 #undef SETTING
 #undef SETTING_DEV
+#undef SETTING_OWN
 };
 
 const setting_desc_t vct_ui_setting[VCT_UI_SETTING_COUNT] = {
 #define SETTING(section, key, store, show)  { section, key, store, show },
 #define SETTING_DEV(section, key, store)
+#define SETTING_OWN(section, key, store)
 #include "settings.def"
 #undef SETTING
 #undef SETTING_DEV
+#undef SETTING_OWN
 };
+
+int vct_setting_is_own(const char *key)
+{
+    unsigned i;
+
+    for (i = 0; key && i < VCT_SETTING_COUNT; i++)
+        if (!_stricmp(vct_setting[i].key, key))
+            return (vct_setting[i].flags & SF_OWN) != 0;
+    return 0;
+}
 
 int vct_choice_contains(const char *choices, const char *value)
 {

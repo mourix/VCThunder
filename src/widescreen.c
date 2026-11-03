@@ -762,9 +762,27 @@ static void ws_hud_first(const void *a, const void *b, const void *c)
     ws_hud_decide(xs, n);
 }
 
+/* The four primitive entry points' shared body: the HUD decision on the
+ * first primitive of an element, the origin on each of the `n` vertices into
+ * `v`, and the margin census, which attributes them to the game's call site
+ * `ra`. Each entry point keeps its own signature, its identity pass-through
+ * and its call to the real function, and takes `ra` itself. */
+static void ws_prim(char *v, const void *const *in, unsigned n, void *ra)
+{
+    unsigned i;
+
+    if (s_hud_pending)
+        ws_hud_first(in[0], in[1], n > 2 ? in[2] : NULL);
+    ws_batch_begin();
+    for (i = 0; i < n; i++)
+        ws_shift(v + (size_t)i * WS_VSIZE, in[i], 1);
+    ws_batch_end(ra);
+}
+
 static void __cdecl ws_draw_triangle(const void *a, const void *b,
                                        const void *c)
 {
+    const void *in[3] = { a, b, c };
     char v[3 * WS_VSIZE];
 
     if (!s_ws_real_tri)
@@ -773,13 +791,7 @@ static void __cdecl ws_draw_triangle(const void *a, const void *b,
         s_ws_real_tri(a, b, c);
         return;
     }
-    if (s_hud_pending)
-        ws_hud_first(a, b, c);
-    ws_batch_begin();
-    ws_shift(v, a, 1);
-    ws_shift(v + WS_VSIZE, b, 1);
-    ws_shift(v + 2 * WS_VSIZE, c, 1);
-    ws_batch_end(__builtin_return_address(0));
+    ws_prim(v, in, 3, __builtin_return_address(0));
     s_ws_real_tri(v, v + WS_VSIZE, v + 2 * WS_VSIZE);
 }
 
@@ -787,6 +799,7 @@ static void __cdecl ws_aa_draw_triangle(const void *a, const void *b,
                                           const void *c, int ab, int bc,
                                           int ca)
 {
+    const void *in[3] = { a, b, c };
     char v[3 * WS_VSIZE];
 
     if (!s_ws_real_aatri)
@@ -795,16 +808,13 @@ static void __cdecl ws_aa_draw_triangle(const void *a, const void *b,
         s_ws_real_aatri(a, b, c, ab, bc, ca);
         return;
     }
-    if (s_hud_pending)
-        ws_hud_first(a, b, c);
-    ws_shift(v, a, 1);
-    ws_shift(v + WS_VSIZE, b, 1);
-    ws_shift(v + 2 * WS_VSIZE, c, 1);
+    ws_prim(v, in, 3, __builtin_return_address(0));
     s_ws_real_aatri(v, v + WS_VSIZE, v + 2 * WS_VSIZE, ab, bc, ca);
 }
 
 static void __cdecl ws_draw_line(const void *a, const void *b)
 {
+    const void *in[2] = { a, b };
     char v[2 * WS_VSIZE];
 
     if (!s_ws_real_line)
@@ -813,15 +823,13 @@ static void __cdecl ws_draw_line(const void *a, const void *b)
         s_ws_real_line(a, b);
         return;
     }
-    if (s_hud_pending)
-        ws_hud_first(a, b, NULL);
-    ws_shift(v, a, 1);
-    ws_shift(v + WS_VSIZE, b, 1);
+    ws_prim(v, in, 2, __builtin_return_address(0));
     s_ws_real_line(v, v + WS_VSIZE);
 }
 
 static void __cdecl ws_aa_draw_line(const void *a, const void *b)
 {
+    const void *in[2] = { a, b };
     char v[2 * WS_VSIZE];
 
     if (!s_ws_real_aaline)
@@ -830,10 +838,7 @@ static void __cdecl ws_aa_draw_line(const void *a, const void *b)
         s_ws_real_aaline(a, b);
         return;
     }
-    if (s_hud_pending)
-        ws_hud_first(a, b, NULL);
-    ws_shift(v, a, 1);
-    ws_shift(v + WS_VSIZE, b, 1);
+    ws_prim(v, in, 2, __builtin_return_address(0));
     s_ws_real_aaline(v, v + WS_VSIZE);
 }
 
@@ -843,7 +848,8 @@ static void __cdecl ws_aa_draw_line(const void *a, const void *b)
  * unshifted with one loud line rather than silently truncated or stack-smashed. */
 #define WS_VLIST_MAX 256u
 
-static void ws_vlist(ws_vlist_fn real, int count, const void *verts)
+static void ws_vlist(ws_vlist_fn real, int count, const void *verts,
+                     void *ra)
 {
     static char v[WS_VLIST_MAX * WS_VSIZE];
     static int over_reported;
@@ -873,13 +879,15 @@ static void ws_vlist(ws_vlist_fn real, int count, const void *verts)
             xs[i] = *(const float *)((const char *)verts + (size_t)i * WS_VSIZE);
         ws_hud_decide(xs, (unsigned)count);
     }
+    ws_batch_begin();
     ws_shift(v, verts, (unsigned)count);
+    ws_batch_end(ra);
     real(count, v);
 }
 
 static void __cdecl ws_draw_vertex_list(int count, const void *verts)
 {
-    ws_vlist(s_ws_real_vlist, count, verts);
+    ws_vlist(s_ws_real_vlist, count, verts, __builtin_return_address(0));
 }
 
 /* Hydro's planar sky builder emits coordinates spanning the full raster, so
@@ -917,7 +925,8 @@ static void __cdecl ws_draw_planar_vertex_list(int count, const void *verts)
             s_ws_real_planar_vlist(count, verts);
         return;
     }
-    ws_vlist(s_ws_real_planar_vlist, count, verts);
+    ws_vlist(s_ws_real_planar_vlist, count, verts,
+             __builtin_return_address(0));
 }
 
 /* Execute full-screen fades with the wide viewport and no seam origin so the

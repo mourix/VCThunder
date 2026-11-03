@@ -551,6 +551,7 @@ static void vcglide_configure(void)
     SetEnvironmentVariableA("VCGLIDE_ASPECT", g_cfg.aspect);
     SetEnvironmentVariableA("VCGLIDE_UPSCALE_2D", g_cfg.upscale_2d);
     SetEnvironmentVariableA("VCGLIDE_TEXMAG", g_cfg.texmag);
+    SetEnvironmentVariableA("VCGLIDE_VSYNC", g_cfg.vsync);
     snprintf(n, sizeof n, "%u", g_cfg.render_scale > 0 ? g_cfg.render_scale : 1);
     SetEnvironmentVariableA("VCGLIDE_RENDER_SCALE", n);
     /* Its window is its own, so it needs the scale the host would have used.
@@ -1458,9 +1459,25 @@ static void __cdecl gl_draw_triangle_probe(const void *a, const void *b,
         s_real_drawtri(a, b, c);
 }
 
-static void gl_buffer_swap(int interval)
+/* Escape and the window's queue, answered on the game thread: at every swap,
+ * and through a splash hold, when no swap comes for seconds. Escape is polled
+ * because WM_KEYDOWN does not reach this thread's queue. */
+void glide_answer_window(void)
 {
     MSG msg;
+
+    if (escape_down())
+        shim_exit(0, "Escape pressed");
+    while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+        if (close_requested(&msg))
+            shim_exit(0, "host window closed");
+        TranslateMessage(&msg);
+        DispatchMessageA(&msg);
+    }
+}
+
+static void gl_buffer_swap(int interval)
+{
     LARGE_INTEGER before = { 0 }, after = { 0 };
 
     ws_frame_boundary();
@@ -1515,21 +1532,14 @@ static void gl_buffer_swap(int interval)
          * reported 27.8 fps. */
         if (s_health && s_health() != 0)
             shim_exit(3, "the GPU device was lost and cannot be recovered");
+        /* A picture is on screen: the launcher's curtain can go. Before it,
+         * the window is there but shows whatever was behind it. */
+        if (handoff_curtain_up())
+            handoff_lift(window_game());
     }
 
-    /* Poll rather than waiting for WM_KEYDOWN, which does not reach this
-     * game/render thread's queue under the current wrapper. */
-    if (escape_down())
-        shim_exit(0, "Escape pressed");
     window_hotkeys();
-
-    while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
-        if (close_requested(&msg))
-            shim_exit(0, "host window closed");
-        TranslateMessage(&msg);
-        DispatchMessageA(&msg);
-    }
-
+    glide_answer_window();
     if (window_gone())
         shim_exit(0, "host window destroyed");
 

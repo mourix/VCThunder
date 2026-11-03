@@ -28,13 +28,21 @@ HINSTANCE theme_instance(void);
 UINT theme_dpi(void);
 int  theme_dark(void);
 
-/* A geometry constant, into pixels, and back. */
-/* A GEOMETRY CONSTANT GOES THROUGH THIS. The DPI is chosen once, when the
- * window opens, against the work area, because a scale that does not fit the
- * desktop is a window with its buttons off the bottom of it. It never changes
- * after, so a cached measurement taken at one DPI stays valid. */
+/* A GEOMETRY CONSTANT GOES THROUGH THIS, into pixels and back. The DPI is the
+ * window's scale, not only Windows': the launcher fits its design to the
+ * window (launcher.c, launcher_dpi()), so it changes with the window's size and
+ * monitor. A measurement cached across a change has to key on theme_dpi(). */
 int  scale_px(int value);
 int  unscale_px(int value);
+
+/* WINDOWS' SCALE FOR THE MONITOR `h` IS ON, capped so a 960x680 window fits
+ * its work area and never below 100%: the least the launcher draws at. */
+UINT theme_floor_dpi(HWND h);
+
+/* Change the scale: the fonts are made again at `dpi` and every control under
+ * `top` is moved onto the new ones before the old ones are deleted. The
+ * geometry is the caller's to rebuild. */
+void theme_set_dpi(UINT dpi, HWND top);
 
 /* ---- what the pages draw with -------------------------------------------- */
 
@@ -52,15 +60,28 @@ void enable_dark_title_bar(HWND h);
 void theme_control(HWND h);
 void set_font(HWND h);
 
+/* TOUCH-SIZED: the height of every control a person presses, in logical
+ * units, whatever presses it. */
+#define THEME_CONTROL_H 40
+/* The edge round a page tile and a Play button, in logical units: drawn
+ * inside the control, so nothing around it moves. */
+#define THEME_EDGE 2
+/* A checkbox's or radio's mark, and where its text begins after it. */
+#define THEME_CHECK_MARK   20
+#define THEME_CHECK_TEXT_X (THEME_CHECK_MARK + 8)
+
 /* EVERY CONTROL THIS WINDOW MAKES, in logical units and already themed. A
  * push button becomes owner-draw in dark mode, which is what draw_dark_button()
- * below then paints. */
+ * below then paints. A checkbox's or radio's mark and a dropdown's face are
+ * painted here too, at the launcher's scale: Windows draws them at the
+ * monitor's, which on a television at 3.6x is a mark a fifth of its text. */
 HWND make_control(DWORD ex, const char *class_name, const char *text,
                   DWORD style, int x, int y, int w, int h,
                   HWND parent, int id);
 
 /* 1 when it painted. WM_DRAWITEM, from both window procedures. */
 int  draw_dark_button(const DRAWITEMSTRUCT *draw);
+int  theme_draw_combo_item(const DRAWITEMSTRUCT *draw);
 
 /* The WM_CTLCOLOR* family. `on_page` is whether the parent is the scrolling
  * page rather than the frame, which is the only thing about the caller this
@@ -87,6 +108,8 @@ typedef enum {
 } theme_button_t;
 
 theme_button_t launcher_button_kind(int id);
+/* A game's own colour, as on its Play button. */
+COLORREF theme_game_colour(theme_button_t game);
 int launcher_control_is_caption(int id);
 
 /* A static's text colour; the window decides what each tone means. High
@@ -102,29 +125,9 @@ typedef enum {
 
 theme_tone_t launcher_control_tone(int id);
 
-/* ---- the Graphics page's summary card ------------------------------------ */
-
-#define THEME_READOUT_COLUMNS 5
-
-/* One fact in a column: a size, aligned on its multiplication sign, then
- * `text`; or `text` alone where there is no size. */
-typedef struct {
-    int w, h;
-    char text[48];
-    int warn;                   /* amber: a choice that did not hold        */
-} theme_cell_t;
-
-/* One game's line: its stripe, its name and a cell per column. */
-typedef struct {
-    theme_button_t game;        /* THEME_BUTTON_HYDRO, _OFFROAD, _ARCTIC     */
-    const char *name;
-    theme_cell_t cell[THEME_READOUT_COLUMNS];
-} theme_readout_t;
-
-/* A heading line over `count` game lines, `columns` of them aligned. Columns
- * that do not fit are left off from the right, down to one: half a size
- * reads as a different number. */
-void draw_readout(HDC dc, const RECT *rc, const char *const *head,
-                  int columns, const theme_readout_t *line, int count);
+/* A two-column line of wide text in an owner-drawn static, the second
+ * column at `second_x` pixels: a caption's grey, amber when `warn`. */
+void theme_draw_line(const DRAWITEMSTRUCT *draw, const wchar_t *first,
+                     const wchar_t *second, int second_x, int warn);
 
 #endif /* VCT_LAUNCHER_THEME_H */

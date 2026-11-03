@@ -226,11 +226,18 @@ VGL_SRC := $(wildcard renderer/core/*.c) $(wildcard renderer/win32/*.c)
 # -msse2 -mfpmath=sse is in CFLAGS now (see the note there: src/ needs it for
 # the same reason renderer/ does), so all this rule still changes is -O1 -> -O2.
 VGL_CFLAGS := $(filter-out -O1,$(CFLAGS)) -O2 \
-              -I$(SDL3_ROOT)/include -Ibuild/obj/renderer
+              -I$(SDL3_ROOT)/include
 VGL_OBJ := $(patsubst %.c,build/obj/%.o,$(VGL_SRC))
 VGL_DLL := build/vcglide.dll
 VGL_DEF := build/obj/renderer/vcglide.def
-VGL_SHADER_INC := build/obj/renderer/gpu_shader.inc
+# The GPU shaders ship as DXBC that Microsoft's compiler made: under Wine and
+# Proton, d3dcompiler_47 is a different HLSL compiler and it miscompiles them.
+# The header is committed; `make shaders` regenerates it, on Windows only, and
+# the build refuses a header made from other sources -- the shader, its entry
+# list or the compiler driver's -- than the ones present.
+VGL_DXBC := renderer/win32/gpu_shader_dxbc.h
+VGL_DXBC_OK := build/obj/renderer/dxbc-current
+SHADERC := build/shaderc.exe
 SDL3_RUNTIME_OUT := build/SDL3.dll
 
 # The exported names carry the leading underscore (_grDrawTriangle@12), and
@@ -314,18 +321,34 @@ build/obj/renderer/%.o: renderer/%.c renderer/core/vcglide.h \
 	@mkdir -p $(dir $@)
 	$(CC) $(VGL_CFLAGS) -c -o $@ $<
 
-$(VGL_SHADER_INC): renderer/win32/gpu_shader.hlsl tools/embed-text.py
+$(VGL_DXBC_OK): renderer/win32/gpu_shader.hlsl renderer/win32/gpu_shaders.def \
+                tools/shaderc.c $(VGL_DXBC) tools/embed-dxbc.py
 	@mkdir -p $(dir $@)
-	$(PYTHON) tools/embed-text.py $< $@ vgl_gpu_shader_source
+	$(PYTHON) tools/embed-dxbc.py check renderer/win32/gpu_shader.hlsl \
+	  renderer/win32/gpu_shaders.def tools/shaderc.c $(VGL_DXBC)
+	@touch $@
 
-build/obj/renderer/win32/gpu.o: $(VGL_SHADER_INC)
+build/obj/renderer/win32/gpu.o build/obj/renderer/win32/gpu_layer.o: \
+    $(VGL_DXBC) $(VGL_DXBC_OK)
+
+$(SHADERC): tools/shaderc.c renderer/win32/gpu_shaders.def
+	@mkdir -p $(dir $@)
+	$(CC) $(LINK_CFLAGS) -Irenderer/win32 -o $@ $< -ld3dcompiler_47 -lversion
+
+# Relative paths: the tool is a Windows program, and from WSL a /mnt/c path
+# reaches it as a path it cannot open.
+shaders: $(SHADERC)
+	@rm -rf build/shaders && mkdir -p build/shaders
+	./$(SHADERC) renderer/win32/gpu_shader.hlsl build/shaders > build/shaders/compiler.txt
+	$(PYTHON) tools/embed-dxbc.py generate renderer/win32/gpu_shader.hlsl \
+	  renderer/win32/gpu_shaders.def tools/shaderc.c build/shaders \
+	  build/shaders/compiler.txt $(VGL_DXBC)
 
 $(VGL_DLL): $(VGL_OBJ) $(VGL_DEF) $(SRC_LIST)
 	@mkdir -p $(dir $@)
 	@test -f $(SDL3_IMPORT) || { echo "SDL3 $(SDL3_VERSION) is missing; run 'make deps'"; exit 1; }
 	$(CC) $(LDFLAGS_REPRO) -shared -static-libgcc -o $@ $(VGL_OBJ) $(VGL_DEF) \
-	  -L$(SDL3_ROOT)/lib -lSDL3 -lkernel32 -luser32 -lgdi32 -ld3d9 \
-	  -ld3dcompiler_47 -lm
+	  -L$(SDL3_ROOT)/lib -lSDL3 -lkernel32 -luser32 -lgdi32 -ld3d9 -lm
 	@echo "built $@ (Glide 2.x provider and rasteriser)"
 	@sha256sum $@
 
@@ -418,7 +441,7 @@ conformance-accept: conformance-frames
 	@cat $(CONF_GOLDEN)
 
 
-.PHONY: all check check-full defs deps pack pack-cfg pack-ini clean renderer tools ini-doc-test \
+.PHONY: all check check-full defs deps pack pack-cfg pack-ini clean renderer tools shaders ini-doc-test \
         launcher-model-test launcher-pad-test \
         config-test round-trip-test emitter-test button-test di-role-test import-test bezel-test \
         keylok-test menu-model-test cpu-test \

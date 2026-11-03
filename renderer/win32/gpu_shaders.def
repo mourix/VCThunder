@@ -1,0 +1,23 @@
+/* gpu_shaders.def -- every entry point in gpu_shader.hlsl, and its profile.
+ * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
+ *
+ * tools/shaderc.c compiles exactly this list and tools/embed-dxbc.py embeds
+ * it as gpu_shader_dxbc.h, one vgl_dxbc_<entry> array each.
+ */
+VGL_SHADER(main_vs, "vs_5_1")
+VGL_SHADER(main_ps, "ps_5_1")
+VGL_SHADER(copy_vs, "vs_5_1")
+VGL_SHADER(overlay_ps, "ps_5_1")
+VGL_SHADER(clear_ps, "ps_5_1")
+VGL_SHADER(depth_resolve_ps, "ps_5_1")
+VGL_SHADER(over_ps, "ps_5_1")
+VGL_SHADER(upscale_bilinear_ps, "ps_5_1")
+VGL_SHADER(clear_layer_ps, "ps_5_1")
+VGL_SHADER(clear_layer_color_ps, "ps_5_1")
+VGL_SHADER(layer_depth_ps, "ps_5_1")
+VGL_SHADER(compose_ps, "ps_5_1")
+VGL_SHADER(upscale_catmull_ps, "ps_5_1")
+VGL_SHADER(fsr_easu_ps, "ps_5_1")
+VGL_SHADER(fsr_rcas_ps, "ps_5_1")
+VGL_SHADER(bezel_ps, "ps_5_1")
+VGL_SHADER(gamma_ps, "ps_5_1")

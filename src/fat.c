@@ -159,6 +159,7 @@ int fat_open(const fat_image_t *img, uint32_t lba, fat_t **out,
     uint8_t b[SECTOR];
     fat_t *v;
     uint32_t total16, spf16;
+    uint64_t first;
 
     *out = NULL;
     v = calloc(1, sizeof *v);
@@ -186,11 +187,13 @@ int fat_open(const fat_image_t *img, uint32_t lba, fat_t **out,
     v->spf = spf16 ? spf16 : le32(b + 0x24);
     v->total = total16 ? total16 : le32(b + 0x20);
     v->root_sectors = (v->root_entries * 32u + v->bps - 1) / v->bps;
-    v->first_data = v->reserved + v->nfats * v->spf + v->root_sectors;
-    if (!v->spf || v->total <= v->first_data) {
+    first = v->reserved + (uint64_t)v->nfats * v->spf + v->root_sectors;
+    /* A FAT32 table addresses at most 2^28 clusters, 4 bytes each. */
+    if (!v->spf || v->total <= first || v->spf > (1u << 30) / SECTOR) {
         say(err, errsz, "not a FAT volume (its layout does not add up)");
         goto fail;
     }
+    v->first_data = (uint32_t)first;
     v->clusters = (v->total - v->first_data) / v->spc;
     /* By CLUSTER COUNT, not by the partition type byte, which is a hint the
      * formatter wrote and is wrong often enough to matter. */
@@ -324,6 +327,12 @@ static uint8_t *dir_bytes(const fat_t *v, uint32_t cl, int root, size_t *len,
     }
     if (chain(v, root ? v->root_cluster : cl, 0, &list, &n, err, errsz))
         return NULL;
+    /* FAT caps a directory at 65536 entries of 32 bytes. */
+    if ((uint64_t)n * cbytes > 65536u * 32u + cbytes) {
+        free(list);
+        say(err, errsz, "a directory is larger than FAT allows");
+        return NULL;
+    }
     *len = (size_t)n * cbytes;
     blob = malloc(*len ? *len : 1);
     for (i = 0; blob && i < n; i++) {

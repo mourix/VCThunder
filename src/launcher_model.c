@@ -183,8 +183,10 @@ static int s_view_title;                /* a MODEL_TITLE_*                  */
 /* Lines changed in s_doc that Apply has not written yet: the outgoing
  * cabinet's choices on a switch, and what split or join rewrote. */
 static int s_doc_pending;
-static const char *const k_title_id[MODEL_TITLES] = {
-    "hydro", "offroad", "arctic" };
+/* Ultimate Arctic Thunder's id last: it is not a cabinet here, and names
+ * only its bezel's section and file (bezel_id()). */
+static const char *const k_title_id[MODEL_BEZELS] = {
+    "hydro", "offroad", "arctic", "uarctic" };
 static const char *const k_title_name[MODEL_TITLES] = {
     "Hydro Thunder", "Offroad Thunder", "Arctic Thunder" };
 
@@ -1007,20 +1009,28 @@ int model_title_raw(int title, const char *section, const char *key,
     return ini_doc_get(&s_doc, section, key, out, out_size);
 }
 
-/* ---- bezel art, per cabinet ---------------------------------------------- */
+/* ---- bezel art, per game ------------------------------------------------- */
 
 typedef struct {
     int  enabled;
+    int  inherit;           /* Ultimate's row with no line: Arctic's       */
     char file[MAX_PATH];    /* the ini's path, or bezels/<title>.png       */
     char pick[MAX_PATH];    /* chosen and not yet applied; copied on Apply */
 } bezel_state_t;
-/* One per cabinet the launcher configures; Ultimate reads Arctic's. */
-static bezel_state_t s_bezel[MODEL_TITLES];
+/* One per cabinet, and one for Ultimate Arctic Thunder, which reads
+ * [arctic.*] for everything but this (vct_setting_is_own()). */
+static bezel_state_t s_bezel[MODEL_BEZELS];
 
-/* A cabinet index for the bezel state; anything out of range is Hydro's. */
+/* A row index for the bezel state; anything out of range is Hydro's. */
 static int bezel_title(int title)
 {
-    return title >= 0 && title < MODEL_TITLES ? title : 0;
+    return title >= 0 && title < MODEL_BEZELS ? title : 0;
+}
+
+/* The row's section prefix and file name. */
+static const char *bezel_id(int title)
+{
+    return k_title_id[bezel_title(title)];
 }
 static int s_bezel_copies;
 
@@ -1034,6 +1044,19 @@ static int bezel_value_is_off(const char *value)
     return !value[0] || !_stricmp(value, "off");
 }
 
+/* The line a row answers to, as the game reads it: a cabinet's own line,
+ * else the shared one; Ultimate's own line only, since without one it reads
+ * Arctic's, and with an empty one it has none. 0 when there is none. */
+static int bezel_line(int title, char *out, size_t out_size)
+{
+    char scoped[64];
+
+    if (title < MODEL_TITLES)
+        return model_title_raw(title, "graphics", "bezel", out, out_size);
+    snprintf(scoped, sizeof scoped, "%s.graphics", bezel_id(title));
+    return ini_doc_get(&s_doc, scoped, "bezel", out, out_size);
+}
+
 void model_bezel_destination(int title, char *out, size_t out_size)
 {
     const char *slash = strrchr(s_doc.path, '\\'), *fwd = strrchr(s_doc.path, '/');
@@ -1043,21 +1066,22 @@ void model_bezel_destination(int title, char *out, size_t out_size)
         slash = fwd;
     dir = slash ? (int)(slash - s_doc.path) + 1 : 0;
     snprintf(out, out_size, "%.*sbezels\\%s.png", dir, s_doc.path,
-             k_title_id[bezel_title(title)]);
+             bezel_id(title));
 }
 
-/* What the file says, as the game reads it: the cabinet's line, else the
- * shared one, else off. A row left off still names bezels\<title>.png when
- * that file is there, so turning it back on needs no new choice. */
+/* What the file says, as the game reads it (bezel_line()), else off, or for
+ * Ultimate Arctic's. A row left off still names bezels\<title>.png when that
+ * file is there, so turning it back on needs no new choice. */
 static void bezel_load_state(void)
 {
     char value[INI_VALUE_CAP], dest[MAX_PATH];
     int t;
 
-    for (t = 0; t < MODEL_TITLES; t++) {
+    for (t = 0; t < MODEL_BEZELS; t++) {
         memset(&s_bezel[t], 0, sizeof s_bezel[t]);
-        if (model_title_raw(t, "graphics", "bezel", value, sizeof value) &&
-            !bezel_value_is_off(value)) {
+        if (!bezel_line(t, value, sizeof value)) {
+            s_bezel[t].inherit = t >= MODEL_TITLES;
+        } else if (!bezel_value_is_off(value)) {
             s_bezel[t].enabled = 1;
             snprintf(s_bezel[t].file, sizeof s_bezel[t].file, "%s", value);
             continue;
@@ -1065,7 +1089,7 @@ static void bezel_load_state(void)
         model_bezel_destination(t, dest, sizeof dest);
         if (GetFileAttributesA(dest) != INVALID_FILE_ATTRIBUTES)
             snprintf(s_bezel[t].file, sizeof s_bezel[t].file, "bezels/%s.png",
-                     k_title_id[t]);
+                     bezel_id(t));
     }
 }
 
@@ -1073,13 +1097,40 @@ int model_bezel_get(int title, char *path, size_t path_size)
 {
     const bezel_state_t *b = &s_bezel[bezel_title(title)];
 
+    if (b->inherit)
+        return model_bezel_get(MODEL_TITLE_ARCTIC, path, path_size);
     snprintf(path, path_size, "%s", b->pick[0] ? b->pick : b->file);
     return b->enabled && path[0];
 }
 
+void model_bezel_own(int title, char *path, size_t path_size)
+{
+    const bezel_state_t *b = &s_bezel[bezel_title(title)];
+
+    snprintf(path, path_size, "%s", b->pick[0] ? b->pick : b->file);
+}
+
+int model_bezel_inherits(int title)
+{
+    return s_bezel[bezel_title(title)].inherit;
+}
+
+void model_bezel_inherit(int title)
+{
+    bezel_state_t *b = &s_bezel[bezel_title(title)];
+
+    if (bezel_title(title) < MODEL_TITLES)
+        return;
+    b->inherit = 1;
+    b->pick[0] = '\0';
+}
+
 void model_bezel_set_enabled(int title, int on)
 {
-    s_bezel[bezel_title(title)].enabled = on != 0;
+    bezel_state_t *b = &s_bezel[bezel_title(title)];
+
+    b->enabled = on != 0;
+    b->inherit = 0;
 }
 
 void model_bezel_choose(int title, const char *source)
@@ -1088,48 +1139,84 @@ void model_bezel_choose(int title, const char *source)
 
     snprintf(b->pick, sizeof b->pick, "%s", source);
     b->enabled = 1;
+    b->inherit = 0;
 }
 
-/* APPLY'S HALF. A chosen file is copied first, so a copy that fails writes
- * no line naming a file that is not there; then each cabinet's line is
- * written only when what it says changes. Absent and `off` are one answer.
- * Returns 1, 0 for no memory, -1 for a copy that failed (`why` says). */
+/* APPLY'S HALF. The chosen files are copied first, each to a .new beside
+ * its destination, and swapped in only once every copy has worked: a copy
+ * that fails writes no line naming a file that is not there, and leaves every
+ * row's art as it was. Then each row's line is written only when what it says
+ * changes. Absent and `off` are one answer for a cabinet; for Ultimate absent
+ * is Arctic's, so a row that inherits comments its line out. Returns 1, 0 for
+ * no memory, -1 for a copy that failed (`why` says). */
 static int commit_bezels(int *changed, char *why, size_t why_size)
 {
     char want[MAX_PATH], have[INI_VALUE_CAP], dest[MAX_PATH], dir[MAX_PATH];
-    char a[MAX_PATH], b[MAX_PATH], scoped[64];
-    int t;
+    char a[MAX_PATH], b[MODEL_BEZELS][MAX_PATH], tmp[MODEL_BEZELS][MAX_PATH];
+    char scoped[64];
+    int t, k, line;
 
-    for (t = 0; t < MODEL_TITLES; t++) {
+    for (t = 0; t < MODEL_BEZELS; t++) {
         bezel_state_t *s = &s_bezel[t];
 
-        if (s->enabled && s->pick[0]) {
-            model_bezel_destination(t, dest, sizeof dest);
-            snprintf(dir, sizeof dir, "%s", dest);
-            *strrchr(dir, '\\') = '\0';
-            CreateDirectoryA(dir, NULL);
-            ini_resolve_path(s->pick, a, sizeof a);
-            ini_resolve_path(dest, b, sizeof b);
-            if (_stricmp(a, b)) {
-                if (!CopyFileA(a, b, FALSE)) {
-                    snprintf(why, why_size, "Could not copy %s to %s (Windows "
-                             "error %lu). Nothing was saved.", a, b,
-                             GetLastError());
-                    return -1;
-                }
-                s_bezel_copies++;
+        tmp[t][0] = '\0';
+        if (s->inherit || !s->enabled || !s->pick[0])
+            continue;
+        model_bezel_destination(t, dest, sizeof dest);
+        snprintf(dir, sizeof dir, "%s", dest);
+        *strrchr(dir, '\\') = '\0';
+        CreateDirectoryA(dir, NULL);
+        ini_resolve_path(s->pick, a, sizeof a);
+        ini_resolve_path(dest, b[t], sizeof b[t]);
+        if (!_stricmp(a, b[t]))
+            continue;
+        snprintf(tmp[t], sizeof tmp[t], "%.*s.new",
+                 (int)(sizeof tmp[t] - sizeof ".new"), b[t]);
+        if (!CopyFileA(a, tmp[t], FALSE)) {
+            snprintf(why, why_size, "Could not copy %s to %s (Windows error "
+                     "%lu). Nothing was saved.", a, b[t], GetLastError());
+            for (k = 0; k <= t; k++)
+                if (tmp[k][0])
+                    DeleteFileA(tmp[k]);
+            return -1;
+        }
+    }
+    for (t = 0; t < MODEL_BEZELS; t++) {
+        bezel_state_t *s = &s_bezel[t];
+
+        if (tmp[t][0]) {
+            if (!MoveFileExA(tmp[t], b[t], MOVEFILE_REPLACE_EXISTING)) {
+                snprintf(why, why_size, "Could not replace %s (Windows error "
+                         "%lu). The settings were not saved.", b[t],
+                         GetLastError());
+                for (k = t; k < MODEL_BEZELS; k++)
+                    if (tmp[k][0])
+                        DeleteFileA(tmp[k]);
+                return -1;
             }
-            snprintf(s->file, sizeof s->file, "bezels/%s.png", k_title_id[t]);
+            s_bezel_copies++;
+        }
+        if (s->enabled && s->pick[0]) {
+            snprintf(s->file, sizeof s->file, "bezels/%s.png", bezel_id(t));
             s->pick[0] = '\0';
+        }
+        snprintf(scoped, sizeof scoped, "%s.graphics", bezel_id(t));
+        line = bezel_line(t, have, sizeof have);
+        if (s->inherit) {
+            if (!line)
+                continue;
+            if (!ini_doc_remove(&s_doc, scoped, "bezel"))
+                return 0;
+            (*changed)++;
+            continue;
         }
         snprintf(want, sizeof want, "%s",
                  s->enabled && s->file[0] ? s->file : "off");
-        if (!model_title_raw(t, "graphics", "bezel", have, sizeof have) ||
-            bezel_value_is_off(have))
-            snprintf(have, sizeof have, "off");
-        if (!_stricmp(want, have))
+        if (!line || bezel_value_is_off(have))
+            snprintf(have, sizeof have, "%s", line ? "off" : "");
+        if (!_stricmp(want, have) || (t < MODEL_TITLES && !have[0] &&
+                                      !_stricmp(want, "off")))
             continue;
-        snprintf(scoped, sizeof scoped, "%s.graphics", k_title_id[t]);
         if (!ini_doc_set(&s_doc, scoped, "bezel", want))
             return 0;
         (*changed)++;
@@ -1398,13 +1485,39 @@ void scan_ini_problems(void)
             add_ini_problem(text);
             continue;
         }
+        /* Ultimate Arctic Thunder reads [arctic.*]: its own sections carry
+         * its bezel art and nothing else anything reads. */
+        if (is_title_section(current, bezel_id(MODEL_BEZEL_UARCTIC)) &&
+            !vct_setting_is_own(key)) {
+            snprintf(text, sizeof text,
+                     "[%s] %s is not read: Ultimate Arctic Thunder reads "
+                     "Arctic Thunder's sections for everything but its bezel "
+                     "art.", current, key);
+            add_ini_problem(text);
+            continue;
+        }
+        /* Its bezel art in its graphics section only, as bezel_line() and the
+         * game read it. */
+        if (is_title_section(current, bezel_id(MODEL_BEZEL_UARCTIC))) {
+            char own[64];
+
+            snprintf(own, sizeof own, "%s.graphics",
+                     bezel_id(MODEL_BEZEL_UARCTIC));
+            if (_stricmp(current, own)) {
+                snprintf(text, sizeof text,
+                         "[%s] %s is not read: Ultimate Arctic Thunder's bezel "
+                         "art is read from [%s] only.", current, key, own);
+                add_ini_problem(text);
+            }
+            continue;
+        }
         /* A per-title override of something this window shows is said by the
          * row; one of anything else has no other place to appear. The binding
          * sections are per-title BY DESIGN and are not overrides at all, and
-         * so is `bezel`: each cabinet its own art, set in the file only
-         * (configuration.md §3.2). */
+         * nor is an own key: each cabinet its own bezel art, set in the file
+         * only (configuration.md §3.2). */
         if (scoped && _stricmp(plain, "digital") && _stricmp(plain, "gamepad") &&
-            _stricmp(key, "bezel") && !ini_key_is_on_a_page(key)) {
+            !vct_setting_is_own(key) && !ini_key_is_on_a_page(key)) {
             snprintf(text, sizeof text,
                      "[%s] %s is set for one cabinet only. This window edits "
                      "the settings all games share, so it cannot show you "
@@ -2168,6 +2281,28 @@ int model_save(char *why, size_t why_size, int *changed)
 
 /* ---- restoring the defaults ---------------------------------------------- */
 
+/* Whether `path` holds exactly `data`. */
+static int file_holds(const char *path, const void *data, unsigned long size)
+{
+    HANDLE file = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    LARGE_INTEGER len;
+    char *buf;
+    DWORD got;
+    int same = 0;
+
+    if (file == INVALID_HANDLE_VALUE)
+        return 0;
+    if (GetFileSizeEx(file, &len) && len.QuadPart == (LONGLONG)size &&
+        (buf = malloc(size ? size : 1)) != NULL) {
+        same = ReadFile(file, buf, (DWORD)size, &got, NULL) && got == size &&
+               !memcmp(buf, data, size);
+        free(buf);
+    }
+    CloseHandle(file);
+    return same;
+}
+
 int model_defaults_restore(const void *data, unsigned long size,
                            char *why, size_t why_size)
 {
@@ -2184,6 +2319,10 @@ int model_defaults_restore(const void *data, unsigned long size,
              (int)(sizeof bak - sizeof MODEL_RESTORE_SUFFIX), ini);
     snprintf(tmp, sizeof tmp, "%.*s.new",
              (int)(sizeof tmp - sizeof ".new"), ini);
+    /* Already the defaults: a second restore would back them up over the
+     * user's own file, the one copy of it there is. */
+    if (file_holds(ini, data, size))
+        return 1;
     if (GetFileAttributesA(ini) != INVALID_FILE_ATTRIBUTES &&
         !CopyFileA(ini, bak, FALSE)) {
         snprintf(why, why_size, "Could not back up %s (Windows error %lu). "

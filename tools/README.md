@@ -17,9 +17,12 @@ Built by `make tools`. `make conformance` is the standing check that uses it.
 
 `scan-contraband.py` is a build-time helper. `fetch-deps.py` installs the pinned,
 hash-verified third-party packages under `build/deps/`: the x86 SDL3 SDK, and the CHD importer's
-two decoders, zlib's inflate and 7-Zip's public-domain `LzmaDec.c`; `embed-text.py` turns the
-project-authored HLSL into a generated C array. `pack-datadir.py` points a freshly staged
-pack at data you have already ingested, instead of copying gigabytes of it twice.
+two decoders, zlib's inflate and 7-Zip's public-domain `LzmaDec.c`. `shaderc.c` and
+`embed-dxbc.py` are `make shaders` (Windows only): the first compiles the project-authored HLSL
+with Microsoft's `d3dcompiler_47`, the second writes the committed DXBC header, and every build
+runs `embed-dxbc.py check` to refuse a header made from other sources (the shader, its entry
+list, or `shaderc.c` itself, which sets the compile flags). `pack-datadir.py` points
+a freshly staged pack at data you have already ingested, instead of copying gigabytes of it twice.
 
 Four are run by `make check`: `check-launcher-settings.py` holds `src/settings.def` and the
 shipped ini to each other, `check-links.py` holds every relative markdown link to a file that

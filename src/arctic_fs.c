@@ -185,6 +185,15 @@ static void passing(const char *in, const char *why)
          why, in);
 }
 
+/* A pack path too long to build. Refused, never passed through: the game's
+ * own path names the host's real drive. */
+static const char *too_long(const char *in, const char *why)
+{
+    LOGW("arctic: %s [%s] refused: its path in the pack is too long", why, in);
+    SetLastError(ERROR_FILENAME_EXCED_RANGE);
+    return NULL;
+}
+
 /* Where `in` lives for `mode`, in `out`. Returns the path to use (`out`, or
  * `in` itself for the machine's), or NULL when refused. */
 const char *arctic_fs_route(const char *in, char *out, size_t cap, int mode,
@@ -221,7 +230,7 @@ const char *arctic_fs_route(const char *in, char *out, size_t cap, int mode,
         snprintf(out, cap, "%s", dir);
     } else if (!s_f[f].data[0]) {
         if (snprintf(out, cap, "%s\\%s", s_f[f].save, rest) >= (int)cap)
-            return in;
+            return too_long(in, why);
         if (mode == FS_WRITE)
             make_parents(out);
     } else {
@@ -230,10 +239,8 @@ const char *arctic_fs_route(const char *in, char *out, size_t cap, int mode,
             snprintf(out, cap, "%s\\%s", s_f[f].save, rest) < (int)cap)
             make_parents(out);
         if (!fs_overlay_path(s_f[f].data, s_f[f].save, rest, out, cap,
-                             (fs_access_t)mode)) {
-            LOGW("arctic: %s [%s]: path too long, passing through", why, in);
-            return in;
-        }
+                             (fs_access_t)mode))
+            return too_long(in, why);
     }
     LOGT("arctic: %s [%s] -> [%s] (%s)", why, in, out,
          mode == FS_WRITE ? "write" : mode == FS_DELETE ? "delete" : "read");

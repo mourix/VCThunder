@@ -129,7 +129,14 @@ void theme_control(HWND h)
     }
 }
 
-/* A game's own colour: its Play button's face, and its stripe on a readout. */
+static COLORREF game_face(theme_button_t kind);
+
+COLORREF theme_game_colour(theme_button_t kind)
+{
+    return game_face(kind);
+}
+
+/* A game's own colour: its Play button's face. */
 static COLORREF game_face(theme_button_t kind)
 {
     switch (kind) {
@@ -206,9 +213,14 @@ int draw_dark_button(const DRAWITEMSTRUCT *draw)
                   kind == THEME_BUTTON_EMPTY ? RGB(135, 135, 140) :
                                                s_text_color;
     brush = CreateSolidBrush(face);
-    pen = CreatePen(kind == THEME_BUTTON_EMPTY &&
-                    !(draw->itemState & ODS_FOCUS) ? PS_DOT : PS_SOLID,
-                    1, border);
+    /* A Play button's edge is THEME_EDGE thick, inside its rectangle; a
+     * dotted pen is one pixel or it is not dotted. */
+    if (kind == THEME_BUTTON_EMPTY && !(draw->itemState & ODS_FOCUS))
+        pen = CreatePen(PS_DOT, 1, border);
+    else
+        pen = CreatePen(PS_INSIDEFRAME,
+                        game_face(kind) != s_control_color ?
+                            max(1, scale_px(THEME_EDGE)) : 1, border);
     old_brush = SelectObject(draw->hDC, brush);
     old_pen = SelectObject(draw->hDC, pen);
     /* A dotted pen paints its gaps in the background colour. */
@@ -254,123 +266,28 @@ int draw_dark_button(const DRAWITEMSTRUCT *draw)
     return 1;
 }
 
-static int text_width(HDC dc, const char *text)
+/* ONE LINE OF TEXT IN AN OWNER-DRAWN STATIC, on the page's background, in
+ * wide characters: a size's multiplication sign is not in every ANSI code
+ * page. A caption's grey, as control_colour() gives one, and amber for a
+ * choice that did not hold; High Contrast keeps the system's colours. */
+void theme_draw_line(const DRAWITEMSTRUCT *draw, const wchar_t *first,
+                     const wchar_t *second, int second_x, int warn)
 {
-    SIZE size;
+    COLORREF ink = s_dark_mode ? (warn ? RGB(240, 185, 70) : RGB(176, 176, 180)) :
+                                 GetSysColor(COLOR_WINDOWTEXT);
+    UINT format = DT_SINGLELINE | DT_VCENTER | DT_LEFT | DT_NOPREFIX |
+                  DT_END_ELLIPSIS;
+    HGDIOBJ old_font = SelectObject(draw->hDC, s_font);
+    RECT rc = draw->rcItem;
 
-    return text && GetTextExtentPoint32A(dc, text, (int)strlen(text), &size)
-           ? size.cx : 0;
-}
-
-/* RAISED ONE SHADE OFF THE PAGE, in the outline every box has. Under High
- * Contrast the system's colours and no stripes: the name says which game it
- * is. */
-void draw_readout(HDC dc, const RECT *rc, const char *const *head,
-                  int columns, const theme_readout_t *line, int count)
-{
-    COLORREF text = s_dark_mode ? s_text_color : GetSysColor(COLOR_WINDOWTEXT);
-    COLORREF dim = s_dark_mode ? RGB(176, 176, 180) : text;
-    COLORREF amber = s_dark_mode ? RGB(240, 185, 70) : text;
-    HBRUSH frame = s_dark_mode ? s_border_brush :
-                                 GetSysColorBrush(COLOR_WINDOWTEXT);
-    HGDIOBJ old_font = SelectObject(dc, s_font);
-    UINT flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX;
-    int pad = scale_px(4), gap = scale_px(24), after = scale_px(8);
-    int right = rc->right - scale_px(8), name_x = rc->left + scale_px(14);
-    int w_w[THEME_READOUT_COLUMNS] = { 0 }, h_w[THEME_READOUT_COLUMNS] = { 0 };
-    int size_w[THEME_READOUT_COLUMNS] = { 0 };
-    int x[THEME_READOUT_COLUMNS + 1];
-    int pitch, name_w = 0, times_w, shown, c, i;
-    SIZE times;
-    char number[16];
-    RECT r;
-
-    FillRect(dc, rc, s_dark_mode ? s_control_brush :
-                                   GetSysColorBrush(COLOR_WINDOW));
-    FrameRect(dc, rc, frame);
-    if (count <= 0 || columns <= 0)
-        goto done;
-    pitch = (rc->bottom - rc->top - 2 * pad) / (count + 1);
-    GetTextExtentPoint32W(dc, L" \x00d7 ", 3, &times);
-    times_w = times.cx;
-    for (i = 0; i < count; i++) {
-        name_w = max(name_w, text_width(dc, line[i].name));
-        for (c = 0; c < columns; c++) {
-            if (!line[i].cell[c].w)
-                continue;
-            snprintf(number, sizeof number, "%d", line[i].cell[c].w);
-            w_w[c] = max(w_w[c], text_width(dc, number));
-            snprintf(number, sizeof number, "%d", line[i].cell[c].h);
-            h_w[c] = max(h_w[c], text_width(dc, number));
-        }
-    }
-    /* A column is as wide as its heading or its widest cell: the aligned
-     * size, and the text after it. */
-    x[0] = name_x + name_w + gap;
-    for (c = 0; c < columns; c++) {
-        int w = text_width(dc, head[c]);
-
-        if (w_w[c])
-            size_w[c] = w_w[c] + times_w + h_w[c];
-        for (i = 0; i < count; i++) {
-            const theme_cell_t *cell = &line[i].cell[c];
-            int t = text_width(dc, cell->text);
-
-            w = max(w, cell->w ? size_w[c] + (t ? after + t : 0) : t);
-        }
-        x[c + 1] = x[c] + w + gap;
-    }
-    for (shown = columns; shown > 1 && x[shown] - gap > right;
-         shown--)
-        ;
-    SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, dim);
-    for (c = 0; c < shown; c++) {
-        SetRect(&r, x[c], rc->top + pad, right, rc->top + pad + pitch);
-        DrawTextA(dc, head[c], -1, &r, flags | DT_END_ELLIPSIS);
-    }
-    for (i = 0; i < count; i++) {
-        int top = rc->top + pad + (i + 1) * pitch;
-
-        if (s_dark_mode) {
-            HBRUSH stripe = CreateSolidBrush(game_face(line[i].game));
-
-            SetRect(&r, rc->left + scale_px(4), top + scale_px(2),
-                    rc->left + scale_px(8), top + pitch - scale_px(2));
-            FillRect(dc, &r, stripe);
-            DeleteObject(stripe);
-        }
-        SetRect(&r, name_x, top, x[0] - gap, top + pitch);
-        SetTextColor(dc, text);
-        DrawTextA(dc, line[i].name, -1, &r, flags | DT_END_ELLIPSIS);
-        for (c = 0; c < shown; c++) {
-            const theme_cell_t *cell = &line[i].cell[c];
-            int at = x[c], end = c == shown - 1 ? right : x[c + 1] - gap;
-
-            if (cell->w) {
-                snprintf(number, sizeof number, "%d", cell->w);
-                SetRect(&r, at, top, at + w_w[c], top + pitch);
-                SetTextColor(dc, text);
-                DrawTextA(dc, number, -1, &r, flags | DT_RIGHT);
-                SetRect(&r, at + w_w[c], top, at + w_w[c] + times_w,
-                        top + pitch);
-                SetTextColor(dc, dim);
-                DrawTextW(dc, L" \x00d7 ", 3, &r, flags);
-                snprintf(number, sizeof number, "%d", cell->h);
-                SetRect(&r, at + w_w[c] + times_w, top, end, top + pitch);
-                SetTextColor(dc, text);
-                DrawTextA(dc, number, -1, &r, flags);
-                at += size_w[c] + after;
-            }
-            if (!cell->text[0] || at >= end)
-                continue;
-            SetRect(&r, at, top, end, top + pitch);
-            SetTextColor(dc, cell->warn ? amber : cell->w ? dim : text);
-            DrawTextA(dc, cell->text, -1, &r, flags | DT_END_ELLIPSIS);
-        }
-    }
-done:
-    SelectObject(dc, old_font);
+    FillRect(draw->hDC, &rc, s_dark_mode ? s_page_brush :
+                                           GetSysColorBrush(COLOR_WINDOW));
+    SetBkMode(draw->hDC, TRANSPARENT);
+    SetTextColor(draw->hDC, ink);
+    DrawTextW(draw->hDC, first, -1, &rc, format);
+    rc.left += second_x;
+    DrawTextW(draw->hDC, second, -1, &rc, format);
+    SelectObject(draw->hDC, old_font);
 }
 
 LRESULT control_colour(int on_page, UINT message, WPARAM wparam,
@@ -422,14 +339,302 @@ void set_font(HWND h)
         SendMessage(h, WM_SETFONT, (WPARAM)s_font, TRUE);
 }
 
+/* ---- the parts Windows would draw at the monitor's scale -----------------
+ *
+ * These controls are Common Controls 5 (the DLL carries no manifest), which
+ * has no custom draw for a button and draws a dropdown's arrow and a
+ * checkbox's box at the system metrics of the monitor. So both are painted
+ * whole here, from the control's own state, and repainted after every message
+ * that lets the control draw on its own. */
+static WNDPROC s_mark_proc, s_combo_proc;
+
+static COLORREF accent(void)
+{
+    return s_dark_mode ? RGB(0, 120, 215) : GetSysColor(COLOR_HIGHLIGHT);
+}
+
+static void fill(HDC dc, const RECT *r, COLORREF colour)
+{
+    HBRUSH brush = CreateSolidBrush(colour);
+    FillRect(dc, r, brush);
+    DeleteObject(brush);
+}
+
+static int mark_type(HWND h)
+{
+    LONG_PTR style = GetWindowLongPtrA(h, GWL_STYLE);
+    return (int)(style & BS_TYPEMASK);
+}
+
+static int is_radio(HWND h)
+{
+    int type = mark_type(h);
+    return type == BS_RADIOBUTTON || type == BS_AUTORADIOBUTTON;
+}
+
+static void paint_mark(HWND h, HDC dc)
+{
+    LONG_PTR style = GetWindowLongPtrA(h, GWL_STYLE);
+    int enabled = IsWindowEnabled(h), radio = is_radio(h);
+    int on = SendMessage(h, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    int mark = scale_px(THEME_CHECK_MARK), text_x = scale_px(THEME_CHECK_TEXT_X);
+    int line, block, top, stroke = max(1, scale_px(2));
+    UINT format = DT_NOPREFIX | DT_LEFT |
+                  ((style & BS_MULTILINE) ? DT_WORDBREAK :
+                                            DT_SINGLELINE | DT_END_ELLIPSIS);
+    HBRUSH back = (HBRUSH)SendMessage(GetParent(h), WM_CTLCOLORSTATIC,
+                                      (WPARAM)dc, (LPARAM)h);
+    COLORREF ink = GetTextColor(dc), edge, face;
+    HFONT font = (HFONT)SendMessage(h, WM_GETFONT, 0, 0);
+    HGDIOBJ old_font = SelectObject(dc, font ? font : s_font);
+    RECT rc, text_rc, box;
+    TEXTMETRICA metrics;
+    char text[512];
+
+    GetClientRect(h, &rc);
+    FillRect(dc, &rc, back ? back : GetSysColorBrush(COLOR_BTNFACE));
+    GetWindowTextA(h, text, sizeof text);
+    GetTextMetricsA(dc, &metrics);
+    line = metrics.tmHeight;
+    SetRect(&text_rc, text_x, 0, rc.right, rc.bottom);
+    block = line;
+    if (text[0]) {
+        RECT measure = text_rc;
+        DrawTextA(dc, text, -1, &measure, format | DT_CALCRECT);
+        block = max(line, (int)(measure.bottom - measure.top));
+    }
+    /* The text block centred, and the mark on its first line. */
+    top = max(0, ((int)rc.bottom - block) / 2);
+    text_rc.top = top;
+    SetRect(&box, 0, top + (line - mark) / 2, mark, top + (line - mark) / 2 + mark);
+    if (!enabled)
+        ink = s_dark_mode ? RGB(125, 125, 128) : GetSysColor(COLOR_GRAYTEXT);
+    edge = !enabled ? ink : on ? accent() :
+           s_dark_mode ? RGB(160, 160, 164) : GetSysColor(COLOR_WINDOWTEXT);
+    face = s_dark_mode ? s_control_color : GetSysColor(COLOR_WINDOW);
+    {
+        HBRUSH brush = CreateSolidBrush(on && !radio ? edge : face);
+        HPEN pen = CreatePen(PS_SOLID, max(1, scale_px(1)), edge);
+        HGDIOBJ old_brush = SelectObject(dc, brush), old_pen = SelectObject(dc, pen);
+
+        if (radio)
+            Ellipse(dc, box.left, box.top, box.right, box.bottom);
+        else
+            Rectangle(dc, box.left, box.top, box.right, box.bottom);
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+        DeleteObject(pen);
+        DeleteObject(brush);
+    }
+    if (on && radio) {
+        RECT dot = box;
+        HBRUSH brush = CreateSolidBrush(edge);
+        HGDIOBJ old_brush = SelectObject(dc, brush),
+                old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+
+        InflateRect(&dot, -mark / 4, -mark / 4);
+        Ellipse(dc, dot.left, dot.top, dot.right + 1, dot.bottom + 1);
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+        DeleteObject(brush);
+    } else if (on) {
+        POINT tick[3];
+        HPEN pen = CreatePen(PS_SOLID, stroke, s_dark_mode ? RGB(255, 255, 255) :
+                             GetSysColor(COLOR_HIGHLIGHTTEXT));
+        HGDIOBJ old_pen = SelectObject(dc, pen);
+
+        tick[0].x = box.left + mark * 22 / 100; tick[0].y = box.top + mark * 52 / 100;
+        tick[1].x = box.left + mark * 42 / 100; tick[1].y = box.top + mark * 72 / 100;
+        tick[2].x = box.left + mark * 78 / 100; tick[2].y = box.top + mark * 30 / 100;
+        Polyline(dc, tick, 3);
+        SelectObject(dc, old_pen);
+        DeleteObject(pen);
+    }
+    if (text[0]) {
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, ink);
+        DrawTextA(dc, text, -1, &text_rc, format);
+        if (GetFocus() == h &&
+            !(SendMessage(h, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS)) {
+            RECT focus = text_rc;
+            DrawTextA(dc, text, -1, &focus, format | DT_CALCRECT);
+            InflateRect(&focus, scale_px(2), scale_px(1));
+            DrawFocusRect(dc, &focus);
+        }
+    }
+    SelectObject(dc, old_font);
+}
+
+/* After each of these the control may have drawn itself; paint it over. */
+static int repaint_after(UINT message)
+{
+    switch (message) {
+    case BM_SETCHECK: case BM_SETSTATE: case BM_CLICK:
+    case CB_SETCURSEL: case CB_SELECTSTRING: case CB_SHOWDROPDOWN:
+    case CB_ADDSTRING: case CB_DELETESTRING: case CB_RESETCONTENT:
+    case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+    case WM_KEYDOWN: case WM_KEYUP: case WM_SYSKEYDOWN: case WM_CHAR:
+    case WM_SETFOCUS: case WM_KILLFOCUS: case WM_ENABLE: case WM_SETTEXT:
+    case WM_SETFONT: case WM_UPDATEUISTATE: case WM_CAPTURECHANGED:
+    case WM_MOUSEWHEEL: case WM_COMMAND:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static LRESULT painted(HWND h, UINT message, WPARAM wparam, LPARAM lparam,
+                       WNDPROC next, void (*paint)(HWND, HDC))
+{
+    LRESULT result;
+
+    if (message == WM_ERASEBKGND)
+        return TRUE;
+    if (message == WM_PAINT || message == WM_PRINTCLIENT) {
+        PAINTSTRUCT ps;
+        HDC dc = message == WM_PAINT ? BeginPaint(h, &ps) : (HDC)wparam;
+
+        paint(h, dc);
+        if (message == WM_PAINT)
+            EndPaint(h, &ps);
+        return 0;
+    }
+    result = CallWindowProcA(next, h, message, wparam, lparam);
+    if (repaint_after(message) ||
+        (message == WM_MOUSEMOVE && GetCapture() == h))
+        InvalidateRect(h, NULL, FALSE);
+    return result;
+}
+
+static LRESULT CALLBACK mark_proc(HWND h, UINT message, WPARAM wparam,
+                                  LPARAM lparam)
+{
+    return painted(h, message, wparam, lparam, s_mark_proc, paint_mark);
+}
+
+static void paint_combo(HWND h, HDC dc)
+{
+    int enabled = IsWindowEnabled(h), focus = GetFocus() == h;
+    COLORREF face = s_dark_mode ? (enabled ? s_control_color : RGB(38, 38, 40)) :
+                    GetSysColor(enabled ? COLOR_WINDOW : COLOR_BTNFACE);
+    COLORREF edge = focus ? accent() :
+                    s_dark_mode ? RGB(100, 100, 104) : GetSysColor(COLOR_WINDOWFRAME);
+    COLORREF ink = !enabled ?
+        (s_dark_mode ? RGB(125, 125, 128) : GetSysColor(COLOR_GRAYTEXT)) :
+        (s_dark_mode ? s_text_color : GetSysColor(COLOR_WINDOWTEXT));
+    HFONT font = (HFONT)SendMessage(h, WM_GETFONT, 0, 0);
+    HGDIOBJ old_font = SelectObject(dc, font ? font : s_font);
+    LRESULT sel = SendMessage(h, CB_GETCURSEL, 0, 0);
+    int side, chevron = scale_px(10), cx, cy;
+    char item[512] = "";
+    RECT rc, text_rc;
+    POINT arrow[3];
+
+    GetClientRect(h, &rc);
+    side = rc.bottom;
+    fill(dc, &rc, face);
+    {
+        HBRUSH brush = CreateSolidBrush(edge);
+        RECT frame = rc;
+        int i;
+
+        for (i = 0; i < max(1, scale_px(1)); i++) {
+            FrameRect(dc, &frame, brush);
+            InflateRect(&frame, -1, -1);
+        }
+        DeleteObject(brush);
+    }
+    if (sel != CB_ERR &&
+        SendMessage(h, CB_GETLBTEXTLEN, (WPARAM)sel, 0) < (LRESULT)sizeof item)
+        SendMessageA(h, CB_GETLBTEXT, (WPARAM)sel, (LPARAM)item);
+    SetRect(&text_rc, scale_px(8), 0, rc.right - side, rc.bottom);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, ink);
+    DrawTextA(dc, item, -1, &text_rc,
+              DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    cx = rc.right - side / 2;
+    cy = rc.bottom / 2;
+    arrow[0].x = cx - chevron / 2; arrow[0].y = cy - chevron / 4;
+    arrow[1].x = cx + chevron / 2; arrow[1].y = cy - chevron / 4;
+    arrow[2].x = cx;               arrow[2].y = cy + chevron / 4;
+    {
+        HBRUSH brush = CreateSolidBrush(ink);
+        HGDIOBJ old_brush = SelectObject(dc, brush),
+                old_pen = SelectObject(dc, GetStockObject(NULL_PEN));
+
+        Polygon(dc, arrow, 3);
+        SelectObject(dc, old_pen);
+        SelectObject(dc, old_brush);
+        DeleteObject(brush);
+    }
+    SelectObject(dc, old_font);
+}
+
+/* A CLOSED DROPDOWN UNDER THE POINTER TAKES THE WHEEL AND STEPS ITS CHOICE, so
+ * scrolling a page over one would change a setting nobody touched. The wheel
+ * goes to the page, as a slider's does; an open list keeps its own. */
+static LRESULT CALLBACK combo_proc(HWND h, UINT message, WPARAM wparam,
+                                   LPARAM lparam)
+{
+    if (message == WM_MOUSEWHEEL && !SendMessage(h, CB_GETDROPPEDSTATE, 0, 0))
+        return SendMessage(GetParent(h), message, wparam, lparam);
+    return painted(h, message, wparam, lparam, s_combo_proc, paint_combo);
+}
+
+int theme_draw_combo_item(const DRAWITEMSTRUCT *draw)
+{
+    char item[512] = "";
+    RECT text_rc;
+    int lit;
+
+    if (!draw || draw->CtlType != ODT_COMBOBOX)
+        return 0;
+    /* The closed face is paint_combo()'s, whole. */
+    if (draw->itemState & ODS_COMBOBOXEDIT) {
+        InvalidateRect(draw->hwndItem, NULL, FALSE);
+        return 1;
+    }
+    lit = (draw->itemState & ODS_SELECTED) != 0;
+    fill(draw->hDC, &draw->rcItem,
+         lit ? accent() : s_dark_mode ? s_control_color : GetSysColor(COLOR_WINDOW));
+    if (draw->itemID == (UINT)-1)
+        return 1;
+    if (SendMessage(draw->hwndItem, CB_GETLBTEXTLEN, draw->itemID, 0) <
+        (LRESULT)sizeof item)
+        SendMessageA(draw->hwndItem, CB_GETLBTEXT, draw->itemID, (LPARAM)item);
+    text_rc = draw->rcItem;
+    text_rc.left += scale_px(8);
+    SetBkMode(draw->hDC, TRANSPARENT);
+    SetTextColor(draw->hDC, lit ? (s_dark_mode ? RGB(255, 255, 255) :
+                                   GetSysColor(COLOR_HIGHLIGHTTEXT)) :
+                 s_dark_mode ? s_text_color : GetSysColor(COLOR_WINDOWTEXT));
+    DrawTextA(draw->hDC, item, -1, &text_rc,
+              DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+    return 1;
+}
+
 HWND make_control(DWORD ex, const char *class_name, const char *text,
                          DWORD style, int x, int y, int w, int h,
                          HWND parent, int id)
 {
+    int combo = !_stricmp(class_name, "COMBOBOX");
+    int trackbar = !_stricmp(class_name, TRACKBAR_CLASSA);
+    int mark = !_stricmp(class_name, "BUTTON") && !(style & BS_PUSHLIKE) &&
+               ((style & BS_TYPEMASK) == BS_CHECKBOX ||
+                (style & BS_TYPEMASK) == BS_AUTOCHECKBOX ||
+                (style & BS_TYPEMASK) == BS_RADIOBUTTON ||
+                (style & BS_TYPEMASK) == BS_AUTORADIOBUTTON);
+
     if (s_dark_mode && !_stricmp(class_name, "BUTTON") &&
         ((style & BS_TYPEMASK) == BS_PUSHBUTTON ||
          (style & BS_TYPEMASK) == BS_DEFPUSHBUTTON))
         style = (style & ~BS_TYPEMASK) | BS_OWNERDRAW;
+    /* Owner-drawn items, so a dropped list's rows are as tall as the control
+     * that opened it. */
+    if (combo)
+        style |= CBS_OWNERDRAWFIXED | CBS_HASSTRINGS;
+    if (trackbar)
+        style |= TBS_FIXEDLENGTH;
     /* A STATIC draws `&` as an underline under the next letter, and nothing
      * here is a mnemonic: a page name ("Files & Logging"), a device name or a
      * path would lose a character. text_block_height() measures DT_NOPREFIX,
@@ -443,6 +648,23 @@ HWND make_control(DWORD ex, const char *class_name, const char *text,
         s_instance, NULL);
     set_font(control);
     theme_control(control);
+    if (control && combo) {
+        SendMessage(control, CB_SETITEMHEIGHT, (WPARAM)-1,
+                    scale_px(THEME_CONTROL_H) - 6);
+        SendMessage(control, CB_SETITEMHEIGHT, 0,
+                    scale_px(THEME_CONTROL_H - 4));
+        if (!s_combo_proc)
+            s_combo_proc = (WNDPROC)GetWindowLongPtrA(control, GWLP_WNDPROC);
+        SetWindowLongPtrA(control, GWLP_WNDPROC, (LONG_PTR)combo_proc);
+    }
+    if (control && mark) {
+        if (!s_mark_proc)
+            s_mark_proc = (WNDPROC)GetWindowLongPtrA(control, GWLP_WNDPROC);
+        SetWindowLongPtrA(control, GWLP_WNDPROC, (LONG_PTR)mark_proc);
+    }
+    if (control && trackbar)
+        SendMessage(control, TBM_SETTHUMBLENGTH,
+                    (WPARAM)scale_px(THEME_CONTROL_H * 6 / 10), 0);
     return control;
 }
 
@@ -512,19 +734,33 @@ static UINT system_dpi(void)
     return dpi ? dpi : 96;
 }
 
-/* THE SCALE IS CHOSEN ONCE, AGAINST THE DESKTOP IT HAS TO FIT. The two-column
- * form begins at a 960x680 window, so a system DPI that would not leave room
- * for one is capped rather than obeyed: a faithful 200% on a 1366x768 laptop
- * is a window whose Apply button is off the bottom of the screen. */
-void theme_open(HINSTANCE instance, const RECT *work)
+/* A DPI THAT DOES NOT LEAVE ROOM FOR THE TWO-COLUMN FORM IS CAPPED rather than
+ * obeyed: that form begins at a 960x680 window, and a faithful 200% on a
+ * 1366x768 laptop is a window whose Apply button is off the bottom of the
+ * screen. */
+static UINT fit_work(UINT dpi, const RECT *work)
 {
-    s_instance = instance;
-    s_system_dpi = system_dpi();
-    s_dpi = s_system_dpi;
-    s_dpi = min(s_dpi, (UINT)MulDiv(work->right - work->left, 96, 960));
-    s_dpi = min(s_dpi, (UINT)MulDiv(work->bottom - work->top, 96, 680));
-    s_dpi = max(s_dpi, 96u);
-    initialise_palette();
+    dpi = min(dpi, (UINT)MulDiv(work->right - work->left, 96, 960));
+    dpi = min(dpi, (UINT)MulDiv(work->bottom - work->top, 96, 680));
+    return max(dpi, 96u);
+}
+
+/* Every face is the message font at a size and weight, so all six are made
+ * together and replaced together. */
+#define THEME_FONTS 6
+
+static void fonts_get(HFONT out[THEME_FONTS])
+{
+    out[0] = s_font;
+    out[1] = s_play_font;
+    out[2] = s_title_font;
+    out[3] = s_title_small_font;
+    out[4] = s_note_font;
+    out[5] = s_heading_font;
+}
+
+static void fonts_make(void)
+{
     s_font = create_message_font();
     s_play_font = create_bold_font(2, 1);
     s_title_font = create_bold_font(3, 2);
@@ -535,20 +771,81 @@ void theme_open(HINSTANCE instance, const RECT *work)
     s_heading_font = create_bold_font(1, 1);
 }
 
+static void fonts_delete(HFONT font[THEME_FONTS])
+{
+    int i;
+
+    for (i = 0; i < THEME_FONTS; i++)
+        if (font[i] && font[i] != GetStockObject(DEFAULT_GUI_FONT))
+            DeleteObject(font[i]);
+}
+
+void theme_open(HINSTANCE instance, const RECT *work)
+{
+    s_instance = instance;
+    s_system_dpi = system_dpi();
+    s_dpi = fit_work(s_system_dpi, work);
+    initialise_palette();
+    fonts_make();
+}
+
+UINT theme_floor_dpi(HWND h)
+{
+    typedef UINT (WINAPI *window_dpi_fn)(HWND);
+    window_dpi_fn fn = (window_dpi_fn)(uintptr_t)
+        GetProcAddress(GetModuleHandleA("user32.dll"), "GetDpiForWindow");
+    UINT dpi = fn ? fn(h) : 0;
+    MONITORINFO monitor;
+
+    if (!dpi)
+        dpi = s_system_dpi;
+    memset(&monitor, 0, sizeof monitor);
+    monitor.cbSize = sizeof monitor;
+    if (!GetMonitorInfoA(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST),
+                         &monitor))
+        return max(dpi, 96u);
+    return fit_work(dpi, &monitor.rcWork);
+}
+
+struct font_swap {
+    HFONT from[THEME_FONTS], to[THEME_FONTS];
+};
+
+static BOOL CALLBACK swap_font(HWND h, LPARAM data)
+{
+    const struct font_swap *swap = (const struct font_swap *)data;
+    HFONT font = (HFONT)SendMessage(h, WM_GETFONT, 0, 0);
+    int i;
+
+    for (i = 0; i < THEME_FONTS; i++)
+        if (font && font == swap->from[i]) {
+            SendMessage(h, WM_SETFONT, (WPARAM)swap->to[i], FALSE);
+            break;
+        }
+    return TRUE;
+}
+
+void theme_set_dpi(UINT dpi, HWND top)
+{
+    struct font_swap swap;
+
+    if (!dpi || dpi == s_dpi)
+        return;
+    fonts_get(swap.from);
+    s_dpi = dpi;
+    fonts_make();
+    fonts_get(swap.to);
+    if (top)
+        EnumChildWindows(top, swap_font, (LPARAM)&swap);
+    fonts_delete(swap.from);
+}
+
 void theme_close(void)
 {
-    if (s_font && s_font != GetStockObject(DEFAULT_GUI_FONT))
-        DeleteObject(s_font);
-    if (s_play_font)
-        DeleteObject(s_play_font);
-    if (s_title_font)
-        DeleteObject(s_title_font);
-    if (s_title_small_font)
-        DeleteObject(s_title_small_font);
-    if (s_note_font)
-        DeleteObject(s_note_font);
-    if (s_heading_font)
-        DeleteObject(s_heading_font);
+    HFONT font[THEME_FONTS];
+
+    fonts_get(font);
+    fonts_delete(font);
     s_heading_font = NULL;
     s_font = NULL;
     s_play_font = NULL;

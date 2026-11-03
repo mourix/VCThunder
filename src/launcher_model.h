@@ -139,15 +139,27 @@ const char *model_title_name(int title);
 int         model_title_raw(int title, const char *section, const char *key,
                             char *out, size_t out_size);
 
-/* BEZEL ART, PER CABINET, the Graphics page's Bezel box.
+/* BEZEL ART, PER GAME, the Graphics page's Bezel box: a row per cabinet and
+ * one for Ultimate Arctic Thunder, which has Arctic's cabinet and its own
+ * screen. Its row starts as Arctic's (no [uarctic.graphics] line) and is its
+ * own once it is chosen, turned off or turned on.
  *   _get          whether it is on, and the file the row shows: one chosen and
  *                 not yet applied, else the file's own path, else
- *                 bezels\<title>.png if that is there; "" when none
+ *                 bezels\<title>.png if that is there; "" when none. A row
+ *                 that inherits shows Arctic's
+ *   _own          the file the row would turn on by itself: _get's, except
+ *                 that a row that inherits has only its own file, or ""
+ *   _inherits     1 while Ultimate's row is Arctic's
+ *   _inherit      Ultimate's row back to Arctic's; Apply drops its line
  *   _set_enabled  on or off; nothing is written until Apply
  *   _choose       a file the caller has checked; turns it on. model_save()
  *                 copies it to bezels\<title>.png and writes that path
  *   _destination  bezels\<title>.png beside the ini, where a choice goes */
+enum { MODEL_BEZEL_UARCTIC = MODEL_TITLES, MODEL_BEZELS };
 int         model_bezel_get(int title, char *path, size_t path_size);
+void        model_bezel_own(int title, char *path, size_t path_size);
+int         model_bezel_inherits(int title);
+void        model_bezel_inherit(int title);
 void        model_bezel_set_enabled(int title, int on);
 void        model_bezel_choose(int title, const char *source);
 void        model_bezel_destination(int title, char *out, size_t out_size);

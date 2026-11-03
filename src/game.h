@@ -19,6 +19,7 @@
 #define VCT_MAX_MESH_LOOPS  32      /* Hydro 13 instrumentable loop heads        */
 #define VCT_MAX_HUD_ELEMS   16      /* Offroad 10 HUD/attract draw functions     */
 #define VCT_MAX_HUD_TEXTS   16      /* Offroad 7 race-HUD gametext pointers      */
+#define VCT_MAX_SPLASH_ROUTES 3     /* Offroad 3 routes to its title load        */
 
 typedef struct { uint32_t va; const char *name; int argbytes; } game_fn_t;
 typedef struct { uint32_t slot; const char *name; } game_imp_t;
@@ -118,6 +119,11 @@ typedef struct game_profile {
     uint32_t hud_text_draw, text_printstr;
     uint32_t text_glyph_count, text_glyph_buf, text_glyph_stride, text_glyph_x;
     uint32_t hud_finish_flags, hud_finish_bit;
+    /* The two splash loads, title after START and pre-race: the call each
+     * full-screen splash stays up for (d_splash_loads). Offroad reaches its
+     * title load by three routes, Hydro by one; unused routes are 0. */
+    uint32_t splash_title_site[VCT_MAX_SPLASH_ROUTES];
+    uint32_t splash_race_site;
     /* Hydro's tracking cards: the return addresses of the card draws in
      * _boats_DrawAllTrackingNumbers, and the float its bottom cards' x is
      * scaled by. 0 in Offroad, whose racer tags are a ws_racer_tag repair. */

@@ -47,7 +47,7 @@ for _n, _line in enumerate(_def_lines):
             break
     if "SF_UNSHIPPED" in "\n".join(_row):
         unshipped_keys.add((_m.group(1), _m.group(2)))
-dev = re.findall(r'^SETTING_DEV\("([^"]+)",\s*"([^"]+)"', DEF, re.M)
+dev = re.findall(r'^SETTING_(?:DEV|OWN)\("([^"]+)",\s*"([^"]+)"', DEF, re.M)
 
 if not shown:
     raise SystemExit("settings.def parsed to nothing: has the macro changed?")

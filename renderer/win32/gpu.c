@@ -2,33 +2,24 @@
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
  * The portable core remains the authority for state and memory semantics.
- * Preload SDL and driver modules before the host maps the game image.
+ * Preload SDL and driver modules before the host maps the game image. The
+ * texture cache is gpu_tex.c and the 2D layer gpu_layer.c (gpu_int.h).
  */
 #define COBJMACROS
 #include <windows.h>
-#include <d3dcompiler.h>
 #include <SDL3/SDL.h>
 
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "../core/vgl.h"
 #include "../core/vcglide.h"
-#include "gpu_shader.inc"
+#include "gpu_int.h"
+#include "gpu_shader_dxbc.h"
 
-#define GPU_TEX_CACHE 1024
-#define GPU_TEX_HASH 2048
-#define GPU_PALETTE_KEYS 256
 #define GPU_PIPE_CACHE 128
-/* Project-owned batching capacity; see the matching measured rationale in
- * gpu_shader.hlsl. Each triangle contributes twelve float4 vertex vectors. */
-#define GPU_BATCH_TRIANGLES 64
-#define GPU_BATCH_VECTORS   (GPU_BATCH_TRIANGLES * 12)
-/* Batches of one 2D run held until they are drawn into the run's two
- * targets; a full list is drawn and emptied, so this is a capacity only. */
-#define GPU_RUN_BATCHES     32
-#define GPU_HITCH_LOG_MS     25.0
 /* SDL's D3D12 transfer contract requires 256-byte texture row pitches and
  * 512-byte transfer offsets to avoid an internal repack. One reusable 8 MiB
  * logical buffer holds the largest native LFB plus any texture chain; SDL's
@@ -39,51 +30,18 @@
 #define GPU_UPLOAD_OFFSET_ALIGN 512u
 
 typedef struct {
-    int used, tmu;
-    uint32_t base;
-    int even_odd, small_lod, large_lod, aspect, format;
-    unsigned mem_ver;
-    uint64_t pal_key;
-    uint64_t age;
-    int hash_next;
-    SDL_GPUTexture *texture;
-} tex_cache_t;
-
-typedef struct {
-    uint64_t hash;
-    uint32_t rgba[256];
-} palette_key_t;
-
-typedef struct {
     int used;
     uint64_t key;
     SDL_GPUGraphicsPipeline *pipeline;
 } pipe_cache_t;
 
-typedef union {
-    uint32_t u[20][4];
-    float f[20][4];
-} ps_data_t;
-
-/* A 2D batch (`is2d`) carries a second copy of its triangles at native
- * resolution, `vertex1`, sampled through `bind1`: the game's own address
- * modes, because the 2D layer is drawn exactly as 1x draws it. */
+/* `ps_key` is `ps` without the three fields that travel with each vertex,
+ * which is what a batch is keyed on. `gen` is unique to each fill. */
 typedef struct {
-    float vertex[GPU_BATCH_VECTORS][4];
-    float vertex1[GPU_BATCH_VECTORS][4];
-    ps_data_t ps;
-    SDL_GPUTextureSamplerBinding bind[2], bind1[2];
-    SDL_GPUGraphicsPipeline *pipe;
-    unsigned triangles;
-    int is2d;
-    int buffer, clip_x0, clip_y0, clip_x1, clip_y1;
-} draw_batch_t;
-
-typedef struct {
-    uint64_t version;
+    uint64_t version, gen;
     int valid;
     int layerable;
-    ps_data_t ps;
+    ps_data_t ps, ps_key;
     SDL_GPUTextureSamplerBinding bind[2];
     SDL_GPUGraphicsPipeline *pipe, *layer_pipe;
 } draw_state_t;
@@ -94,59 +52,21 @@ static HWND s_hwnd;
 static SDL_GPUShader *s_main_vs, *s_main_ps;
 static SDL_GPUShader *s_copy_vs, *s_overlay_ps, *s_clear_ps, *s_depth_resolve_ps;
 static SDL_GPUGraphicsPipeline *s_overlay_pipe, *s_clear_pipe, *s_depth_resolve_pipe;
-static SDL_GPUTexture *s_white;
-static SDL_GPUTexture *s_color[2], *s_depth;
+SDL_GPUTexture *s_white;
+SDL_GPUTexture *s_color[2], *s_depth;
 static SDL_GPUTexture *s_native, *s_native_depth, *s_lfb_tex, *s_display;
 
-/* ---- the 2D layer ----------------------------------------------------------
- * Above 1x, 2D is not drawn into the scaled target. Each colour buffer has a
- * native-resolution premultiplied layer (s_layer) holding the 2D on top of
- * its target, and the picture is target + layer magnified to the render
- * scale (s_layer_up, cached until the layer changes). 2D is a flat-w
- * triangle, as both titles draw it, an LFB write, or a clear.
- *
- * Whether a run of 2D is the layer or part of the scene is known only when
- * the run ends: a 3D draw after it makes it scene (Hydro's sky, Offroad's
- * horizon band and billboards). So a run is drawn twice as it goes, at the
- * render scale into s_run_hi with the scene's depth and at 1x into s_run_lo
- * with s_layer_depth, the scaled depth resolved to 1x when the run begins.
- * 3D next: s_run_hi is laid over the target. Anything else ends the run in
- * the layer: s_run_lo is laid over s_layer. Both blend the game's colour
- * and accumulate coverage in alpha, which is exact because over is
- * associative and both titles blend only SRC_ALPHA/ONE_MINUS_SRC_ALPHA (or
- * replace). Before scene drawing lands on a buffer whose layer holds
- * anything, the layer is folded into its target as it was displayed. */
-static SDL_GPUTexture *s_layer[2], *s_layer_up[2];
-static SDL_GPUTexture *s_native_lo, *s_native_up;   /* composed at 1x, magnified */
-static SDL_GPUTexture *s_fsr_easu;                  /* FSR's first pass */
-static SDL_GPUTexture *s_run_lo, *s_run_hi, *s_layer_depth;
-static SDL_GPUShader *s_over_ps, *s_upscale_ps, *s_clear_layer_ps;
-static SDL_GPUShader *s_clear_layer_color_ps, *s_layer_depth_ps;
-static SDL_GPUShader *s_compose_ps, *s_catmull_ps, *s_easu_ps, *s_rcas_ps;
-static SDL_GPUGraphicsPipeline *s_over_pipe, *s_upscale_pipe;
-static SDL_GPUGraphicsPipeline *s_clear_layer_pipe, *s_clear_layer_color_pipe;
-static SDL_GPUGraphicsPipeline *s_layer_depth_pipe, *s_lfb_layer_pipe;
-static SDL_GPUGraphicsPipeline *s_compose_pipe, *s_catmull_pipe;
-static SDL_GPUGraphicsPipeline *s_easu_pipe, *s_rcas_pipe;
-enum { MAGNIFY_BILINEAR, MAGNIFY_CATMULL_ROM, MAGNIFY_FSR1 };
-static int s_magnifier;         /* [graphics] upscale_2d */
 static int s_texmag_catmull;    /* VCGLIDE_TEXMAG = catmull_rom */
 static const char *s_swap_mode; /* the present mode the swapchain took */
-static int s_layer_used[2];     /* the layer holds something */
-static int s_layer_stale[2];    /* s_layer_up does not show it yet */
-static int s_run;               /* a 2D run is open, on s_run_buffer */
-static int s_run_buffer, s_run_ready, s_run_hi_ready;
-static unsigned s_run_count;
-static SDL_GPUSampler *s_samplers[16];
-static SDL_GPUCommandBuffer *s_cmd;
+SDL_GPUCommandBuffer *s_cmd;
 static SDL_GPUTransferBuffer *s_upload_arena;
 static Uint32 s_upload_offset;
 static int s_upload_cycle, s_upload_used;
 static SDL_GPURenderPass *s_pass;
 static int s_pass_buffer = -1;
 static draw_batch_t s_batch;
-static draw_batch_t s_run_list[GPU_RUN_BATCHES];
 static draw_state_t s_draw_state;
+static uint64_t s_draw_state_gen;   /* never reset, so a gen is never reused */
 static SDL_GPUGraphicsPipeline *s_pass_pipe;
 /* The bezel: its art, a mipmapped sampler, and two pipelines for the
  * swapchain's format, one laying the picture into it and one blending the art
@@ -164,21 +84,14 @@ static SDL_GPUGraphicsPipeline *s_gamma_pipe;
 static SDL_GPUTexture *s_gamma_lut, *s_gamma_src;
 static unsigned s_gamma_gen;
 static SDL_GPUTextureSamplerBinding s_pass_bind[2];
-static int s_pass_bind_valid, s_pass_scissor_valid, s_surface_pushed;
+static int s_pass_bind_valid, s_pass_scissor_valid;
+int s_surface_pushed;
 static SDL_Rect s_pass_scissor;
-static tex_cache_t s_tex_cache[GPU_TEX_CACHE];
-static int s_tex_hash[GPU_TEX_HASH];
-static tex_cache_t *s_bound_tex[VGL_TMUS];
-static palette_key_t s_palette_keys[GPU_PALETTE_KEYS];
-static unsigned s_palette_key_count;
-static unsigned s_palette_seen_ver[VGL_TMUS];
-static uint64_t s_palette_current_key[VGL_TMUS];
 static pipe_cache_t s_pipe_cache[GPU_PIPE_CACHE];
-static uint64_t s_age;
 static int s_preload_tried, s_ready, s_open, s_present, s_quit_posted;
-static int s_w, s_h, s_scale, s_iw, s_ih;
-static int s_rx, s_ry, s_rw, s_rh;
-static int s_vx0, s_vy0, s_vx1, s_vy1;
+int s_w, s_h, s_scale, s_iw, s_ih;
+int s_rx, s_ry, s_rw, s_rh;
+int s_vx0, s_vy0, s_vx1, s_vy1;
 static int s_dirty[2];
 static int s_depth_dirty;
 static SDL_GPUTransferBuffer *s_download;
@@ -188,12 +101,11 @@ static LARGE_INTEGER s_fps_start;
 static unsigned s_fps_frames;
 static uint64_t s_tex_uploads, s_tex_upload_bytes;
 static uint64_t s_lfb_uploads, s_lfb_syncs, s_fence_waits, s_frame_waits;
-static uint64_t s_draw_batches, s_batched_triangles;
-static uint64_t s_tex_lookups, s_tex_probes;
+uint64_t s_draw_batches, s_batched_triangles;
 static uint64_t s_submissions;
 static uint64_t s_report_batches, s_report_triangles, s_report_lookups;
 static uint64_t s_report_submissions, s_report_uploads, s_report_upload_bytes;
-static uint64_t s_frame_index;
+uint64_t s_frame_index;
 
 /* ---- a lost device ------------------------------------------------------ */
 /* DXGI_ERROR_DEVICE_HUNG does not clear: once the device is gone every call
@@ -210,10 +122,6 @@ static uint64_t s_frame_index;
 #define GPU_LOSS_FRAMES   30u   /* consecutive failing frames: one second */
 #define GPU_FAIL_LOG_MAX   3u   /* lines per site, for the life of the run */
 
-enum {
-    GF_COMMAND, GF_SUBMIT, GF_FENCE, GF_SWAPCHAIN, GF_TEXTURE, GF_UPLOAD,
-    GF_PIPELINE, GF_RENDERPASS, GF_COPYPASS, GF_SAMPLER, GF_COUNT
-};
 static const char *const s_fail_what[GF_COUNT] = {
     "cannot acquire command buffer",
     "command submission failed",
@@ -244,14 +152,14 @@ static unsigned s_fail_logged[GF_COUNT];
 static uint64_t s_fail_total[GF_COUNT];
 static unsigned s_fail_frames;          /* consecutive frames carrying one */
 static int      s_fail_in_frame;
-static int      s_lost;                 /* latched: the device is gone */
+int             s_lost;                 /* latched: the device is gone */
 static uint64_t s_fault_at;             /* injection; 0 = off */
 static int      s_fault_pass_only;      /* fail only the render pass */
 static char     s_fail_first[192];
 
 /* Every SDL failure on the frame path routes here. Its cost does not grow with
  * the frame rate: the log budget is per site and for the whole run. */
-static void gpu_failed(int site)
+void gpu_failed(int site)
 {
     const char *err = SDL_GetError();
 
@@ -278,7 +186,7 @@ static void gpu_failed(int site)
  * prove. */
 /* `site` is the GF_* the caller is about to attempt, so a `renderpass`
  * injection can leave everything else working. */
-static int gpu_fault_injected_at(int site)
+int gpu_fault_injected_at(int site)
 {
     if (!s_fault_at || s_frame_index < s_fault_at)
         return 0;
@@ -328,14 +236,7 @@ int vgl_gpu_lost(void)
     return s_lost;
 }
 
-static void flush_batch(void);
-static void run_draw(void);
-static void blit(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *src,
-                 int sx, int sy, int sw, int sh, SDL_GPUTexture *dst,
-                 int dx, int dy, int dw, int dh, SDL_GPULoadOp load,
-                 SDL_GPUFilter filter);
-
-static double elapsed_ms(LARGE_INTEGER begin, LARGE_INTEGER end)
+double elapsed_ms(LARGE_INTEGER begin, LARGE_INTEGER end)
 {
     if (!s_clock_freq.QuadPart)
         return 0.0;
@@ -434,13 +335,13 @@ static void settle_frame(void)
     SDL_ReleaseGPUFence(s_dev, fence);
 }
 
-static SDL_GPUDevice *device(void)
+SDL_GPUDevice *device(void)
 {
     settle_frame();
     return s_dev;
 }
 
-static SDL_GPUTexture *make_texture(SDL_GPUTextureFormat format,
+SDL_GPUTexture *make_texture(SDL_GPUTextureFormat format,
                                     SDL_GPUTextureUsageFlags usage,
                                     unsigned w, unsigned h, unsigned levels)
 {
@@ -474,7 +375,7 @@ static SDL_GPUTexture *make_texture(SDL_GPUTextureFormat format,
     return texture;
 }
 
-static void end_pass(void)
+void end_pass(void)
 {
     if (s_pass) {
         SDL_EndGPURenderPass(s_pass);
@@ -544,7 +445,7 @@ static int submit_wait(SDL_GPUCommandBuffer *cmd)
     return ok ? 1 : 0;
 }
 
-static SDL_GPUCommandBuffer *command(void)
+SDL_GPUCommandBuffer *command(void)
 {
     if (s_lost)
         return NULL;
@@ -594,40 +495,20 @@ static int reserve_upload(Uint32 bytes, Uint32 *offset, uint8_t **map)
     return 1;
 }
 
-static SDL_GPUShader *make_shader(ID3DBlob *blob, SDL_GPUShaderStage stage,
+SDL_GPUShader *make_shader(const unsigned char *code, size_t size,
+                                  SDL_GPUShaderStage stage,
                                   unsigned samplers, unsigned uniforms)
 {
     SDL_GPUShaderCreateInfo ci;
     memset(&ci, 0, sizeof ci);
-    ci.code = (const Uint8 *)ID3D10Blob_GetBufferPointer(blob);
-    ci.code_size = ID3D10Blob_GetBufferSize(blob);
+    ci.code = code;
+    ci.code_size = size;
     ci.entrypoint = "main";
     ci.format = SDL_GPU_SHADERFORMAT_DXBC;
     ci.stage = stage;
     ci.num_samplers = samplers;
     ci.num_uniform_buffers = uniforms;
     return SDL_CreateGPUShader(device(), &ci);
-}
-
-static ID3DBlob *compile_shader(const char *entry, const char *target)
-{
-    ID3DBlob *code = NULL, *errors = NULL;
-    HRESULT hr = D3DCompile(vgl_gpu_shader_source,
-                            sizeof vgl_gpu_shader_source - 1,
-                            "renderer/win32/gpu_shader.hlsl", NULL, NULL,
-                            entry, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-                            &code, &errors);
-    if (FAILED(hr)) {
-        const char *why = errors ?
-            (const char *)ID3D10Blob_GetBufferPointer(errors) : "no detail";
-        vgl_log(0, "gpu: HLSL %s/%s compilation failed (0x%08lx): %s",
-                entry, target, (unsigned long)hr, why);
-        if (errors) ID3D10Blob_Release(errors);
-        if (code) ID3D10Blob_Release(code);
-        return NULL;
-    }
-    if (errors) ID3D10Blob_Release(errors);
-    return code;
 }
 
 static SDL_GPUGraphicsPipeline *fixed_pipeline(SDL_GPUShader *vs,
@@ -663,7 +544,7 @@ static SDL_GPUGraphicsPipeline *fixed_pipeline(SDL_GPUShader *vs,
 /* A full-quad pass for the 2D layer: RGBA8, all four channels written
  * (`mask` 0 writes none), optionally a depth target written ALWAYS, and
  * optionally blending a premultiplied source over the destination. */
-static SDL_GPUGraphicsPipeline *layer_pipeline(SDL_GPUShader *ps, int depth,
+SDL_GPUGraphicsPipeline *layer_pipeline(SDL_GPUShader *ps, int depth,
                                                int over, int mask)
 {
     SDL_GPUColorTargetDescription color;
@@ -793,7 +674,7 @@ static int queue_rgba(SDL_GPUTexture *texture, unsigned level,
  * from avoiding a CPU-side RGBA allocation/copy, grouping is important for
  * the small levels: ungrouped, Venice manufactures about 204 transfer objects
  * per frame from only one real texture-memory download. */
-static int queue_texture_mips(SDL_GPUTexture *texture, int tmu,
+int queue_texture_mips(SDL_GPUTexture *texture, int tmu,
                               uint32_t dirty_mips)
 {
     const vgl_tmu_t *u = &vgl.tmu[tmu];
@@ -858,10 +739,6 @@ static int queue_texture_mips(SDL_GPUTexture *texture, int tmu,
 
 int vgl_gpu_preload(void)
 {
-    ID3DBlob *mvs = NULL, *mps = NULL, *cvs = NULL;
-    ID3DBlob *ops = NULL, *cps = NULL, *dps = NULL;
-    ID3DBlob *vps = NULL, *ups = NULL, *lps = NULL, *lcs = NULL, *lds = NULL;
-    ID3DBlob *xps = NULL, *crs = NULL, *eas = NULL, *rcs = NULL, *bzs = NULL;
     static const uint8_t white[4] = { 255, 255, 255, 255 };
 
     if (s_preload_tried)
@@ -872,53 +749,25 @@ int vgl_gpu_preload(void)
         vgl_log(0, "gpu: SDL3 initialization failed: %s", SDL_GetError());
         return 0;
     }
-    mvs = compile_shader("main_vs", "vs_5_1");
-    mps = compile_shader("main_ps", "ps_5_1");
-    cvs = compile_shader("copy_vs", "vs_5_1");
-    ops = compile_shader("overlay_ps", "ps_5_1");
-    cps = compile_shader("clear_ps", "ps_5_1");
-    dps = compile_shader("depth_resolve_ps", "ps_5_1");
-    vps = compile_shader("over_ps", "ps_5_1");
-    ups = compile_shader("upscale_bilinear_ps", "ps_5_1");
-    lps = compile_shader("clear_layer_ps", "ps_5_1");
-    lcs = compile_shader("clear_layer_color_ps", "ps_5_1");
-    lds = compile_shader("layer_depth_ps", "ps_5_1");
-    xps = compile_shader("compose_ps", "ps_5_1");
-    crs = compile_shader("upscale_catmull_ps", "ps_5_1");
-    eas = compile_shader("fsr_easu_ps", "ps_5_1");
-    rcs = compile_shader("fsr_rcas_ps", "ps_5_1");
-    bzs = compile_shader("bezel_ps", "ps_5_1");
-    if (!mvs || !mps || !cvs || !ops || !cps || !dps || !vps || !ups ||
-        !lps || !lcs || !lds || !xps || !crs || !eas || !rcs || !bzs)
-        goto done;
     s_dev = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_DXBC, false, "direct3d12");
     if (!s_dev) {
         vgl_log(0, "gpu: SDL3 could not create a Direct3D 12 device: %s",
                 SDL_GetError());
         goto done;
     }
-    s_main_vs = make_shader(mvs, SDL_GPU_SHADERSTAGE_VERTEX, 0, 2);
-    s_main_ps = make_shader(mps, SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1);
-    s_copy_vs = make_shader(cvs, SDL_GPU_SHADERSTAGE_VERTEX, 0, 1);
-    s_overlay_ps = make_shader(ops, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
-    s_clear_ps = make_shader(cps, SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 1);
-    s_depth_resolve_ps = make_shader(dps, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
-    s_over_ps = make_shader(vps, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
-    s_upscale_ps = make_shader(ups, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
-    s_clear_layer_ps = make_shader(lps, SDL_GPU_SHADERSTAGE_FRAGMENT, 0, 1);
-    s_clear_layer_color_ps = make_shader(lcs, SDL_GPU_SHADERSTAGE_FRAGMENT,
-                                         0, 1);
-    s_layer_depth_ps = make_shader(lds, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
-    s_compose_ps = make_shader(xps, SDL_GPU_SHADERSTAGE_FRAGMENT, 3, 1);
-    s_catmull_ps = make_shader(crs, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
-    s_easu_ps = make_shader(eas, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
-    s_rcas_ps = make_shader(rcs, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
-    s_bezel_ps = make_shader(bzs, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 0);
+#define VS SDL_GPU_SHADERSTAGE_VERTEX
+#define PS SDL_GPU_SHADERSTAGE_FRAGMENT
+    s_main_vs = make_shader(DXBC(main_vs), VS, 0, 2);
+    s_main_ps = make_shader(DXBC(main_ps), PS, 2, 1);
+    s_copy_vs = make_shader(DXBC(copy_vs), VS, 0, 1);
+    s_overlay_ps = make_shader(DXBC(overlay_ps), PS, 1, 1);
+    s_clear_ps = make_shader(DXBC(clear_ps), PS, 0, 1);
+    s_depth_resolve_ps = make_shader(DXBC(depth_resolve_ps), PS, 1, 1);
+    s_bezel_ps = make_shader(DXBC(bezel_ps), PS, 1, 0);
+#undef VS
+#undef PS
     if (!s_main_vs || !s_main_ps || !s_copy_vs || !s_overlay_ps || !s_clear_ps ||
-        !s_depth_resolve_ps || !s_over_ps || !s_upscale_ps ||
-        !s_clear_layer_ps || !s_clear_layer_color_ps || !s_layer_depth_ps ||
-        !s_compose_ps || !s_catmull_ps || !s_easu_ps || !s_rcas_ps ||
-        !s_bezel_ps) {
+        !s_depth_resolve_ps || !s_bezel_ps) {
         vgl_log(0, "gpu: SDL3 shader creation failed: %s", SDL_GetError());
         goto done;
     }
@@ -928,33 +777,18 @@ int vgl_gpu_preload(void)
                                   SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM, 1);
     s_depth_resolve_pipe = fixed_pipeline(s_copy_vs, s_depth_resolve_ps,
                                           SDL_GPU_TEXTUREFORMAT_R16_UNORM, 0);
-    s_over_pipe = layer_pipeline(s_over_ps, 0, 1, 1);
-    s_upscale_pipe = layer_pipeline(s_upscale_ps, 0, 0, 1);
-    s_clear_layer_pipe = layer_pipeline(s_clear_layer_ps, 1, 0, 1);
-    s_clear_layer_color_pipe = layer_pipeline(s_clear_layer_color_ps, 0, 0, 1);
-    s_layer_depth_pipe = layer_pipeline(s_layer_depth_ps, 1, 0, 0);
-    s_lfb_layer_pipe = layer_pipeline(s_overlay_ps, 0, 0, 1);
-    s_compose_pipe = layer_pipeline(s_compose_ps, 0, 1, 1);
-    s_catmull_pipe = layer_pipeline(s_catmull_ps, 0, 0, 1);
-    s_easu_pipe = layer_pipeline(s_easu_ps, 0, 0, 1);
-    s_rcas_pipe = layer_pipeline(s_rcas_ps, 0, 0, 1);
     s_white = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
                            SDL_GPU_TEXTUREUSAGE_SAMPLER, 1, 1, 1);
     if (!s_overlay_pipe || !s_clear_pipe || !s_depth_resolve_pipe || !s_white ||
-        !s_over_pipe || !s_upscale_pipe || !s_clear_layer_pipe ||
-        !s_clear_layer_color_pipe || !s_layer_depth_pipe || !s_lfb_layer_pipe ||
-        !s_compose_pipe || !s_catmull_pipe || !s_easu_pipe || !s_rcas_pipe ||
         !upload_rgba(s_white, 0, 1, 1, white)) {
         vgl_log(0, "gpu: fixed resource creation failed: %s", SDL_GetError());
         goto done;
     }
+    if (!layer_preload(s_overlay_ps))
+        goto done;
     {
-        ID3DBlob *gms = compile_shader("gamma_ps", "ps_5_1");
-
-        if (gms) {
-            s_gamma_ps = make_shader(gms, SDL_GPU_SHADERSTAGE_FRAGMENT, 2, 1);
-            ID3D10Blob_Release(gms);
-        }
+        s_gamma_ps = make_shader(DXBC(gamma_ps), SDL_GPU_SHADERSTAGE_FRAGMENT,
+                                 2, 1);
         if (s_gamma_ps)
             s_gamma_pipe = layer_pipeline(s_gamma_ps, 0, 0, 1);
         s_gamma_lut = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
@@ -970,22 +804,6 @@ int vgl_gpu_preload(void)
             SDL_GetGPUDeviceDriver(device()));
 
 done:
-    if (mvs) ID3D10Blob_Release(mvs);
-    if (mps) ID3D10Blob_Release(mps);
-    if (cvs) ID3D10Blob_Release(cvs);
-    if (ops) ID3D10Blob_Release(ops);
-    if (cps) ID3D10Blob_Release(cps);
-    if (dps) ID3D10Blob_Release(dps);
-    if (vps) ID3D10Blob_Release(vps);
-    if (ups) ID3D10Blob_Release(ups);
-    if (lps) ID3D10Blob_Release(lps);
-    if (lcs) ID3D10Blob_Release(lcs);
-    if (lds) ID3D10Blob_Release(lds);
-    if (xps) ID3D10Blob_Release(xps);
-    if (crs) ID3D10Blob_Release(crs);
-    if (eas) ID3D10Blob_Release(eas);
-    if (rcs) ID3D10Blob_Release(rcs);
-    if (bzs) ID3D10Blob_Release(bzs);
     return s_ready;
 }
 
@@ -994,17 +812,7 @@ static void release_surface_resources(void)
     int i;
     submit();
     if (s_dev) SDL_WaitForGPUIdle(device());
-    for (i = 0; i < GPU_TEX_CACHE; i++) {
-        if (s_tex_cache[i].texture)
-            SDL_ReleaseGPUTexture(device(), s_tex_cache[i].texture);
-        memset(&s_tex_cache[i], 0, sizeof s_tex_cache[i]);
-    }
-    memset(s_tex_hash, 0, sizeof s_tex_hash);
-    memset(s_bound_tex, 0, sizeof s_bound_tex);
-    memset(s_palette_keys, 0, sizeof s_palette_keys);
-    s_palette_key_count = 0;
-    memset(s_palette_seen_ver, 0, sizeof s_palette_seen_ver);
-    memset(s_palette_current_key, 0, sizeof s_palette_current_key);
+    gpu_tex_release();
     if (s_upload_arena)
         SDL_ReleaseGPUTransferBuffer(device(), s_upload_arena);
     s_upload_arena = NULL;
@@ -1025,23 +833,7 @@ static void release_surface_resources(void)
     s_depth = s_native = s_native_depth = s_lfb_tex = s_display = NULL;
     if (s_gamma_src) SDL_ReleaseGPUTexture(device(), s_gamma_src);
     s_gamma_src = NULL;
-    for (i = 0; i < 2; i++) {
-        if (s_layer[i]) SDL_ReleaseGPUTexture(device(), s_layer[i]);
-        if (s_layer_up[i]) SDL_ReleaseGPUTexture(device(), s_layer_up[i]);
-        s_layer[i] = s_layer_up[i] = NULL;
-        s_layer_used[i] = 0;
-        s_layer_stale[i] = 1;
-    }
-    if (s_native_lo) SDL_ReleaseGPUTexture(device(), s_native_lo);
-    if (s_native_up) SDL_ReleaseGPUTexture(device(), s_native_up);
-    if (s_fsr_easu) SDL_ReleaseGPUTexture(device(), s_fsr_easu);
-    s_native_lo = s_native_up = s_fsr_easu = NULL;
-    if (s_run_lo) SDL_ReleaseGPUTexture(device(), s_run_lo);
-    if (s_run_hi) SDL_ReleaseGPUTexture(device(), s_run_hi);
-    if (s_layer_depth) SDL_ReleaseGPUTexture(device(), s_layer_depth);
-    s_run_lo = s_run_hi = s_layer_depth = NULL;
-    s_run = s_run_ready = s_run_hi_ready = 0;
-    s_run_count = 0;
+    layer_release_targets();
 }
 
 static int create_targets(int scale)
@@ -1072,37 +864,8 @@ static int create_targets(int scale)
     tci.size = (Uint32)((size_t)s_w * s_h * 4);   /* the wider of the two */
     s_download = SDL_CreateGPUTransferBuffer(device(), &tci);
     s_depth_dirty = 1;
-    if (scale > 1) {
-        int i;
-        for (i = 0; i < 2; i++) {
-            s_layer[i] = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                                      usage, s_w, s_h, 1);
-            s_layer_up[i] = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                                         usage, s_iw, s_ih, 1);
-            if (!s_layer[i] || !s_layer_up[i])
-                return 0;
-        }
-        s_run_lo = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                                usage, s_w, s_h, 1);
-        s_run_hi = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                                usage, s_iw, s_ih, 1);
-        s_layer_depth = make_texture(SDL_GPU_TEXTUREFORMAT_D16_UNORM,
-                                     SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
-                                     s_w, s_h, 1);
-        s_native_lo = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                                   usage, s_w, s_h, 1);
-        s_native_up = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                                   usage, s_iw, s_ih, 1);
-        if (!s_run_lo || !s_run_hi || !s_layer_depth || !s_native_lo ||
-            !s_native_up)
-            return 0;
-        if (s_magnifier == MAGNIFY_FSR1) {
-            s_fsr_easu = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                                      usage, s_iw, s_ih, 1);
-            if (!s_fsr_easu)
-                return 0;
-        }
-    }
+    if (scale > 1 && !layer_create_targets())
+        return 0;
     return s_color[0] && s_color[1] && s_depth && s_native &&
            s_native_depth && s_lfb_tex && s_download;
 }
@@ -1373,35 +1136,49 @@ static int create_window(void *caller_window, int window_scale)
         return 0;
     }
     /* A claimed swapchain defaults to VSYNC, which waits on the display and
-     * can make the games miss their own deadline.
-     * Mailbox is the other mode that never waits; it just does not tear. */
+     * can make the games miss their own deadline. Two modes never wait:
+     * mailbox, which shows the newest picture at the retrace and so never
+     * tears, and immediate, which tears on a fixed-refresh display but is
+     * what lets a variable-refresh one follow the game. `vsync = auto` is a
+     * promise not to tear, so it takes mailbox or else VSYNC; `off` prefers
+     * immediate, then mailbox, then VSYNC. */
     {
-        static const struct {
+        typedef struct {
             SDL_GPUPresentMode mode;
             const char *name;
-        } k_modes[] = {
+        } swap_mode_t;
+        static const swap_mode_t k_auto[] = {
+            { SDL_GPU_PRESENTMODE_MAILBOX,   "mailbox" },
+        }, k_off[] = {
             { SDL_GPU_PRESENTMODE_IMMEDIATE, "immediate" },
             { SDL_GPU_PRESENTMODE_MAILBOX,   "mailbox" },
         };
+        int off = strcmp(vgl_cfg.vsync, "off") == 0;
+        const swap_mode_t *modes = off ? k_off : k_auto;
+        size_t i, n = off ? sizeof k_off / sizeof k_off[0]
+                          : sizeof k_auto / sizeof k_auto[0];
         char why[160] = "not supported";
-        size_t i;
 
         s_swap_mode = "vsync";
-        for (i = 0; i < sizeof k_modes / sizeof k_modes[0]; i++) {
+        for (i = 0; i < n; i++) {
             if (!SDL_WindowSupportsGPUPresentMode(device(), s_window,
-                                                  k_modes[i].mode))
+                                                  modes[i].mode))
                 continue;
             if (SDL_SetGPUSwapchainParameters(device(), s_window,
-                    SDL_GPU_SWAPCHAINCOMPOSITION_SDR, k_modes[i].mode)) {
-                s_swap_mode = k_modes[i].name;
+                    SDL_GPU_SWAPCHAINCOMPOSITION_SDR, modes[i].mode)) {
+                s_swap_mode = modes[i].name;
                 break;
             }
-            snprintf(why, sizeof why, "%s refused: %s", k_modes[i].name,
+            snprintf(why, sizeof why, "%s refused: %s", modes[i].name,
                      SDL_GetError());
         }
-        if (i == sizeof k_modes / sizeof k_modes[0])
-            vgl_log(0, "gpu: WARNING no present mode that never waits (%s); "
-                    "presenting with vsync, which can slow the game", why);
+        if (i == n)
+            vgl_log(0, "gpu: WARNING no present mode that never waits%s (%s); "
+                    "presenting with vsync, which can slow the game",
+                    off ? "" : " or tears", why);
+        else if (i)
+            vgl_log(0, "gpu: vsync = %s, but its present mode is not "
+                    "available; using %s", vgl_cfg.vsync, s_swap_mode);
     }
     /* Bounds nothing: settle_frame() finishes every submission before the
      * next is recorded, so one frame is in flight whatever this says. Three
@@ -1475,9 +1252,7 @@ int vgl_gpu_open(void *caller_window, int w, int h, int raster_w, int raster_h,
      * should not depend on that. */
     memset(&s_batch, 0, sizeof s_batch);
     memset(&s_draw_state, 0, sizeof s_draw_state);
-    s_magnifier = !strcmp(vgl_cfg.upscale_2d, "catmull_rom") ? MAGNIFY_CATMULL_ROM
-                : !strcmp(vgl_cfg.upscale_2d, "fsr1") ? MAGNIFY_FSR1
-                : MAGNIFY_BILINEAR;
+    layer_configure();
     s_texmag_catmull = !strcmp(vgl_cfg.texmag, "catmull_rom");
     scale = render_scale;
     while (scale >= 1) {
@@ -1506,10 +1281,7 @@ int vgl_gpu_open(void *caller_window, int w, int h, int raster_w, int raster_h,
     if (present)
         bezel_open();
     memset(s_dirty, 0, sizeof s_dirty);
-    memset(s_layer_used, 0, sizeof s_layer_used);
-    s_layer_stale[0] = s_layer_stale[1] = 1;
-    s_run = s_run_ready = s_run_hi_ready = 0;
-    s_run_count = 0;
+    layer_forget();
     s_pass_pipe = NULL;
     s_pass_bind_valid = s_pass_scissor_valid = s_surface_pushed = 0;
     s_tex_uploads = s_tex_upload_bytes = 0;
@@ -1576,277 +1348,6 @@ void vgl_gpu_set_raster(int x, int y, int w, int h,
     s_vx1 = valid_x1; s_vy1 = valid_y1;
     if (s_open && changed)
         recreate_display();
-}
-
-/* At render scales above one, clamp proven non-tiling primitives so invented
- * sub-pixel samples cannot wrap across a texture edge. Preserve the game's
- * address mode for tiled primitives and all scale-one rendering. */
-static SDL_GPUSampler *sampler_for(const vgl_tmu_t *u, int no_tile)
-{
-    SDL_GPUSamplerCreateInfo ci;
-    unsigned key = (u->min_filter != VGL_TEXFILTER_POINT) |
-                   ((u->mag_filter != VGL_TEXFILTER_POINT) << 1) |
-                   ((u->clamp_s == VGL_TEXCLAMP_CLAMP || no_tile) << 2) |
-                   ((u->clamp_t == VGL_TEXCLAMP_CLAMP || no_tile) << 3);
-
-    if (s_samplers[key]) return s_samplers[key];
-    memset(&ci, 0, sizeof ci);
-    ci.min_filter = (key & 1) ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
-    ci.mag_filter = (key & 2) ? SDL_GPU_FILTER_LINEAR : SDL_GPU_FILTER_NEAREST;
-    ci.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST;
-    ci.address_mode_u = (key & 4) ? SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE
-                                  : SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
-    ci.address_mode_v = (key & 8) ? SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE
-                                  : SDL_GPU_SAMPLERADDRESSMODE_REPEAT;
-    ci.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_CLAMP_TO_EDGE;
-    ci.min_lod = 0.0f; ci.max_lod = (float)VGL_MAX_LOD;
-    s_samplers[key] = SDL_CreateGPUSampler(device(), &ci);
-    /* A null sampler makes vgl_gpu_draw_triangle drop the primitive, which is
-     * a picture that silently loses geometry. Sixteen of these exist for the
-     * life of the device, so a failure here is the device's. */
-    if (!s_samplers[key])
-        gpu_failed(GF_SAMPLER);
-    return s_samplers[key];
-}
-
-static int texture_identity_matches(const tex_cache_t *e, int tmu,
-                                    const vgl_tmu_t *u, uint64_t pal_key)
-{
-    return e->used && e->tmu == tmu && e->base == u->base &&
-           e->even_odd == u->even_odd && e->small_lod == u->small_lod &&
-           e->large_lod == u->large_lod && e->aspect == u->aspect &&
-           e->format == u->format && e->pal_key == pal_key;
-}
-
-static unsigned texture_hash_values(int tmu, uint32_t base, int even_odd,
-                                    int small_lod, int large_lod,
-                                    int aspect, int format, uint64_t pal_key)
-{
-    /* Project-chosen odd mixers distribute cache buckets only. Identity is
-     * always checked field-for-field, so a hash collision changes speed and
-     * cannot select different texture content. */
-    uint32_t h = base * 0x9e3779b1u;
-    h ^= (uint32_t)tmu * 0x85ebca6bu;
-    h ^= (uint32_t)even_odd * 0xc2b2ae35u;
-    h ^= (uint32_t)small_lod << 3;
-    h ^= (uint32_t)large_lod << 7;
-    h ^= (uint32_t)aspect << 11;
-    h ^= (uint32_t)format << 16;
-    h ^= (uint32_t)pal_key;
-    h ^= (uint32_t)(pal_key >> 32) * 0x27d4eb2du;
-    h ^= h >> 16;
-    return h & (GPU_TEX_HASH - 1);
-}
-
-static unsigned texture_hash_key(int tmu, const vgl_tmu_t *u,
-                                 uint64_t pal_key)
-{
-    return texture_hash_values(tmu, u->base, u->even_odd,
-                               u->small_lod, u->large_lod,
-                               u->aspect, u->format, pal_key);
-}
-
-static unsigned texture_entry_hash(const tex_cache_t *e)
-{
-    return texture_hash_values(e->tmu, e->base, e->even_odd,
-                               e->small_lod, e->large_lod,
-                               e->aspect, e->format, e->pal_key);
-}
-
-static tex_cache_t *texture_hash_find(int tmu, const vgl_tmu_t *u,
-                                      uint64_t pal_key)
-{
-    int link = s_tex_hash[texture_hash_key(tmu, u, pal_key)];
-    s_tex_lookups++;
-    while (link) {
-        tex_cache_t *e = &s_tex_cache[link - 1];
-        s_tex_probes++;
-        if (texture_identity_matches(e, tmu, u, pal_key))
-            return e;
-        link = e->hash_next;
-    }
-    return NULL;
-}
-
-static void texture_hash_insert(tex_cache_t *e)
-{
-    unsigned bucket = texture_entry_hash(e);
-    int ix = (int)(e - s_tex_cache);
-    e->hash_next = s_tex_hash[bucket];
-    s_tex_hash[bucket] = ix + 1;
-}
-
-static void texture_hash_remove(tex_cache_t *e)
-{
-    unsigned bucket;
-    int *link;
-    int target;
-
-    if (!e->used) return;
-    bucket = texture_entry_hash(e);
-    target = (int)(e - s_tex_cache) + 1;
-    link = &s_tex_hash[bucket];
-    while (*link) {
-        tex_cache_t *cur = &s_tex_cache[*link - 1];
-        if (*link == target) {
-            *link = cur->hash_next;
-            e->hash_next = 0;
-            return;
-        }
-        link = &cur->hash_next;
-    }
-}
-
-static void texture_unbind(tex_cache_t *e)
-{
-    int i;
-    for (i = 0; i < VGL_TMUS; i++)
-        if (s_bound_tex[i] == e)
-            s_bound_tex[i] = NULL;
-}
-
-static uint64_t texture_palette_key(int tmu, const vgl_tmu_t *u)
-{
-    const uint8_t *p;
-    /* A 64-bit FNV-1a is only a prefilter for the exact memcmp below; palette
-     * content equality never rests on the hash. */
-    uint64_t hash = 1469598103934665603ull;
-    unsigned i;
-
-    if ((u->format != VGL_TEXFMT_P_8 && u->format != VGL_TEXFMT_AP_88) ||
-        !u->palette_valid)
-        return 0;
-    if (s_palette_seen_ver[tmu] == u->pal_ver)
-        return s_palette_current_key[tmu];
-    p = (const uint8_t *)u->palette;
-    for (i = 0; i < sizeof u->palette; i++) {
-        hash ^= p[i];
-        hash *= 1099511628211ull;
-    }
-    for (i = 0; i < s_palette_key_count; i++) {
-        if (s_palette_keys[i].hash == hash &&
-            memcmp(s_palette_keys[i].rgba, u->palette,
-                   sizeof u->palette) == 0) {
-            s_palette_seen_ver[tmu] = u->pal_ver;
-            s_palette_current_key[tmu] = i + 1;
-            return i + 1;
-        }
-    }
-    if (s_palette_key_count < GPU_PALETTE_KEYS) {
-        i = s_palette_key_count++;
-        s_palette_keys[i].hash = hash;
-        memcpy(s_palette_keys[i].rgba, u->palette, sizeof u->palette);
-        s_palette_current_key[tmu] = i + 1;
-    } else {
-        /* Exact interning is an optimisation, never a content authority. If a
-         * title exceeds the measured 40 unique Offroad palettes and fills the
-         * table, retain correctness with a generation-unique non-reused key. */
-        s_palette_current_key[tmu] = (1ull << 63) |
-            ((uint64_t)(unsigned)tmu << 32) | u->pal_ver;
-    }
-    s_palette_seen_ver[tmu] = u->pal_ver;
-    return s_palette_current_key[tmu];
-}
-
-static SDL_GPUTexture *texture_for(int tmu)
-{
-    const vgl_tmu_t *u = &vgl.tmu[tmu];
-    tex_cache_t *slot = NULL;
-    uint64_t pal_key;
-    uint32_t dirty_mips = ~0u;
-    int i, new_identity;
-    LARGE_INTEGER begin, end;
-
-    if (!u->valid || u->lvl_first < 0) return s_white;
-    pal_key = texture_palette_key(tmu, u);
-    slot = s_bound_tex[tmu];
-    if (!slot || !texture_identity_matches(slot, tmu, u, pal_key))
-        slot = texture_hash_find(tmu, u, pal_key);
-    if (slot && slot->mem_ver == u->mem_ver) {
-        slot->age = ++s_age;
-        s_bound_tex[tmu] = slot;
-        return slot->texture;
-    }
-    if (slot) {
-        dirty_mips = vgl_tex_dirty_mips(tmu, slot->mem_ver);
-        if (!dirty_mips) {
-            /* Writes elsewhere in this TMU do not invalidate this identity. */
-            slot->mem_ver = u->mem_ver;
-            slot->age = ++s_age;
-            s_bound_tex[tmu] = slot;
-            return slot->texture;
-        }
-    }
-    if (!slot) {
-        for (i = 0; i < GPU_TEX_CACHE; i++) {
-            if (!s_tex_cache[i].used) {
-                slot = &s_tex_cache[i];
-                break;
-            }
-            if (!slot || s_tex_cache[i].age < slot->age)
-                slot = &s_tex_cache[i];
-        }
-    }
-    if (!slot) return s_white;
-
-    QueryPerformanceCounter(&begin);
-
-    /* A cache replacement or refresh may release or overwrite a texture used
-     * by the pending CPU-side batch. Record that draw first; the following
-    * copy then remains ordered after it in the same GPU command buffer. The
-    * same holds for the 2D run's recorded batches. */
-    flush_batch();
-    run_draw();
-    new_identity = !texture_identity_matches(slot, tmu, u, pal_key);
-    if (new_identity)
-        dirty_mips = ~0u;
-
-    /* The texture is deliberately 256-wide (or its aspect-ratio counterpart)
-     * with absolute Glide LOD numbers as GPU mip indices. Split even/odd chains
-     * can then use SampleLevel without repacking either half. Uploads and the
-     * draws which consume them stay ordered in one command buffer. Paletted
-     * variants are cached by exact palette content: Offroad alternates 40
-     * palettes across 158,094 downloads, so a generation counter would turn
-     * every return to existing content into a full decode and upload. */
-    if (new_identity) {
-        texture_hash_remove(slot);
-        texture_unbind(slot);
-        if (slot->texture) SDL_ReleaseGPUTexture(device(), slot->texture);
-        memset(slot, 0, sizeof *slot);
-        slot->texture = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                                     SDL_GPU_TEXTUREUSAGE_SAMPLER,
-                                     u->lod_w[0], u->lod_h[0],
-                                     VGL_MAX_LOD + 1);
-        if (!slot->texture) goto fail;
-    }
-    if (!queue_texture_mips(slot->texture, tmu, dirty_mips))
-        goto fail;
-    slot->used = 1; slot->tmu = tmu; slot->base = u->base;
-    slot->even_odd = u->even_odd;
-    slot->small_lod = u->small_lod; slot->large_lod = u->large_lod;
-    slot->aspect = u->aspect; slot->format = u->format;
-    slot->mem_ver = u->mem_ver;
-    slot->pal_key = pal_key;
-    slot->age = ++s_age;
-    if (new_identity)
-        texture_hash_insert(slot);
-    s_bound_tex[tmu] = slot;
-    QueryPerformanceCounter(&end);
-    if (elapsed_ms(begin, end) >= GPU_HITCH_LOG_MS)
-        vgl_log(0, "gpu: slow texture resolve at frame %llu: tmu %d base "
-                   "0x%08lx lod %d..%d mask %d, %.3f ms",
-                (unsigned long long)s_frame_index, tmu,
-                (unsigned long)u->base, u->large_lod, u->small_lod,
-                u->even_odd, elapsed_ms(begin, end));
-    return slot->texture;
-
-fail:
-    texture_hash_remove(slot);
-    texture_unbind(slot);
-    if (slot->texture) SDL_ReleaseGPUTexture(device(), slot->texture);
-    memset(slot, 0, sizeof *slot);
-    gpu_failed(GF_UPLOAD);
-    return s_white;
 }
 
 static uint64_t pipeline_key(int layer)
@@ -2048,7 +1549,8 @@ static void fill_ps(ps_data_t *ps, int need_tex, int need_tmu1)
             (uint32_t)vgl.fog_table[i] << ((i & 3) * 8);
 }
 
-static void flush_batch(void)
+/* A batch is ~25 KB, nearly all of it vertex space a short run never fills. */
+void flush_batch(void)
 {
     SDL_GPURenderPass *pass;
     float surface[4] = { (float)s_iw, (float)s_ih, 0.0f, 0.0f };
@@ -2057,9 +1559,7 @@ static void flush_batch(void)
     if (!triangles)
         return;
     if (s_batch.is2d) {
-        if (s_run_count == GPU_RUN_BATCHES)
-            run_draw();
-        s_run_list[s_run_count++] = s_batch;
+        run_add(&s_batch);
         s_batch.triangles = 0;
         return;
     }
@@ -2091,332 +1591,6 @@ static void flush_batch(void)
         s_batched_triangles += triangles;
     }
     s_batch.triangles = 0;
-}
-
-/* ---- the 2D layer: runs, folds, magnification ---------------------------- */
-
-static SDL_GPUSampler *point_sampler(void)
-{
-    vgl_tmu_t point;
-    memset(&point, 0, sizeof point);
-    point.min_filter = VGL_TEXFILTER_POINT;
-    point.mag_filter = VGL_TEXFILTER_POINT;
-    return sampler_for(&point, 1);
-}
-
-/* One quad over `r` (normalised x0, y0, x1, y1; NULL is the whole target)
- * into dst, optionally with a depth target and a source texture read texel
- * for texel. Its own render pass, in the frame's command buffer. */
-static void layer_quadn(SDL_GPUTexture *dst, SDL_GPULoadOp load,
-                        SDL_GPUTexture *depth, SDL_GPUGraphicsPipeline *pipe,
-                        SDL_GPUTexture *const *src, unsigned nsrc,
-                        const ps_data_t *ps, const float *r)
-{
-    SDL_GPUColorTargetInfo ct;
-    SDL_GPUDepthStencilTargetInfo dt;
-    SDL_GPUTextureSamplerBinding bind[3];
-    unsigned k;
-    SDL_GPURenderPass *pass;
-    float vd[10][4];
-
-    if (s_lost || !dst || !pipe)
-        return;
-    end_pass();
-    if (!command())
-        return;
-    memset(&ct, 0, sizeof ct);
-    ct.texture = dst; ct.load_op = load; ct.store_op = SDL_GPU_STOREOP_STORE;
-    memset(&dt, 0, sizeof dt);
-    dt.texture = depth;
-    dt.load_op = SDL_GPU_LOADOP_LOAD; dt.store_op = SDL_GPU_STOREOP_STORE;
-    dt.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
-    dt.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
-    pass = gpu_fault_injected_at(GF_RENDERPASS)
-               ? NULL : SDL_BeginGPURenderPass(s_cmd, &ct, 1,
-                                               depth ? &dt : NULL);
-    if (!pass) {
-        gpu_failed(GF_RENDERPASS);
-        return;
-    }
-    SDL_BindGPUGraphicsPipeline(pass, pipe);
-    for (k = 0; k < nsrc && k < 3; k++) {
-        bind[k].texture = src[k];
-        bind[k].sampler = point_sampler();
-    }
-    if (nsrc)
-        SDL_BindGPUFragmentSamplers(pass, 0, bind, nsrc < 3 ? nsrc : 3);
-    memset(vd, 0, sizeof vd);
-    vd[0][0] = r ? r[0] : 0.0f; vd[0][1] = r ? r[1] : 0.0f;
-    vd[0][2] = r ? r[2] : 1.0f; vd[0][3] = r ? r[3] : 1.0f;
-    SDL_PushGPUVertexUniformData(s_cmd, 0, vd, sizeof vd);
-    SDL_PushGPUFragmentUniformData(s_cmd, 0, ps, sizeof *ps);
-    SDL_DrawGPUPrimitives(pass, 4, 1, 0, 0);
-    SDL_EndGPURenderPass(pass);
-}
-
-static void layer_quad(SDL_GPUTexture *dst, SDL_GPULoadOp load,
-                       SDL_GPUTexture *depth, SDL_GPUGraphicsPipeline *pipe,
-                       SDL_GPUTexture *src, const ps_data_t *ps,
-                       const float *r)
-{
-    layer_quadn(dst, load, depth, pipe, &src, src ? 1u : 0u, ps, r);
-}
-
-/* The recorded batches of the open run, into one of its two targets: `hi`
- * at the render scale against the scene's depth, else at 1x against the
- * layer's. */
-static void run_draw_pass(int hi)
-{
-    SDL_GPUColorTargetInfo ct;
-    SDL_GPUDepthStencilTargetInfo dt;
-    SDL_GPURenderPass *pass;
-    float surface[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-    int scale = hi ? s_scale : 1;
-    unsigned i;
-
-    memset(&ct, 0, sizeof ct);
-    ct.texture = hi ? s_run_hi : s_run_lo;
-    ct.load_op = hi && !s_run_hi_ready ? SDL_GPU_LOADOP_CLEAR
-                                       : SDL_GPU_LOADOP_LOAD;
-    ct.store_op = SDL_GPU_STOREOP_STORE;
-    memset(&dt, 0, sizeof dt);
-    dt.texture = hi ? s_depth : s_layer_depth;
-    dt.load_op = SDL_GPU_LOADOP_LOAD; dt.store_op = SDL_GPU_STOREOP_STORE;
-    dt.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE;
-    dt.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE;
-    pass = gpu_fault_injected_at(GF_RENDERPASS)
-               ? NULL : SDL_BeginGPURenderPass(s_cmd, &ct, 1, &dt);
-    if (!pass) {
-        gpu_failed(GF_RENDERPASS);
-        return;
-    }
-    if (hi)
-        s_run_hi_ready = 1;
-    surface[0] = (float)(hi ? s_iw : s_w);
-    surface[1] = (float)(hi ? s_ih : s_h);
-    SDL_PushGPUVertexUniformData(s_cmd, 1, surface, sizeof surface);
-    for (i = 0; i < s_run_count; i++) {
-        const draw_batch_t *b = &s_run_list[i];
-        SDL_Rect sc;
-
-        sc.x = b->clip_x0 * scale; sc.y = b->clip_y0 * scale;
-        sc.w = (b->clip_x1 - b->clip_x0) * scale;
-        sc.h = (b->clip_y1 - b->clip_y0) * scale;
-        SDL_SetGPUScissor(pass, &sc);
-        SDL_BindGPUGraphicsPipeline(pass, b->pipe);
-        SDL_BindGPUFragmentSamplers(pass, 0, hi ? b->bind : b->bind1, 2);
-        SDL_PushGPUVertexUniformData(
-            s_cmd, 0, hi ? b->vertex : b->vertex1,
-            (Uint32)((size_t)b->triangles * 12 * sizeof b->vertex[0]));
-        SDL_PushGPUFragmentUniformData(s_cmd, 0, &b->ps, sizeof b->ps);
-        SDL_DrawGPUPrimitives(pass, b->triangles * 3, 1, 0, 0);
-        if (hi) {
-            s_draw_batches++;
-            s_batched_triangles += b->triangles;
-        }
-    }
-    SDL_EndGPURenderPass(pass);
-}
-
-/* Draw what the open run has recorded. The run's first draw clears its 1x
- * target and takes its depth from the scene's, as 1x would have it. */
-static void run_draw(void)
-{
-    ps_data_t ps;
-
-    if (!s_run_count)
-        return;
-    end_pass();
-    if (s_lost || !command()) {
-        s_run_count = 0;
-        return;
-    }
-    if (!s_run_ready) {
-        memset(&ps, 0, sizeof ps);
-        ps.u[0][0] = (unsigned)s_scale;
-        layer_quad(s_run_lo, SDL_GPU_LOADOP_CLEAR, s_layer_depth,
-                   s_layer_depth_pipe, s_depth, &ps, NULL);
-        s_run_ready = 1;
-        s_run_hi_ready = 0;
-    }
-    run_draw_pass(1);
-    run_draw_pass(0);
-    s_run_count = 0;
-    s_surface_pushed = 0;
-}
-
-static void run_reset(void)
-{
-    s_run = s_run_ready = s_run_hi_ready = 0;
-    s_run_count = 0;
-}
-
-/* A native picture magnified to the render scale: the one replaceable
- * pass, from the native grid to the scaled one, premultiplied in and out.
- * `opaque`: src's alpha is coverage, not part of the picture. */
-static void magnify(SDL_GPUTexture *src, SDL_GPUTexture *dst, int opaque)
-{
-    ps_data_t ps;
-    int x0 = s_vx0, y0 = s_vy0, x1 = s_vx1, y1 = s_vy1;
-
-    if (x0 >= x1 || y0 >= y1) {
-        x0 = y0 = 0; x1 = s_rw; y1 = s_rh;
-    }
-    memset(&ps, 0, sizeof ps);
-    ps.u[0][0] = (unsigned)s_scale;
-    ps.u[1][0] = (unsigned)(s_rx + x0); ps.u[1][1] = (unsigned)(s_ry + y0);
-    ps.u[1][2] = (unsigned)(s_rx + x1); ps.u[1][3] = (unsigned)(s_ry + y1);
-    ps.u[0][2] = opaque != 0;
-    if (s_magnifier == MAGNIFY_FSR1) {
-        layer_quad(s_fsr_easu, SDL_GPU_LOADOP_DONT_CARE, NULL, s_easu_pipe,
-                   src, &ps, NULL);
-        layer_quad(dst, SDL_GPU_LOADOP_DONT_CARE, NULL, s_rcas_pipe,
-                   s_fsr_easu, &ps, NULL);
-    } else {
-        layer_quad(dst, SDL_GPU_LOADOP_DONT_CARE, NULL,
-                   s_magnifier == MAGNIFY_CATMULL_ROM ? s_catmull_pipe
-                                                      : s_upscale_pipe,
-                   src, &ps, NULL);
-    }
-}
-
-/* The layer magnified to the render scale, once per change. */
-static void layer_upscale(int b)
-{
-    if (!s_layer_stale[b])
-        return;
-    magnify(s_layer[b], s_layer_up[b], 0);
-    s_layer_stale[b] = 0;
-}
-
-/* The magnified layer of buffer b over dst, whose pixel (0, 0) is the
- * layer's (ox, oy) at the render scale. The display and a fold both. */
-static void layer_compose(int b, SDL_GPUTexture *dst, int ox, int oy)
-{
-    SDL_GPUTexture *src[3];
-    ps_data_t ps;
-
-    layer_upscale(b);
-    /* The native picture: the target at native resolution, as a readback
-     * takes it, with the layer over it; then magnified like the layer. */
-    end_pass();
-    if (!command())
-        return;
-    blit(s_cmd, s_color[b], 0, 0, s_iw, s_ih, s_native_lo, 0, 0, s_w, s_h,
-         SDL_GPU_LOADOP_DONT_CARE, SDL_GPU_FILTER_LINEAR);
-    memset(&ps, 0, sizeof ps);
-    layer_quad(s_native_lo, SDL_GPU_LOADOP_LOAD, NULL, s_over_pipe,
-               s_layer[b], &ps, NULL);
-    magnify(s_native_lo, s_native_up, 1);
-    ps.u[0][0] = (unsigned)ox;
-    ps.u[0][1] = (unsigned)oy;
-    ps.u[0][2] = (unsigned)s_scale;
-    src[0] = s_layer_up[b]; src[1] = s_layer[b]; src[2] = s_native_up;
-    layer_quadn(dst, SDL_GPU_LOADOP_LOAD, NULL, s_compose_pipe, src, 3,
-                &ps, NULL);
-}
-
-/* Scene drawing is about to land on buffer b: what its layer shows becomes
- * part of the target, exactly as it was displayed. */
-static void layer_fold(int b)
-{
-    if (!s_layer_used[b])
-        return;
-    layer_compose(b, s_color[b], 0, 0);
-    s_layer_used[b] = 0;
-    s_layer_stale[b] = 1;
-}
-
-/* The open run is 2D: its 1x drawing goes over its buffer's layer. */
-static void run_commit(void)
-{
-    ps_data_t ps;
-    int b = s_run_buffer;
-
-    if (!s_run)
-        return;
-    flush_batch();
-    run_draw();
-    if (s_run_ready) {
-        memset(&ps, 0, sizeof ps);
-        layer_quad(s_layer[b], s_layer_used[b] ? SDL_GPU_LOADOP_LOAD
-                                               : SDL_GPU_LOADOP_CLEAR,
-                   NULL, s_over_pipe, s_run_lo, &ps, NULL);
-        s_layer_used[b] = 1;
-        s_layer_stale[b] = 1;
-    }
-    run_reset();
-}
-
-/* The open run is scene: its scaled drawing goes over the target, after
- * whatever the layer held. */
-static void run_cancel(void)
-{
-    ps_data_t ps;
-    int b = s_run_buffer;
-
-    if (!s_run)
-        return;
-    flush_batch();
-    run_draw();
-    layer_fold(b);
-    if (s_run_ready) {
-        memset(&ps, 0, sizeof ps);
-        layer_quad(s_color[b], SDL_GPU_LOADOP_LOAD, NULL, s_over_pipe,
-                   s_run_hi, &ps, NULL);
-    }
-    run_reset();
-}
-
-/* A non-2D draw on buffer b ends any run on it as scene and folds its layer. */
-static void scene_begins(int b)
-{
-    flush_batch();
-    if (s_run) {
-        if (s_run_buffer == b)
-            run_cancel();
-        else
-            run_commit();
-    }
-    layer_fold(b);
-}
-
-/* A clear writes the target as it always has; above it, the run and the
- * layer become transparent over the rectangle, so the clear shows. */
-static void layer_clear(int x0, int y0, int x1, int y1, uint32_t depth)
-{
-    int b = vgl.draw_buffer;
-    int full = x0 <= 0 && y0 <= 0 && x1 >= vgl.w && y1 >= vgl.h;
-    float r[4];
-    ps_data_t ps;
-
-    r[0] = (float)x0 / vgl.w; r[1] = (float)y0 / vgl.h;
-    r[2] = (float)x1 / vgl.w; r[3] = (float)y1 / vgl.h;
-    memset(&ps, 0, sizeof ps);
-    ps.u[0][1] = depth;
-    if (s_run && s_run_buffer == b) {
-        if (full) {
-            run_reset();
-        } else {
-            run_draw();
-            if (s_run_ready) {
-                layer_quad(s_run_lo, SDL_GPU_LOADOP_LOAD, s_layer_depth,
-                           s_clear_layer_pipe, NULL, &ps, r);
-                layer_quad(s_run_hi, s_run_hi_ready ? SDL_GPU_LOADOP_LOAD
-                                                    : SDL_GPU_LOADOP_CLEAR,
-                           NULL, s_clear_layer_color_pipe, NULL, &ps, r);
-                s_run_hi_ready = 1;
-            }
-        }
-    }
-    if (s_layer_used[b]) {
-        if (full)
-            s_layer_used[b] = 0;
-        else
-            layer_quad(s_layer[b], SDL_GPU_LOADOP_LOAD, NULL,
-                       s_clear_layer_color_pipe, NULL, &ps, r);
-        s_layer_stale[b] = 1;
-    }
 }
 
 /* A primitive cannot tile when all recovered LOD-0 coordinates remain inside
@@ -2523,7 +1697,6 @@ void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
     const float *v[3] = { a, b, c };
     if (s_lost) return;
     float vd[12][4], vd1[12][4];
-    ps_data_t ps_key;
     const ps_data_t *ps;
     SDL_GPUTextureSamplerBinding tri_bind[2], tri_bind1[2];
     const SDL_GPUTextureSamplerBinding *bind;
@@ -2553,6 +1726,11 @@ void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
         s_draw_state.layer_pipe = s_draw_state.layerable ? pipeline_for(1)
                                                          : NULL;
         fill_ps(&s_draw_state.ps, need_tex, need_tmu1);
+        s_draw_state.ps_key = s_draw_state.ps;
+        s_draw_state.ps_key.u[6][0] = 0; /* constant colour: per vertex */
+        s_draw_state.ps_key.u[1][2] = 0; /* alpha reference: per vertex */
+        s_draw_state.ps_key.u[7][1] = 0; /* depth bias: per vertex */
+        s_draw_state.gen = ++s_draw_state_gen;
         s_draw_state.version = vgl.draw_state_version;
         s_draw_state.valid = 1;
     }
@@ -2577,12 +1755,7 @@ void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
     is2d = s_draw_state.layerable && s_draw_state.layer_pipe &&
            a[8] == b[8] && b[8] == c[8];
     if (is2d) {
-        if (s_run && s_run_buffer != vgl.draw_buffer)
-            run_commit();
-        if (!s_run) {
-            s_run = 1;
-            s_run_buffer = vgl.draw_buffer;
-        }
+        run_join(vgl.draw_buffer);
         pipe = s_draw_state.layer_pipe;
         tri_bind1[0] = s_draw_state.bind[0];
         tri_bind1[1] = s_draw_state.bind[1];
@@ -2590,17 +1763,18 @@ void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
         tri_bind1[1].sampler = sampler_for(&vgl.tmu[1], 0);
         if (!tri_bind1[0].sampler || !tri_bind1[1].sampler) return;
         build_vertices(vd1, v, ps, 1);
-    } else if (s_scale > 1 && (s_run || s_layer_used[vgl.draw_buffer])) {
-        scene_begins(vgl.draw_buffer);
+    } else if (s_scale > 1) {
+        scene_draws(vgl.draw_buffer);
     }
     build_vertices(vd, v, ps, s_scale);
-    ps_key = *ps;
-    ps_key.u[6][0] = 0; /* constant colour travels with each vertex */
-    ps_key.u[1][2] = 0; /* alpha reference travels with each vertex */
-    ps_key.u[7][1] = 0; /* depth bias travels with each vertex */
+    /* Compare the batch's key with this fill of the draw state once; when
+     * they match, the gen says so for every later triangle of the fill. */
+    if (s_batch.triangles && s_batch.ps_gen != s_draw_state.gen &&
+        memcmp(&s_batch.ps, &s_draw_state.ps_key, sizeof s_batch.ps) == 0)
+        s_batch.ps_gen = s_draw_state.gen;
     if (s_batch.triangles &&
         (s_batch.pipe != pipe ||
-         memcmp(&s_batch.ps, &ps_key, sizeof ps_key) != 0 ||
+         s_batch.ps_gen != s_draw_state.gen ||
          memcmp(s_batch.bind, bind, sizeof s_batch.bind) != 0 ||
          s_batch.is2d != is2d ||
          (is2d && memcmp(s_batch.bind1, tri_bind1,
@@ -2613,7 +1787,8 @@ void vgl_gpu_draw_triangle(const float *a, const float *b, const float *c)
         flush_batch();
     if (!s_batch.triangles) {
         s_batch.pipe = pipe;
-        s_batch.ps = ps_key;
+        s_batch.ps = s_draw_state.ps_key;
+        s_batch.ps_gen = s_draw_state.gen;
         memcpy(s_batch.bind, bind, sizeof s_batch.bind);
         s_batch.is2d = is2d;
         if (is2d)
@@ -2677,7 +1852,7 @@ void vgl_gpu_clear_margins(int x0, int x1, int y0, int y1, int field_x0,
     clear_rect(field_x1 > x0 ? field_x1 : x0, y0, x1, y1, 0u, 0xffffu);
 }
 
-static void blit(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *src,
+void blit(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *src,
                  int sx, int sy, int sw, int sh, SDL_GPUTexture *dst,
                  int dx, int dy, int dw, int dh, SDL_GPULoadOp load,
                  SDL_GPUFilter filter)
@@ -2692,9 +1867,34 @@ static void blit(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *src,
     SDL_BlitGPUTexture(cmd, &bi);
 }
 
+/* Where the display is composed. With a gamma table, into s_gamma_src, which
+ * gamma_apply() then draws into s_display through the table; otherwise into
+ * s_display itself. */
+static SDL_GPUTexture *gamma_source(void)
+{
+    unsigned w = (unsigned)(s_rw * s_scale), h = (unsigned)(s_rh * s_scale);
+
+    if (!vgl_gamma.on || !s_gamma_pipe || !s_display || s_lost)
+        return s_display;
+    /* Released with the display (recreate_display), so a size change never
+     * frees it under the frame being recorded. */
+    if (!s_gamma_src) {
+        s_gamma_src = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+                                   SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
+                                   SDL_GPU_TEXTUREUSAGE_SAMPLER, w, h, 1);
+        if (!s_gamma_src) {
+            VGL_LOG_CAPPED(3, "gpu: cannot allocate the %ux%u gamma source: %s",
+                           w, h, SDL_GetError());
+            return s_display;
+        }
+    }
+    return s_gamma_src;
+}
+
 /* The DAC's table over the finished display, after the 2D layer and the
- * margins: the display is copied out and drawn back through the table. */
-static void gamma_apply(void)
+ * margins: `pre` drawn into s_display through the table. If the table cannot
+ * be uploaded, the display shows `pre` as it is. */
+static void gamma_apply(SDL_GPUTexture *pre)
 {
     unsigned w = (unsigned)(s_rw * s_scale), h = (unsigned)(s_rh * s_scale);
     SDL_GPUTexture *src[2];
@@ -2702,20 +1902,6 @@ static void gamma_apply(void)
     uint8_t rgba[256 * 4];
     int i;
 
-    if (!vgl_gamma.on || !s_gamma_pipe || !s_display || s_lost)
-        return;
-    /* Released with the display it copies (recreate_display), so a size
-     * change never frees it under the frame being recorded. */
-    if (!s_gamma_src) {
-        s_gamma_src = make_texture(SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
-                                   SDL_GPU_TEXTUREUSAGE_COLOR_TARGET |
-                                   SDL_GPU_TEXTUREUSAGE_SAMPLER, w, h, 1);
-        if (!s_gamma_src) {
-            VGL_LOG_CAPPED(3, "gpu: cannot allocate the %ux%u gamma copy: %s",
-                           w, h, SDL_GetError());
-            return;
-        }
-    }
     if (s_gamma_gen != vgl_gamma.gen) {
         for (i = 0; i < 256; i++) {
             rgba[i * 4 + 0] = vgl_gamma.lut[0][i];
@@ -2723,17 +1909,19 @@ static void gamma_apply(void)
             rgba[i * 4 + 2] = vgl_gamma.lut[2][i];
             rgba[i * 4 + 3] = 255;
         }
-        if (!queue_rgba(s_gamma_lut, 0, 256, 1, rgba))
-            return;
-        s_gamma_gen = vgl_gamma.gen;
+        if (queue_rgba(s_gamma_lut, 0, 256, 1, rgba))
+            s_gamma_gen = vgl_gamma.gen;
     }
     end_pass();
     if (!command())
         return;
-    blit(s_cmd, s_display, 0, 0, (int)w, (int)h, s_gamma_src, 0, 0, (int)w,
-         (int)h, SDL_GPU_LOADOP_DONT_CARE, SDL_GPU_FILTER_NEAREST);
+    if (s_gamma_gen != vgl_gamma.gen) {
+        blit(s_cmd, pre, 0, 0, (int)w, (int)h, s_display, 0, 0, (int)w,
+             (int)h, SDL_GPU_LOADOP_DONT_CARE, SDL_GPU_FILTER_NEAREST);
+        return;
+    }
     memset(&ps, 0, sizeof ps);
-    src[0] = s_gamma_src;
+    src[0] = pre;
     src[1] = s_gamma_lut;
     layer_quadn(s_display, SDL_GPU_LOADOP_DONT_CARE, NULL, s_gamma_pipe, src, 2,
                 &ps, NULL);
@@ -2741,6 +1929,7 @@ static void gamma_apply(void)
 
 static void prepare_display(SDL_GPUCommandBuffer *cmd)
 {
+    SDL_GPUTexture *pre = gamma_source();
     int vx0 = s_vx0, vy0 = s_vy0, vx1 = s_vx1, vy1 = s_vy1;
     int rw = s_rw * s_scale, rh = s_rh * s_scale;
     if (vx0 >= vx1 || vy0 >= vy1) {
@@ -2751,30 +1940,31 @@ static void prepare_display(SDL_GPUCommandBuffer *cmd)
      * row/column. The display seam is hidden without altering LFB readback
      * or conformance captures. */
     blit(cmd, s_color[0], s_rx * s_scale, s_ry * s_scale, rw, rh,
-         s_display, 0, 0, rw, rh, SDL_GPU_LOADOP_DONT_CARE,
+         pre, 0, 0, rw, rh, SDL_GPU_LOADOP_DONT_CARE,
          SDL_GPU_FILTER_NEAREST);
-    if (s_layer_used[0])
-        layer_compose(0, s_display, s_rx * s_scale, s_ry * s_scale);
+    if (layer_used(0))
+        layer_compose(0, pre, s_rx * s_scale, s_ry * s_scale);
     if (vy0 > 0)
-        blit(cmd, s_display, vx0 * s_scale, vy0 * s_scale,
+        blit(cmd, pre, vx0 * s_scale, vy0 * s_scale,
              (vx1 - vx0) * s_scale, s_scale,
-             s_display, vx0 * s_scale, 0, (vx1 - vx0) * s_scale,
+             pre, vx0 * s_scale, 0, (vx1 - vx0) * s_scale,
              vy0 * s_scale, SDL_GPU_LOADOP_LOAD, SDL_GPU_FILTER_NEAREST);
     if (vy1 < s_rh)
-        blit(cmd, s_display, vx0 * s_scale, (vy1 - 1) * s_scale,
+        blit(cmd, pre, vx0 * s_scale, (vy1 - 1) * s_scale,
              (vx1 - vx0) * s_scale, s_scale,
-             s_display, vx0 * s_scale, vy1 * s_scale,
+             pre, vx0 * s_scale, vy1 * s_scale,
              (vx1 - vx0) * s_scale, (s_rh - vy1) * s_scale,
              SDL_GPU_LOADOP_LOAD, SDL_GPU_FILTER_NEAREST);
     if (vx0 > 0)
-        blit(cmd, s_display, vx0 * s_scale, 0, s_scale, rh,
-             s_display, 0, 0, vx0 * s_scale, rh,
+        blit(cmd, pre, vx0 * s_scale, 0, s_scale, rh,
+             pre, 0, 0, vx0 * s_scale, rh,
              SDL_GPU_LOADOP_LOAD, SDL_GPU_FILTER_NEAREST);
     if (vx1 < s_rw)
-        blit(cmd, s_display, (vx1 - 1) * s_scale, 0, s_scale, rh,
-             s_display, vx1 * s_scale, 0, (s_rw - vx1) * s_scale, rh,
+        blit(cmd, pre, (vx1 - 1) * s_scale, 0, s_scale, rh,
+             pre, vx1 * s_scale, 0, (s_rw - vx1) * s_scale, rh,
              SDL_GPU_LOADOP_LOAD, SDL_GPU_FILTER_NEAREST);
-    gamma_apply();
+    if (pre != s_display)
+        gamma_apply(pre);
 }
 
 static int borderless_fullscreen(void)
@@ -2997,17 +2187,11 @@ void vgl_gpu_swap(int interval)
     /* The physical front/back handles are about to swap, so finish encoding
     * all draws against the old mapping without submitting them yet. */
     flush_batch();
-    if (s_run)
-        run_commit();
+    run_commit();
     end_pass();
     t = s_color[0]; s_color[0] = s_color[1]; s_color[1] = t;
     d = s_dirty[0]; s_dirty[0] = s_dirty[1]; s_dirty[1] = d;
-    t = s_layer[0]; s_layer[0] = s_layer[1]; s_layer[1] = t;
-    t = s_layer_up[0]; s_layer_up[0] = s_layer_up[1]; s_layer_up[1] = t;
-    d = s_layer_used[0]; s_layer_used[0] = s_layer_used[1];
-    s_layer_used[1] = d;
-    d = s_layer_stale[0]; s_layer_stale[0] = s_layer_stale[1];
-    s_layer_stale[1] = d;
+    layer_swap();
     dump_display();
     if (s_present) present_frame();
     else submit();
@@ -3083,22 +2267,17 @@ int vgl_gpu_sync_color(int buffer, uint32_t *dst, int w, int h)
         buffer < 0 || buffer > 1)
         return 0;
     s_lfb_syncs++;
-    if (s_run && s_run_buffer == buffer)
-        run_commit();
-    if (s_layer_used[buffer]) {
+    run_commit_on(buffer);
+    if (layer_used(buffer)) {
         /* The caller reads the picture: the target with the layer over it,
          * both at native resolution. */
-        ps_data_t ps;
-
         flush_batch();
         run_draw();
         end_pass();
         if (!command()) return 0;
         blit(s_cmd, s_color[buffer], 0, 0, s_iw, s_ih, s_native,
              0, 0, s_w, s_h, SDL_GPU_LOADOP_DONT_CARE, SDL_GPU_FILTER_LINEAR);
-        memset(&ps, 0, sizeof ps);
-        layer_quad(s_native, SDL_GPU_LOADOP_LOAD, NULL, s_over_pipe,
-                   s_layer[buffer], &ps, NULL);
+        layer_over(s_native, buffer);
         submit();
         cmd = SDL_AcquireGPUCommandBuffer(device());
         if (!cmd) return 0;
@@ -3187,15 +2366,9 @@ void vgl_gpu_upload_lfb(int buffer, const uint32_t *rgba_masked, int w, int h)
     flush_batch();
     if (s_scale > 1) {
         /* Above 1x a written LFB pixel is 2D: it goes over the layer. */
-        if (s_run)
-            run_commit();
+        run_commit();
         if (!queue_rgba(s_lfb_tex, 0, s_w, s_h, rgba_masked)) return;
-        memset(&ps, 0, sizeof ps);
-        layer_quad(s_layer[buffer], s_layer_used[buffer]
-                       ? SDL_GPU_LOADOP_LOAD : SDL_GPU_LOADOP_CLEAR,
-                   NULL, s_lfb_layer_pipe, s_lfb_tex, &ps, NULL);
-        s_layer_used[buffer] = 1;
-        s_layer_stale[buffer] = 1;
+        layer_lfb(buffer, s_lfb_tex);
         s_lfb_uploads++;
         s_dirty[buffer] = 0;
         return;

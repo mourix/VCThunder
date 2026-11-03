@@ -96,7 +96,14 @@ enum {
     SF_SLIDER    = 1 << 11,
     /* The slider's value reads as a percentage, so the label carries no
      * "(%)". */
-    SF_PERCENT   = 1 << 12
+    SF_PERCENT   = 1 << 12,
+    /* An ST_BOOL shown as a dropdown of two named choices, where a checkbox
+     * would leave the other choice unnamed: launcher.c's k_choice_text
+     * names `false` and `true`. */
+    SF_CHOICES   = 1 << 13,
+    /* A SETTING_OWN row: set per title, and read by a title that reads
+     * another title's sections from its own (vct_setting_is_own()). */
+    SF_OWN       = 1 << 14
 };
 
 /* How config.c stores this key, which is a different question from how the
@@ -167,6 +174,8 @@ typedef struct {
  * from the shipped ini on purpose (docs/configuration.md §6). */
 #define SHOW_NEVER                                                           \
     -1, NULL, ST_TEXT, SF_HIDDEN, WARNING_NONE, NULL, 0
+#define SHOW_OWN                                                             \
+    -1, NULL, ST_TEXT, SF_HIDDEN | SF_OWN, WARNING_NONE, NULL, 0
 
 /* Every entry, then every entry the launcher shows. Counted here so the
  * launcher's parallel value array can be a fixed-size static. */
@@ -174,18 +183,22 @@ enum {
     VCT_SETTING_COUNT = 0
 #define SETTING(section, key, store, show)     + 1
 #define SETTING_DEV(section, key, store)       + 1
+#define SETTING_OWN(section, key, store)       + 1
 #include "settings.def"
 #undef SETTING
 #undef SETTING_DEV
+#undef SETTING_OWN
 };
 
 enum {
     VCT_UI_SETTING_COUNT = 0
 #define SETTING(section, key, store, show)     + 1
 #define SETTING_DEV(section, key, store)
+#define SETTING_OWN(section, key, store)
 #include "settings.def"
 #undef SETTING
 #undef SETTING_DEV
+#undef SETTING_OWN
 };
 
 /* Every setting, in table order. */
@@ -203,5 +216,11 @@ int vct_choice_contains(const char *choices, const char *value);
 /* An SF_AXIS value: one of `choices`, optionally after a [devices] label
  * (`twcs:z`), in ini_parse_axis_ref()'s grammar. */
 int vct_axis_choice_ok(const char *choices, const char *value);
+
+/* A SETTING_OWN key: one a title that reads another title's sections may
+ * still set in its own. Ultimate Arctic Thunder reads [arctic.*] for all
+ * else. config.c applies these and refuses the rest; the launcher reports the
+ * rest as lines nothing reads. */
+int vct_setting_is_own(const char *key);
 
 #endif /* VCT_SETTINGS_H */

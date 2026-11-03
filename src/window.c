@@ -22,6 +22,7 @@ static HWND s_branded;               /* the handle the name and icon went on */
 static HICON s_icon_big, s_icon_small;
 static int  s_view_w, s_view_h;      /* the game's visible raster */
 static int  s_seen, s_gone;
+static HWND s_placed;                /* the handle handoff_place() last moved */
 
 static int  s_fullscreen;
 static int  s_saved_valid;
@@ -125,9 +126,20 @@ static void hook_window(HWND hwnd);
  * cannot depend on which one found the window. */
 static void adopt(HWND hwnd)
 {
+    /* A handle we held has died: Windows recycles HWND values, and a new
+     * window on the old number must be placed and dressed as a new one. */
+    if (s_hwnd && !IsWindow(s_hwnd))
+        s_placed = s_branded = NULL;
     s_hwnd = hwnd;
     if (!hwnd)
         return;
+    /* Every new window this game has, onto the launcher's monitor before
+     * anything sizes it against one: Offroad remakes its window while it
+     * boots, and the remade one opens on the primary. */
+    if (hwnd != s_placed) {
+        handoff_place(hwnd);
+        s_placed = hwnd;
+    }
     s_seen = 1;
     apply_identity(hwnd, 0);
     hook_window(hwnd);
@@ -152,9 +164,13 @@ static BOOL CALLBACK find_process_window(HWND hwnd, LPARAM opaque)
     RECT r;
     LONG area;
 
+    /* NOT THE LAUNCHER'S CURTAIN EITHER: in fullscreen it covers the monitor,
+     * outsizes a game window that is not fullscreen yet, and would be
+     * dressed as the game's -- made fullscreen and hooked -- while the game's
+     * own window stayed windowed behind it. */
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid != s->pid || !IsWindowVisible(hwnd) || is_console_window(hwnd) ||
-        !GetClientRect(hwnd, &r))
+        handoff_is_curtain(hwnd) || !GetClientRect(hwnd, &r))
         return TRUE;
     area = (r.right - r.left) * (r.bottom - r.top);
     if (area > s->area) {
@@ -201,8 +217,10 @@ int window_gone(void)
     /* The handle we were holding is dead or hidden, so whatever we dressed is
      * not on screen. Forget it: Windows recycles HWND values, and a recreated
      * window that landed on the old number would otherwise keep the backend's
-     * name and icon because ours compared equal. */
+     * name and icon because ours compared equal, and stay where it opened. */
     s_branded = NULL;
+    if (!IsWindow(s_hwnd))
+        s_placed = NULL;
 
     memset(&s, 0, sizeof s);
     s.pid = GetCurrentProcessId();
@@ -342,6 +360,14 @@ static LRESULT CALLBACK shim_wndproc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_EXITSIZEMOVE:
     case WM_EXITMENULOOP:
         timebase_pause(0);
+        break;
+    /* The handle dies here, before Windows can give its number to the next
+     * window, which adopt() must then place and dress as a new one. */
+    case WM_NCDESTROY:
+        if (h == s_placed)
+            s_placed = NULL;
+        if (h == s_branded)
+            s_branded = NULL;
         break;
     }
     return chain(h, msg, wp, lp);
@@ -638,10 +664,21 @@ void window_sync(int force)
     fw = (window.right - window.left) - cw;     /* borders and caption */
     fh = (window.bottom - window.top) - ch;
 
-    if (!SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0)) {
-        work.left = work.top = 0;
-        work.right = GetSystemMetrics(SM_CXSCREEN);
-        work.bottom = GetSystemMetrics(SM_CYSCREEN);
+    /* The work area of the monitor the window is on, which for a game the
+     * launcher started is the launcher's. */
+    {
+        MONITORINFO monitor;
+
+        memset(&monitor, 0, sizeof monitor);
+        monitor.cbSize = sizeof monitor;
+        if (GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+                            &monitor))
+            work = monitor.rcWork;
+        else if (!SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0)) {
+            work.left = work.top = 0;
+            work.right = GetSystemMetrics(SM_CXSCREEN);
+            work.bottom = GetSystemMetrics(SM_CYSCREEN);
+        }
     }
 
     scale = window_scale_for(fw, fh, &work);

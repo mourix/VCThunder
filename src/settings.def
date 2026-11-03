@@ -18,6 +18,11 @@
  *          A developer switch: parsed, never shown, and deliberately absent
  *          from the shipped file (docs/configuration.md §6).
  *
+ *      SETTING_OWN(section, key, STORE(...))
+ *          Set per title in [<title>.section], shown as no row and not
+ *          shipped. The one kind a title that reads another title's
+ *          sections still reads from its own (vct_setting_is_own()).
+ *
  *      STORE(kind, field, default, choices, min, max)
  *          `field` is a member of shim_config_t. The DEFAULT IS INI TEXT and
  *          is parsed by the same code the file goes through, so a default that
@@ -37,22 +42,24 @@
 
 /* ---- PAGE_GRAPHICS: the picture. [graphics] ---------------------------- */
 /* GROUP_GFX_DISPLAY: the window. */
+SETTING("graphics", "fullscreen",
+        STORE(VCT_STORE_BOOL, fullscreen, "false", NULL, 0, 0),
+        SHOW(GROUP_GFX_DISPLAY, "Display", ST_BOOL, SF_CHOICES, WARNING_NONE,
+             "For this menu and every game. Window size is used only when "
+             "windowed."))
 SETTING("graphics", "window_scale",
         STORE(VCT_STORE_UINT_AUTO, window_scale, "auto", NULL, 1, 8),
         SHOW(GROUP_GFX_DISPLAY, "Window size", ST_AUTO_UINT, SF_NONE, WARNING_NONE,
              NULL))
-SETTING("graphics", "fullscreen",
-        STORE(VCT_STORE_BOOL, fullscreen, "false", NULL, 0, 0),
-        SHOW(GROUP_GFX_DISPLAY, "Start borderless fullscreen", ST_BOOL,
-             SF_NONE, WARNING_NONE, NULL))
 SETTING("graphics", "aspect",
         STORE(VCT_STORE_ENUM, aspect, "raster", "raster|4:3|16:9|stretch", 0, 0),
         SHOW(GROUP_GFX_DISPLAY, "Aspect ratio", ST_ENUM,
              SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 /* Bezel art around the picture: a PNG path, per title in [hydro.graphics],
- * [offroad.graphics] and [arctic.graphics]. Not a row: the Graphics page's Bezel box edits it per
- * cabinet (launcher.c, docs/configuration.md §3.2). */
-SETTING_DEV("graphics", "bezel",
+ * [offroad.graphics], [arctic.graphics] and [uarctic.graphics]. Not a row:
+ * the Graphics page's Bezel box edits it per game (launcher.c,
+ * docs/configuration.md §3.2). */
+SETTING_OWN("graphics", "bezel",
         STORE(VCT_STORE_STR, bezel, "off", NULL, 0, 0))
 /* GROUP_GFX_PICTURE: how the picture is drawn. */
 SETTING("graphics", "vcglide_renderer",
@@ -74,6 +81,12 @@ SETTING("graphics", "frame_rate",
         STORE(VCT_STORE_ENUM, frame_rate, "30", "30|60", 0, 0),
         SHOW(GROUP_GFX_PICTURE, "Frame rate", ST_ENUM, SF_UNSHIPPED, WARNING_NONE,
              "30 Hz is the original game. 60 Hz is smoother."))
+SETTING("graphics", "vsync",
+        STORE(VCT_STORE_ENUM, vsync, "auto", "off|auto", 0, 0),
+        SHOW(GROUP_GFX_PICTURE, "Force vsync", ST_ENUM,
+             SF_UNSHIPPED | SF_TOGGLE, WARNING_NONE,
+             "Stops tearing without slowing the game. Off is best for variable "
+             "refresh screens."))
 /* GROUP_GFX_WIDESCREEN: Hor+ widescreen. */
 SETTING("graphics", "texmag",
         STORE(VCT_STORE_ENUM, texmag, "catmull_rom", "bilinear|catmull_rom", 0, 0),

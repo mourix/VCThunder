@@ -27,7 +27,9 @@ shim_config_t g_cfg;
 typedef enum {
     NOTE_REJECTED,      /* the value did not parse; the previous one stands  */
     NOTE_MISPLACED,     /* right key, wrong section: applied anyway        */
-    NOTE_STRANDED       /* right key, wrong section, and NOT ours to apply   */
+    NOTE_STRANDED,      /* right key, wrong section, and NOT ours to apply   */
+    NOTE_INHERITED      /* a title that reads another's sections set a key
+                         * that is not its own (vct_setting_is_own())       */
 } note_kind_t;
 
 typedef struct {
@@ -36,7 +38,7 @@ typedef struct {
     char key[64];
     char value[96];
     char why[96];       /* NOTE_REJECTED: the reason. Otherwise: the section
-                         * the key belongs in. */
+                         * the key belongs in, or is read from. */
 } invalid_note_t;
 
 static invalid_note_t s_invalid[INVALID_NOTE_MAX];
@@ -275,7 +277,9 @@ static int section_is_device_profile(const char *name)
 
 typedef enum {
     LOAD_SHARED,        /* every plain section; skip every per-title one */
-    LOAD_TITLE          /* only [<title>] and [<title>.*] */
+    LOAD_TITLE,         /* only [<title>] and [<title>.*] */
+    LOAD_OWN            /* the same, for a title that reads another's: only
+                         * its own keys apply, and the rest are reported */
 } load_mode_t;
 
 /* Store one value through the table's own description of it.
@@ -433,7 +437,7 @@ static const setting_desc_t *setting_lookup(const char *section,
  * file that is already open by the time the title is known, so accepting it
  * would be a setting that reads as applied and is not. */
 static int load(shim_config_t *c, const char *path, load_mode_t mode,
-                const char *title)
+                const char *title, const char *inherits)
 {
     char line[512];
     char section[64] = "";
@@ -471,7 +475,7 @@ static int load(shim_config_t *c, const char *path, load_mode_t mode,
          * by hydro, and the title pass would take it. */
         if (section_is_device_profile(section))
             continue;
-        if (mode == LOAD_TITLE) {
+        if (mode != LOAD_SHARED) {
             if (!section_owner_is_title(section, title))
                 continue;
         } else if (section_is_per_title(section)) {
@@ -486,12 +490,12 @@ static int load(shim_config_t *c, const char *path, load_mode_t mode,
         v = ini_trim(eq + 1);
         ini_strip_comment(v);
 
-        if (mode == LOAD_TITLE && _stricmp(k, "log_file") == 0)
+        if (mode != LOAD_SHARED && _stricmp(k, "log_file") == 0)
             continue;
 
         {
             const char *plain = plain_section(section,
-                                    mode == LOAD_TITLE ? title : NULL);
+                                    mode != LOAD_SHARED ? title : NULL);
             const char *canonical = unalias(k);
             int misplaced = 0;
             const setting_desc_t *d = setting_lookup(plain, canonical,
@@ -502,6 +506,24 @@ static int load(shim_config_t *c, const char *path, load_mode_t mode,
              * so an unknown key is normal and must not count as applied. */
             if (!d)
                 continue;
+            if (mode == LOAD_OWN && !vct_setting_is_own(d->key)) {
+                char from[64];
+
+                snprintf(from, sizeof from, "%s%s%s", inherits,
+                         *d->section ? "." : "", d->section);
+                note(NOTE_INHERITED, section, d->key, v, from);
+                continue;
+            }
+            /* An own key only in its own section, the one the launcher
+             * edits: anywhere else the two would show different art. */
+            if (mode == LOAD_OWN && misplaced) {
+                char own[64];
+
+                snprintf(own, sizeof own, "%s%s%s", title,
+                         *d->section ? "." : "", d->section);
+                note(NOTE_STRANDED, section, d->key, v, own);
+                continue;
+            }
             if (misplaced)
                 note(d->store == VCT_STORE_NONE ? NOTE_STRANDED
                                                 : NOTE_MISPLACED,
@@ -539,12 +561,18 @@ void config_resolve_graphics(shim_config_t *c)
 
 int config_load_shared(shim_config_t *c, const char *path)
 {
-    return load(c, path, LOAD_SHARED, NULL);
+    return load(c, path, LOAD_SHARED, NULL, NULL);
 }
 
 int config_load_title(shim_config_t *c, const char *path, const char *title)
 {
-    return load(c, path, LOAD_TITLE, title);
+    return load(c, path, LOAD_TITLE, title, NULL);
+}
+
+int config_load_own(shim_config_t *c, const char *path, const char *title,
+                    const char *inherits)
+{
+    return load(c, path, LOAD_OWN, title, inherits);
 }
 
 /* Whatever a load pass could not say yet. Call after each pass whose log is
@@ -574,6 +602,12 @@ void config_report_notes(void)
                  "section. Move the line or it does nothing.",
                  s_invalid[i].section, s_invalid[i].key, s_invalid[i].value,
                  s_invalid[i].why);
+            break;
+        case NOTE_INHERITED:
+            LOGW("config: [%s] %s = %s is NOT read: this game reads [%s] for "
+                 "every setting but its bezel art. Set it there or the line "
+                 "does nothing.", s_invalid[i].section, s_invalid[i].key,
+                 s_invalid[i].value, s_invalid[i].why);
             break;
         }
     if (s_invalid_overflow)
@@ -624,17 +658,112 @@ void config_report_notes(void)
     s_invalid_overflow = 0;
 }
 
+/* The title words, from the generated tables so a new title lists itself.
+ * ETS titles only, or every title. */
+static void title_words(char *out, size_t cap, int win32_too)
+{
+    const char *w[16];
+    unsigned n = 0, i;
+    size_t used = 0;
+
+    out[0] = '\0';
+    for (i = 0; g_profiles[i] && n < 16; i++)
+        w[n++] = g_profiles[i]->id;
+    for (i = 0; win32_too && g_arctic_titles[i] && n < 16; i++)
+        w[n++] = g_arctic_titles[i]->ids->id;
+    for (i = 0; i < n && used < cap; i++)
+        used += (size_t)snprintf(out + used, cap - used, "%s%s",
+                                 i == 0 ? "" : i + 1 == n ? " and " : ", ",
+                                 w[i]);
+}
+
+static void print_help(void)
+{
+    char all[128], ets[64];
+
+    title_words(all, sizeof all, 1);
+    title_words(ets, sizeof ets, 0);
+    printf(
+        "VCThunder " VCT_VERSION "\n"
+        "\n"
+        "usage: VCThunder.exe                     open the launcher\n"
+        "       VCThunder.exe TITLE [options]     run one game\n"
+        "       VCThunder.exe import [--replace] [--data DIR] [FILE|FOLDER...]\n"
+        "                                         import a game from your own CHD\n"
+        "\n"
+        "TITLE is one of %s.\n"
+        "\n"
+        "These override vcthunder.ini for this run only:\n"
+        "  --data DIR            game data folder        [paths] data_dir\n"
+        "  --save DIR            NVRAM folder            [paths] save_dir\n"
+        "  --log FILE            host log                [diagnostics] log_file\n"
+        "  --glide-log FILE      renderer log            [graphics] vcglide_log\n"
+        "  --link off|lan|local  cabinet link            [link] link\n"
+        "  --exe PATH            game executable         [paths] exe\n"
+        "--link and --exe apply to %s only.\n"
+        "\n"
+        "  --title TITLE         the same as TITLE given as a word\n"
+        "  --dry-run             load and patch the game, log the result, then exit\n"
+        "  --trace               log everything for this run\n"
+        "  -h, --help            show this text\n"
+        "\n"
+        "Diagnostics, each a --dry-run that then tests the host's own image:\n"
+        "  --probe-image         delay loads, TLS and exception dispatch\n"
+        "  --probe-image-refusal its control: a handler in no image, refused by\n"
+        "                        ending the process\n"
+        "\n"
+        "Two linked cabinets on one machine each need their own save folder and logs:\n"
+        "  VCThunder.exe hydro --link local --save save2 --log link2.log\n"
+        "                      --glide-log vcglide2.log\n"
+        "\n"
+        "vcthunder.ini is always the one beside VCThunder.exe.\n", all, ets);
+    fflush(stdout);
+}
+
 /* Command line, parsed AFTER the shared pass so anything here overrides it.
+ * Returns 1 to run, 0 on a bad argument (exit 2), -1 after --help (exit 0).
  *
- * `VCThunder.exe hydro` and `VCThunder.exe offroad` are accepted as bare words
- * so one pack can carry a desktop shortcut per game. Only those two words: a
- * bare argument is otherwise a typo, and taking it for a title would turn one
- * into a confusing failure much later. */
+ * A title is accepted as a bare word so one pack can carry a desktop shortcut
+ * per game. Only a title word: a bare argument is otherwise a typo, and taking
+ * it for a title would turn one into a confusing failure much later. */
 int config_parse_argv(shim_config_t *c, int argc, char **argv)
 {
+    /* --save, --log and --glide-log are the three files a SECOND instance on
+     * this machine cannot share with the first. Its unit id and its link
+     * setting live in the game's own NVRAM adjustments, which is what makes
+     * --save load-bearing rather than tidy: one save directory is one
+     * cabinet's settings. The two logs are opened "w", so without their own
+     * names the second instance truncates the first one's evidence. */
+    const struct { const char *flag; char *dst; size_t cap; } valued[] = {
+        { "--title",     c->title,       sizeof c->title },
+        { "--exe",       c->exe,         sizeof c->exe },
+        { "--data",      c->data_dir,    sizeof c->data_dir },
+        { "--save",      c->save_dir,    sizeof c->save_dir },
+        { "--log",       c->log_file,    sizeof c->log_file },
+        { "--glide-log", c->vcglide_log, sizeof c->vcglide_log },
+        { "--link",      c->link,        sizeof c->link },
+    };
     int i;
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--dry-run") == 0)
+        unsigned k;
+
+        for (k = 0; k < sizeof valued / sizeof valued[0]; k++)
+            if (strcmp(argv[i], valued[k].flag) == 0)
+                break;
+        if (k < sizeof valued / sizeof valued[0]) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "VCThunder: %s needs a value\n"
+                        "run VCThunder.exe --help\n", argv[i]);
+                return 0;
+            }
+            snprintf(valued[k].dst, valued[k].cap, "%s", argv[++i]);
+        }
+        else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0
+                 || strcmp(argv[i], "/?") == 0) {
+            print_help();
+            return -1;
+        }
+        else if (strcmp(argv[i], "--dry-run") == 0)
             c->dry_run = 1;
         /* Implies --dry-run: the probe deliberately raises exceptions, loads
          * a module and makes a page of our own image executable, and none of
@@ -647,43 +776,11 @@ int config_parse_argv(shim_config_t *c, int argc, char **argv)
             c->probe_refusal = c->dry_run = 1;
         else if (strcmp(argv[i], "--trace") == 0)
             c->log_level = LOG_TRACE;
-        else if (strcmp(argv[i], "--title") == 0 && i + 1 < argc)
-            snprintf(c->title, sizeof c->title, "%s", argv[++i]);
-        else if (strcmp(argv[i], "--exe") == 0 && i + 1 < argc)
-            snprintf(c->exe, sizeof c->exe, "%s", argv[++i]);
-        else if (strcmp(argv[i], "--data") == 0 && i + 1 < argc)
-            snprintf(c->data_dir, sizeof c->data_dir, "%s", argv[++i]);
-        /* The three files a SECOND instance on this machine cannot share with
-         * the first. Its unit id and its link setting live in the game's own
-         * NVRAM adjustments, which is what makes --save load-bearing rather
-         * than tidy: one save directory is one cabinet's settings. The two
-         * logs are opened "w", so without their own names the second instance
-         * truncates the first one's evidence. */
-        else if (strcmp(argv[i], "--save") == 0 && i + 1 < argc)
-            snprintf(c->save_dir, sizeof c->save_dir, "%s", argv[++i]);
-        else if (strcmp(argv[i], "--log") == 0 && i + 1 < argc)
-            snprintf(c->log_file, sizeof c->log_file, "%s", argv[++i]);
-        else if (strcmp(argv[i], "--glide-log") == 0 && i + 1 < argc)
-            snprintf(c->vcglide_log, sizeof c->vcglide_log, "%s", argv[++i]);
-        else if (strcmp(argv[i], "--link") == 0 && i + 1 < argc)
-            snprintf(c->link, sizeof c->link, "%s", argv[++i]);
         else if (is_title_word(argv[i]))
             snprintf(c->title, sizeof c->title, "%s", argv[i]);
         else {
-            fprintf(stderr,
-                "usage: %s <hydro|offroad> [--dry-run] [--probe-image] [--trace]\n"
-                "       [--exe PATH]\n"
-                "       [--data DIR] [--save DIR] [--log FILE] [--glide-log FILE]\n"
-                "       [--link off|lan|local]\n"
-                "  hydro | offroad  the title to run. REQUIRED: one pack holds\n"
-                "             both, and the ini does not name one. Also\n"
-                "             accepted as --title ID.\n"
-                "  --dry-run  map, unpack and patch, then stop without running\n"
-                "  --probe-image  as --dry-run, and first ask what of this\n"
-                "             process survives the game landing on our image\n"
-                "  --trace    log every stub hit and every binding\n"
-                "  --save/--log/--glide-log  what a SECOND instance on this\n"
-                "             machine needs of its own, for link play\n", argv[0]);
+            fprintf(stderr, "VCThunder: unknown argument '%s'\n"
+                    "run VCThunder.exe --help\n", argv[i]);
             return 0;
         }
     }

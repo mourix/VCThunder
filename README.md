@@ -5,7 +5,7 @@
 VCThunder is **not an emulator.** The original 32-bit x86 game code runs natively on your CPU, in-process, unmodified. What VCThunder replaces is everything *around* that code:
 the Phar Lap ETS kernel becomes real Win32, the Glide 2.53 boundary becomes our own rasteriser, and the cabinet's I/O boards, audio hardware, timebase and NVRAM become host implementations.
 
-This project was a personal challenge to see how far Claude Opus 5 could be leveraged to vibe code an application like this, and succeeded far beyond expectations. 
+This project was originally a personal challenge to see how far Claude Opus 5 could be leveraged to vibe code an application like this, and succeeded far beyond expectations. 
 At this point there is a few hundred man hours into this project alongside a handful of testers. The result is these games being playable on a level never seen before.
 
 ## Getting started
@@ -50,36 +50,34 @@ Every address VCThunder patches is an offset into one exact executable. This hos
 |---|---|---|
 | Hydro Thunder | v01.01b, 1999-02-27 | `a421f5fd4ee0d90f57815975d4a47bb784f2b46d48085e42b422605a029f8e3f` |
 | Offroad Thunder | 2000-02-25 | `fa739d0f1a80c6e429ca73fdee04c3d6d6325bb95848cb701114f74bf2a5e9bf` |
-| Arctic Thunder | v1.002, 2000-12-18 (`snow.exe`) | `de69623f143a200eee50bb0fde3a7c9d106ff659b55cd02ab67e4e7890763b28` |
-| Ultimate Arctic Thunder | v1.9.5.0, 2004-05-03 (`snow.exe`) | `e2ba002abb585079553df678fe8183bd3324598bf4045ad06479c4eafa4dd894` |
+| Arctic Thunder | v1.002, 2000-12-18 | `de69623f143a200eee50bb0fde3a7c9d106ff659b55cd02ab67e4e7890763b28` |
+| Ultimate Arctic Thunder | v1.9.5.0, 2004-05-03 | `e2ba002abb585079553df678fe8183bd3324598bf4045ad06479c4eafa4dd894` |
 
 The import checks the executable inside a CHD against these before it writes anything, and says which build you have.
 
 ## State
 
-**V0.4**, the fourth public beta release: the first with Arctic Thunder and Ultimate Arctic Thunder.
+**V0.5**, the fifth public release: fullscreen, a launcher for every screen size, tear-free presentation, and the GPU renderer under Wine and Proton.
 
-**Hydro and Offroad playable**: gameplay, controls, audio, NVRAM, windowing, force feedback, and I/O, at a locked 30 fps. **Both Arctic Thunders run at their own 60 fps** and race on keyboard and pad; they are newer here than the other two.
+**Hydro and Offroad playable**: gameplay, controls, audio, NVRAM, windowing, force feedback, and I/O, at a locked 60 fps.
 
 | Title | Released | I/O board | State |
 |---|---|---|---|
 | **Hydro Thunder** | 1999 | Diego | Playable |
 | **Offroad Thunder** | 2000 | MagicBus | Playable |
-| **Arctic Thunder** | 2001 | (Windows 2000 PC) | In progress |
-| **Ultimate Arctic Thunder** | 2004 | (Windows 2000 PC) | In progress |
+| **Arctic Thunder** | 2001 | (Windows 2000 PC) | Playable |
+| **Ultimate Arctic Thunder** | 2004 | (Windows 2000 PC) | Playable |
 
 Link play is an early beta: **only two instances on one machine have ever been linked.** That's it.
 
 ### Roadmap
 
-The goal is a **replacement system for the original Quicksilver II cabinets**.
+The goal is a **replacement system for the original Quicksilver II / Graphite cabinets**.
 
 Todo:
 - **Link play between two machines**: both simulated and real cabinet.
 - **Real cabinet IO**: the Diego and MagicBus I/O boards over RS232, and the security relay a real board originates.
 - **Real cabinet video**: native 25 kHz to the cabinet's own monitor, at the game's own 512x384 coin-op timing.
-- **Linux support and Vulkan renderer**.
-- **Bugfixes and comparison to real hardware where possible**.
 
 ## Licensing
 

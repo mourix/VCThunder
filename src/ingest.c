@@ -126,13 +126,19 @@ static int is_dir(const wchar_t *path)
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-/* Remove a directory tree this importer wrote. */
+/* Remove a directory tree this importer wrote. A junction or directory link,
+ * at the top or inside, is removed as a link: what it points at is not ours. */
 static void remove_tree(const wchar_t *dir)
 {
+    DWORD a = GetFileAttributesW(dir);
     wchar_t pat[WPATH], sub[WPATH];
     WIN32_FIND_DATAW fd;
     HANDLE f;
 
+    if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        RemoveDirectoryW(dir);
+        return;
+    }
     if (_snwprintf(pat, WPATH, L"%ls\\*", dir) < 0)
         return;
     f = FindFirstFileW(pat, &fd);
@@ -517,6 +523,48 @@ typedef struct {
     char err[256];
 } extract_t;
 
+/* A path read off a disk image, before it is joined under x->root. Its names
+ * are the image's data, so a component that could climb out (".."), name a
+ * drive or a stream (':'), carry a second separator ('/'), or that Windows
+ * would rewrite (a trailing dot or space, a device name) refuses the import. */
+static int image_path_ok(extract_t *x, const wchar_t *path)
+{
+    static const wchar_t *const k_dev[] = { L"CON", L"PRN", L"AUX", L"NUL" };
+    const wchar_t *c = path, *e, *p;
+    char name[MAX_PATH];
+
+    for (;;) {
+        size_t n, stem;
+        int bad = 0, i;
+
+        e = wcschr(c, L'\\');
+        n = e ? (size_t)(e - c) : wcslen(c);
+        for (p = c; p < c + n; p++)
+            if (*p < 32 || wcschr(L"/:*?\"<>|", *p))
+                bad = 1;
+        if (!n || c[n - 1] == L'.' || c[n - 1] == L' ')
+            bad = 1;
+        for (stem = 0; stem < n && c[stem] != L'.'; stem++)
+            ;
+        for (i = 0; i < 4; i++)
+            if (stem == 3 && !_wcsnicmp(c, k_dev[i], 3))
+                bad = 1;
+        if (stem == 4 && (!_wcsnicmp(c, L"COM", 3) ||
+                          !_wcsnicmp(c, L"LPT", 3)) &&
+            c[3] >= L'0' && c[3] <= L'9')
+            bad = 1;
+        if (bad) {
+            narrow(path, name, sizeof name);
+            snprintf(x->err, sizeof x->err, "it holds a file named '%s', "
+                     "which cannot be written safely", name);
+            return 0;
+        }
+        if (!e)
+            return 1;
+        c = e + 1;
+    }
+}
+
 static int sink_write(void *ctx, const void *buf, size_t n)
 {
     extract_t *x = ctx;
@@ -541,6 +589,8 @@ static int visit_extract(void *ctx, const wchar_t *path, uint32_t cl,
     wchar_t dst[WPATH];
     int rc;
 
+    if (!image_path_ok(x, path))
+        return -1;
     if (!x->writing) {
         x->total += size;
         x->files++;
@@ -669,6 +719,8 @@ static int visit_extract_ntfs(void *ctx, const wchar_t *path, uint64_t rec)
     wchar_t dst[WPATH];
     int rc;
 
+    if (!image_path_ok(x, path))
+        return -1;
     if (!x->writing) {
         uint64_t size;
         if (ntfs_file_size(x->nv, rec, &size, x->err, sizeof x->err))
@@ -709,6 +761,8 @@ static int visit_extract_iso(void *ctx, const wchar_t *path,
     wchar_t dst[WPATH];
     int rc;
 
+    if (!image_path_ok(x, path))
+        return -1;
     if (!x->writing) {
         x->total += n->size;
         x->files++;

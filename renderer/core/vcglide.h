@@ -42,6 +42,7 @@ typedef struct {
     char     aspect[16];        /* raster | 4:3 | 16:9 | stretch */
     char     upscale_2d[16];    /* bilinear | catmull_rom | fsr1 */
     char     texmag[16];        /* bilinear | catmull_rom: 3D texture magnifier */
+    char     vsync[8];          /* auto | off: the GPU swapchain's present mode */
     unsigned capture_frames;
     int      verbose;
     int      present;           /* show what was rendered; a harness says no */

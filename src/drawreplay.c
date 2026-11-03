@@ -73,6 +73,41 @@ static size_t    s_total;
 static unsigned char *s_dirty;       /* one flag per chunk of the concatenation */
 static size_t    s_dirty_cap;
 
+/* ONE WALK OVER THE RANGES, in DR_CHUNK pieces with a short last piece per
+ * range: `a` and `n` are the piece, `off` its place in a snapshot (the ranges
+ * concatenated) and `c` its flag in s_dirty. Every pass over game memory takes
+ * its pieces from here, so they all agree on what a chunk is.
+ *     for (chunk_begin(&ch); chunk_next(&ch); ) ... */
+typedef struct {
+    unsigned  i;                    /* the next range                     */
+    uintptr_t a, hi;
+    size_t    n, off, c;
+} chunk_t;
+
+static inline void chunk_begin(chunk_t *k)
+{
+    k->i = 0;
+    k->a = k->hi = 0;
+    k->n = k->off = 0;
+    k->c = (size_t)-1;
+}
+
+static inline int chunk_next(chunk_t *k)
+{
+    k->a += k->n;
+    k->off += k->n;
+    k->c++;
+    while (k->a >= k->hi) {
+        if (k->i >= s_nrng)
+            return 0;
+        k->a = s_rng[k->i].lo;
+        k->hi = s_rng[k->i].hi;
+        k->i++;
+    }
+    k->n = k->hi - k->a < DR_CHUNK ? k->hi - k->a : DR_CHUNK;
+    return 1;
+}
+
 static unsigned  s_skip, s_budget;
 static int       s_control, s_reported, s_interp;
 
@@ -467,13 +502,10 @@ static int build_ranges(void)
         s_layout_vgen = vgen;
         s_layout_nrng = s_nrng;
         memcpy(s_layout_rng, s_rng, s_nrng * sizeof s_rng[0]);
-        for (i = 0, k = 0, s_ww_pages = 0; i < s_nrng; i++) {
-            uintptr_t a;
+        chunk_t ch;
 
-            for (a = s_rng[i].lo; a < s_rng[i].hi; a += DR_CHUNK)
-                s_ww_pages += (uint64_t)ww_clean(a, s_rng[i].hi - a < DR_CHUNK ?
-                                  s_rng[i].hi - a : DR_CHUNK, ~0u, &k);
-        }
+        for (chunk_begin(&ch), k = 0, s_ww_pages = 0; chunk_next(&ch); )
+            s_ww_pages += (uint64_t)ww_clean(ch.a, ch.n, ~0u, &k);
     }
     /* 60 Hz never compares with draw #1's result: no s_after, which would
      * be another snapshot's worth of a 32-bit address space. */
@@ -493,33 +525,35 @@ static int build_ranges(void)
  * last filled. The replay gate (s_verify) compares every page it skipped. */
 static void snapshot(snap_t *b)
 {
-    unsigned i, cur = 0;
-    size_t off = 0;
+    unsigned cur = 0;
     int inc = snap_current(b);
+    chunk_t ch;
 
     if (s_nww)
         ww_poll();
-    for (i = 0; i < s_nrng; i++) {
-        uintptr_t a = s_rng[i].lo;
+    if (!inc) {
+        /* Whole: one copy per range, counted in chunks as the pieces are. */
+        unsigned i;
+        size_t off = 0;
 
-        if (!inc) {
-            memcpy(b->p + off, (const void *)a, s_rng[i].hi - a);
-            off += s_rng[i].hi - a;
-            s_ww_copied += (s_rng[i].hi - a + DR_CHUNK - 1) / DR_CHUNK;
-            continue;
-        }
-        while (a < s_rng[i].hi) {
-            size_t n = s_rng[i].hi - a < DR_CHUNK ? s_rng[i].hi - a : DR_CHUNK;
+        for (i = 0; i < s_nrng; i++) {
+            size_t n = s_rng[i].hi - s_rng[i].lo;
 
-            if (!ww_clean(a, n, b->epoch, &cur)) {
-                memcpy(b->p + off, (const void *)a, n);
-                s_ww_copied++;
-            } else if (s_verify && memcmp(b->p + off, (const void *)a, n)) {
-                s_ww_missed_snap++;
-                memcpy(b->p + off, (const void *)a, n);
-            }
-            a += n;
+            memcpy(b->p + off, (const void *)s_rng[i].lo, n);
             off += n;
+            s_ww_copied += (n + DR_CHUNK - 1) / DR_CHUNK;
+        }
+    } else {
+        for (chunk_begin(&ch); chunk_next(&ch); ) {
+            unsigned char *s = b->p + ch.off;
+
+            if (!ww_clean(ch.a, ch.n, b->epoch, &cur)) {
+                memcpy(s, (const void *)ch.a, ch.n);
+                s_ww_copied++;
+            } else if (s_verify && memcmp(s, (const void *)ch.a, ch.n)) {
+                s_ww_missed_snap++;
+                memcpy(s, (const void *)ch.a, ch.n);
+            }
         }
     }
     b->epoch = ++s_epoch;
@@ -529,31 +563,26 @@ static void snapshot(snap_t *b)
 /* Flag every chunk of live memory that differs from `b`; return how many. */
 static size_t mark_dirty(const snap_t *b)
 {
-    unsigned i, cur = 0;
-    size_t off = 0, c = 0, flagged = 0;
+    unsigned cur = 0;
+    size_t flagged = 0;
     int inc = snap_current(b);
+    chunk_t ch;
 
     if (inc)
         ww_poll();
-    for (i = 0; i < s_nrng; i++) {
-        uintptr_t a = s_rng[i].lo;
+    for (chunk_begin(&ch); chunk_next(&ch); ) {
+        const void *a = (const void *)ch.a;
+        int d;
 
-        while (a < s_rng[i].hi) {
-            size_t n = s_rng[i].hi - a < DR_CHUNK ? s_rng[i].hi - a : DR_CHUNK;
-            int d;
-
-            if (inc && ww_clean(a, n, b->epoch, &cur)) {
-                d = s_verify && memcmp((const void *)a, b->p + off, n) != 0;
-                s_ww_missed_scan += (uint64_t)d;
-            } else {
-                d = memcmp((const void *)a, b->p + off, n) != 0;
-                s_ww_compared++;
-            }
-            s_dirty[c++] = (unsigned char)d;
-            flagged += (size_t)d;
-            a += n;
-            off += n;
+        if (inc && ww_clean(ch.a, ch.n, b->epoch, &cur)) {
+            d = s_verify && memcmp(a, b->p + ch.off, ch.n) != 0;
+            s_ww_missed_scan += (uint64_t)d;
+        } else {
+            d = memcmp(a, b->p + ch.off, ch.n) != 0;
+            s_ww_compared++;
         }
+        s_dirty[ch.c] = (unsigned char)d;
+        flagged += (size_t)d;
     }
     return flagged;
 }
@@ -579,21 +608,11 @@ static void restore_dirty(const unsigned char *buf)
 
 static void restore_dirty_chunks(const unsigned char *buf)
 {
-    unsigned i;
-    size_t off = 0, c = 0;
+    chunk_t ch;
 
-    for (i = 0; i < s_nrng; i++) {
-        uintptr_t a = s_rng[i].lo;
-
-        while (a < s_rng[i].hi) {
-            size_t n = s_rng[i].hi - a < DR_CHUNK ? s_rng[i].hi - a : DR_CHUNK;
-
-            if (s_dirty[c++])
-                memcpy((void *)a, buf + off, n);
-            a += n;
-            off += n;
-        }
-    }
+    for (chunk_begin(&ch); chunk_next(&ch); )
+        if (s_dirty[ch.c])
+            memcpy((void *)ch.a, buf + ch.off, ch.n);
 }
 
 static void note_cell(uint32_t va, int in_dirty)
@@ -617,30 +636,21 @@ static void note_cell(uint32_t va, int in_dirty)
 /* Every dword of live memory that differs from `buf`. */
 static size_t diff_dwords(const unsigned char *buf)
 {
-    unsigned i;
-    size_t off = 0, c = 0, diffs = 0;
+    size_t diffs = 0;
+    chunk_t ch;
 
-    for (i = 0; i < s_nrng; i++) {
-        uintptr_t a = s_rng[i].lo;
+    for (chunk_begin(&ch); chunk_next(&ch); ) {
+        size_t k;
 
-        while (a < s_rng[i].hi) {
-            size_t n = s_rng[i].hi - a < DR_CHUNK ? s_rng[i].hi - a : DR_CHUNK;
-
-            if (memcmp((const void *)a, buf + off, n) != 0) {
-                size_t k;
-
-                for (k = 0; k + 4 <= n; k += 4)
-                    if (memcmp((const void *)(a + k), buf + off + k, 4) != 0) {
-                        diffs++;
-                        if (!s_dirty[c])
-                            s_diff_outside++;
-                        note_cell((uint32_t)(a + k), s_dirty[c]);
-                    }
+        if (!memcmp((const void *)ch.a, buf + ch.off, ch.n))
+            continue;
+        for (k = 0; k + 4 <= ch.n; k += 4)
+            if (memcmp((const void *)(ch.a + k), buf + ch.off + k, 4) != 0) {
+                diffs++;
+                if (!s_dirty[ch.c])
+                    s_diff_outside++;
+                note_cell((uint32_t)(ch.a + k), s_dirty[ch.c]);
             }
-            c++;
-            a += n;
-            off += n;
-        }
     }
     return diffs;
 }
@@ -1863,8 +1873,9 @@ verdict:
  * tick's snapshot and, while it is still in cache, compared with tick N's. */
 static void snapshot_and_blend(void)
 {
-    unsigned i, k = 0, cur = 0;
-    size_t off = 0, poff = 0;
+    unsigned k = 0, cur = 0;
+    size_t poff = 0;
+    chunk_t ch;
     /* s_before was filled two ticks ago and s_prev one: a page unwritten
      * since s_before's fill is in both, one unwritten since s_prev's is
      * still tick N's and has nothing to blend. */
@@ -1879,92 +1890,65 @@ static void snapshot_and_blend(void)
     if (s_nww)
         ww_poll();
 
-    for (i = 0; i < s_nrng; i++) {
-        uintptr_t lo = s_rng[i].lo, hi = s_rng[i].hi, a;
+    /* Chunk by chunk, so a range that grew since tick N still blends
+     * wherever tick N had it. */
+    for (chunk_begin(&ch); chunk_next(&ch); ) {
+        uintptr_t a = ch.a;
+        size_t n = ch.n, q;
+        uint32_t *live = (uint32_t *)a;
+        uint32_t *cv = (uint32_t *)(s_before.p + ch.off);
+        const uint32_t *pc = NULL;
 
-        /* Chunk by chunk, so a range that grew since tick N still blends
-         * wherever tick N had it. */
-        for (a = lo; a < hi; a += DR_CHUNK) {
-            size_t n = hi - a < DR_CHUNK ? hi - a : DR_CHUNK, q;
-            uint32_t *live = (uint32_t *)a;
-            uint32_t *cv = (uint32_t *)(s_before.p + off + (a - lo));
-            const uint32_t *pc = NULL;
-
-            while (k < s_prev_nrng && s_prev_rng[k].hi <= a) {
-                poff += s_prev_rng[k].hi - s_prev_rng[k].lo;
-                k++;
-            }
-            if (k < s_prev_nrng && s_prev_rng[k].lo <= a &&
-                s_prev_rng[k].hi >= a + n)
-                pc = (const uint32_t *)(s_prev.p + poff + (a - s_prev_rng[k].lo));
-            if (inc_b && ww_clean(a, n, s_before.epoch, &cur))
-                continue;
-            memcpy(cv, live, n);
-            s_ww_copied++;
-            if (!pc || (inc_p && ww_clean(a, n, s_prev.epoch, &cur)))
-                continue;
-            s_ww_compared++;
-            if (!memcmp(pc, cv, n))
-                continue;
-            ex = s_nex && ex_overlaps(a, a + n);
-            if (s_prof)
-                tq = now_ms();
-            /* Word by word. Blending runs of floats all-or-nothing, so a
-             * position and the target beside it stay together, was tried: it
-             * refused Hydro's boat position whenever any field beside it
-             * failed, and the boat drew off its own camera. A rule refusing
-             * changes larger than half a value (meant for angle wraps) was
-             * tried too, and caused more bad frames in both titles than it
-             * prevented. */
-            for (q = 0; q < n / 4; ) {
-                size_t c0 = q, c1, r;
-                int ok = 1;
-
-                if (pc[q] == cv[q]) {
-                    q++;
-                    continue;
-                }
-                if (blendable(pc[q], cv[q], (uintptr_t)&live[q], ex))
-                    q++;
-                c1 = q;
-                if (c1 == c0) {                /* changed, but not a float */
-                    s_ds_skipped++;
-                    q++;
-                    continue;
-                }
-                for (r = c0; r < c1 && ok; r++) {
-                    float fa, fb, d;
-
-                    memcpy(&fa, &pc[r], 4);
-                    memcpy(&fb, &cv[r], 4);
-                    d = fb - fa;
-                    ok = fabsf(d) <= DS_JUMP;
-                }
-                if (!ok) {
-                    s_ds_skipped += c1 - c0;
-                    continue;
-                }
-                for (r = c0; r < c1; r++) {
-                    float fa, fb;
-
-                    memcpy(&fa, &pc[r], 4);
-                    memcpy(&fb, &cv[r], 4);
-                    fa += (fb - fa) * s_alpha;
-                    memcpy(&live[r], &fa, 4);
-                    bl_note(&live[r], cv[r]);
-                    s_ds_words++;
-                }
-            }
-            if (s_prof) {
-                double tc = now_ms();
-
-                s_pr_word_acc += tc - tq;
-                s_pc.timed++;
-                prof_chunk(pc, cv, a, n, ex);
-                tcount += now_ms() - tc;
-            }
+        while (k < s_prev_nrng && s_prev_rng[k].hi <= a) {
+            poff += s_prev_rng[k].hi - s_prev_rng[k].lo;
+            k++;
         }
-        off += hi - lo;
+        if (k < s_prev_nrng && s_prev_rng[k].lo <= a &&
+            s_prev_rng[k].hi >= a + n)
+            pc = (const uint32_t *)(s_prev.p + poff + (a - s_prev_rng[k].lo));
+        if (inc_b && ww_clean(a, n, s_before.epoch, &cur))
+            continue;
+        memcpy(cv, live, n);
+        s_ww_copied++;
+        if (!pc || (inc_p && ww_clean(a, n, s_prev.epoch, &cur)))
+            continue;
+        s_ww_compared++;
+        if (!memcmp(pc, cv, n))
+            continue;
+        ex = s_nex && ex_overlaps(a, a + n);
+        if (s_prof)
+            tq = now_ms();
+        /* Word by word, not a run of floats all-or-nothing: that refuses a
+         * position whenever any field beside it fails, and Hydro's boat then
+         * draws off its own camera. */
+        for (q = 0; q < n / 4; q++) {
+            float fa, fb;
+
+            if (pc[q] == cv[q])
+                continue;
+            if (!blendable(pc[q], cv[q], (uintptr_t)&live[q], ex)) {
+                s_ds_skipped++;            /* changed, but not a float */
+                continue;
+            }
+            memcpy(&fa, &pc[q], 4);
+            memcpy(&fb, &cv[q], 4);
+            if (!(fabsf(fb - fa) <= DS_JUMP)) {  /* NaN is refused too */
+                s_ds_skipped++;
+                continue;
+            }
+            fa += (fb - fa) * s_alpha;
+            memcpy(&live[q], &fa, 4);
+            bl_note(&live[q], cv[q]);
+            s_ds_words++;
+        }
+        if (s_prof) {
+            double tc = now_ms();
+
+            s_pr_word_acc += tc - tq;
+            s_pc.timed++;
+            prof_chunk(pc, cv, a, n, ex);
+            tcount += now_ms() - tc;
+        }
     }
     s_before.epoch = ++s_epoch;
     s_before.layout = s_layout;

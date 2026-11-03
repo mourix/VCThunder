@@ -228,7 +228,9 @@ static void seed_from_dump(const char *save_path, const char *data_path)
              "file from scratch", save_path, data_path, GetLastError());
 }
 
-/* Returns `out` on success, or `in` unchanged when no mapping applies. */
+/* Returns `out` on success, `in` unchanged when there is nothing to map, or
+ * NULL (last error set) when the pack path is too long to build: the game's
+ * own path names the host's real drive, so it is never passed through. */
 const char *fs_map_path_mode(const char *in, char *out, size_t out_sz,
                              fs_access_t mode)
 {
@@ -246,8 +248,9 @@ const char *fs_map_path_mode(const char *in, char *out, size_t out_sz,
         leaf++;
 
     if (!fs_overlay_path(s_data, s_save, leaf, out, out_sz, mode)) {
-        LOGW("fs: path too long, passing through: '%s'", in);
-        return in;
+        LOGW("fs: '%s' refused: its path in the pack is too long", in);
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return NULL;
     }
     LOGT("fs: '%s' -> '%s' (%s)", in, out,
          mode == FS_WRITE ? "write" : mode == FS_DELETE ? "delete" : "read");

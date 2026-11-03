@@ -80,10 +80,11 @@ int  capture_note_tick(void);
 
 /* ---- ...and what the window owes it --------------------------------------
  *
- * Defined in src/launcher.c. This list is the cost of the boundary and is
- * meant to be read as one: a capture says things, marks the file unsaved,
- * refreshes the control it just wrote, and asks what is attached. It does not
- * lay anything out, build a page or own a window. */
+ * Defined in src/launcher.c, the note line in src/launcher_controls.c. This
+ * list is the cost of the boundary and is meant to be read as one: a capture
+ * says things, marks the file unsaved, refreshes the control it just wrote, and
+ * asks what is attached. It does not lay anything out, build a page or own a
+ * window. */
 
 /* The status bar, the note line under the live bars, and the frame. */
 void set_status(const char *text);

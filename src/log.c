@@ -18,6 +18,25 @@ log_level_t g_log_level = LOG_INFO;
 static FILE *s_fp;
 static DWORD s_t0;
 
+/* s_fp is opened and closed on one thread while every other thread logs: a
+ * close waits for the line in progress. A critical section because it is
+ * re-entrant: the exception handler logs, possibly from inside a line. */
+static CRITICAL_SECTION s_fp_lock;
+static INIT_ONCE s_fp_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK fp_lock_init(PINIT_ONCE once, PVOID arg, PVOID *ctx)
+{
+    (void)once; (void)arg; (void)ctx;
+    InitializeCriticalSection(&s_fp_lock);
+    return TRUE;
+}
+
+static void fp_lock(void)
+{
+    InitOnceExecuteOnce(&s_fp_once, fp_lock_init, NULL, NULL);
+    EnterCriticalSection(&s_fp_lock);
+}
+
 static const char *const LEVEL[] = { "ERR ", "WARN", "INFO", "TRC " };
 
 /* NOT __DATE__ and __TIME__: they would make every build of identical source a
@@ -54,10 +73,15 @@ void log_open(const char *path, log_level_t level)
     g_log_level = level;
     s_t0 = GetTickCount();
     if (path && *path) {
+        FILE *fp;
+
         kept = keep_previous(path);
-        s_fp = fopen(path, "w");
-        if (!s_fp)
+        fp = fopen(path, "w");
+        if (!fp)
             fprintf(stderr, "shim: cannot open log '%s'\n", path);
+        fp_lock();
+        s_fp = fp;
+        LeaveCriticalSection(&s_fp_lock);
     }
     log_printf(LOG_INFO, "VCThunder %s: %s", VCT_VERSION, VCT_BUILD);
     /* Only when there IS one. A line claiming a file that is not there is the
@@ -72,10 +96,12 @@ void log_open(const char *path, log_level_t level)
 
 void log_close(void)
 {
+    fp_lock();
     if (s_fp) {
         fclose(s_fp);
         s_fp = NULL;
     }
+    LeaveCriticalSection(&s_fp_lock);
 }
 
 void log_printf(log_level_t level, const char *fmt, ...)
@@ -108,10 +134,12 @@ void log_printf(log_level_t level, const char *fmt, ...)
     line[n] = '\n';
     line[n + 1] = '\0';
     fputs(line, stderr);
+    fp_lock();
     if (s_fp) {
         fputs(line, s_fp);
         fflush(s_fp);           /* unbuffered on purpose; see header comment */
     }
+    LeaveCriticalSection(&s_fp_lock);
 }
 
 /* ---- the game's own printf ---------------------------------------------- */

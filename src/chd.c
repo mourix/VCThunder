@@ -222,9 +222,13 @@ static int huff_assign(huff_t *h)
             return 0;
         hist[h->lengths[sym]]++;
     }
+    /* The lengths are the file's data. Each length's codes must fit in that
+     * many bits: an over-full set would index prim_len past its 256 entries. */
     for (L = 32; L > 0; L--) {
         uint32_t nxt = (cur + hist[L]) >> 1;
         if (L != 1 && nxt * 2 != cur + hist[L])
+            return 0;
+        if (L < 32 && cur + hist[L] > (1u << L))
             return 0;
         starts[L] = cur;
         cur = nxt;
@@ -1492,7 +1496,8 @@ int chd_open(const wchar_t *path, unsigned jobs, chd_t **out,
             goto fail;
         }
     }
-    hunks = (c->logicalbytes + c->hunkbytes - 1) / c->hunkbytes;
+    hunks = c->logicalbytes / c->hunkbytes +
+            (c->logicalbytes % c->hunkbytes != 0);
     if (hunks >= HUNK_ZERO - 1) {
         set_err(err, errsz, "implausibly large image");
         goto fail;

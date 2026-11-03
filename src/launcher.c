@@ -7,7 +7,7 @@
  * from src/settings.def and src/bindings.def, so a key or control added there
  * appears here with no edit to this file. This half is the VIEW only: catalogue,
  * value grammar, document, model, capture and palette are each another
- * file's. */
+ * file's, and so are the Controls page and the CHD import (launcher_page.h). */
 #include "vcthunder.h"
 #include "resource.h"
 #include "io.h"
@@ -18,6 +18,7 @@
 #include "launcher_capture.h"
 #include "launcher_pad.h"
 #include "launcher_theme.h"
+#include "launcher_page.h"
 #include "di_role.h"
 #include "ingest.h"
 #include "bezel.h"
@@ -27,6 +28,7 @@
 #include <commdlg.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <windowsx.h>
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
@@ -50,100 +52,6 @@ enum {
 typedef char action_count_fits_a_mask[ACTION_COUNT <= 32 ? 1 : -1];
 /* ...and every slot id fits below IDC_BIND_RESET. */
 typedef char binding_slots_fit[ACTION_COUNT * BINDING_SLOTS <= 100 ? 1 : -1];
-
-enum {
-    IDC_NAV = 100,
-    IDC_STATUS,
-    IDC_APPLY,
-    IDC_CLOSE,
-    IDC_PAGE,
-    IDC_FOCUS_RING,
-    IDC_PLAY_HYDRO = 200,
-    IDC_PLAY_OFFROAD,
-    IDC_PLAY_ARCTIC,
-    IDC_PLAY_UARCTIC,
-    /* TWO TABS, NOT THREE. Bindings and Devices & Axes were one job split by
-     * mechanism; they are one page now. */
-    IDC_CONTROL_MAIN = 210,
-    IDC_CONTROL_FFB,
-    /* THE GAME ROW at the top of the Controls tab: which cabinet's buttons,
-     * and while each game has its own controller, whose controller. */
-    IDC_TITLE_HYDRO = 220,
-    IDC_TITLE_OFFROAD,
-    /* One controller for both games, or one each. */
-    IDC_SEPARATE_CONTROLLER,
-    IDC_TITLE_ARCTIC = 225,
-    IDC_PROBE_REFRESH = 230,
-    IDC_FFB_TEST,
-    /* The three disclosures. Every one of them is a checkbox whose state is
-     * this window's and is never written to the file: what a user chose to
-     * LOOK at is not configuration. */
-    IDC_SHOW_RAW,
-    IDC_SHOW_ADVANCED,
-    IDC_SHOW_LEGACY,
-    IDC_SETUP_AXES,
-    IDC_LIVE_STEER = 240,
-    IDC_LIVE_THROTTLE,
-    IDC_LIVE_BRAKE,
-    /* The line under the three bars: the hint, the missing-axis sentence, or
-     * the step Set up is asking for. Directly under the thing it is about, and
-     * not on the status bar, which is where three of this project's own
-     * answers went unread. */
-    IDC_LIVE_NOTE,
-    /* The raw disclosure's own read-out: which buttons are down, and the hat. */
-    IDC_LIVE_BUTTONS,
-    /* The second line under the bars: what the axis guard is measuring. */
-    IDC_LIVE_SAY,
-    IDC_AXIS_TABLE_HEAD = 250,
-    /* The live control table, three controls per row: the ini's name for the
-     * axis beside the driver's, a bar, and the value. One range each, so a row
-     * is addressable without asking what a control is. */
-    IDC_AXIS_NAME_BASE = 260,
-    IDC_AXIS_BAR_BASE = 280,
-    IDC_AXIS_VALUE_BASE = 300,
-    /* One controller per row: the radio that says which one drives the car,
-     * and the muted line under it that says what the thing is and whether it
-     * is moving right now. INPUT_PROBE_MAX_DEVICES is 24. */
-    IDC_DEVICE_BASE = 320,
-    IDC_DEVICE_CAP_BASE = 350,
-    IDC_LIVE_ROLE_BASE = 380,       /* which axis each of the three is on   */
-    /* The CHD import: the button on Files & Logging, and the block the Launch
-     * page shows while one runs. */
-    IDC_IMPORT = 390,
-    IDC_IMPORT_CANCEL,
-    IDC_IMPORT_BAR,
-    IDC_IMPORT_TEXT,
-    IDC_RESTORE_DEFAULTS,
-    IDC_ABOUT_LINK,
-    IDC_SHOW_LOGS,
-    /* The Graphics page's Bezel box, one of each per game (MODEL_TITLES). */
-    IDC_BEZEL_ENABLE = 400,
-    IDC_BEZEL_FILE = 404,
-    IDC_BEZEL_CHOOSE = 408,
-    IDC_BEZEL_NOTE = 412,
-    IDC_SETTING_BASE = 1000,
-    IDC_BROWSE_BASE = 2000,
-    IDC_DETECT_BASE = 3000,
-    /* TWO SLOTS PER ACTION, EACH ONE INPUT OF ANY KIND: a key, or a button on
-     * any controller. Clicking a slot replaces that input and nothing else,
-     * so a wrong press costs one press, and two buttons on one controller are
-     * two slots. Slot `s` of action `a` is BASE + a * BINDING_SLOTS + s. */
-    IDC_BIND_SLOT_BASE = 4000,
-    /* Every row of the game shown back to its default, greyed while they all
-     * already are. One for the card, not one per row. */
-    IDC_BIND_RESET = 4100,
-    /* A settings row's label, so a greyed row can dim it. */
-    IDC_LABEL_BASE = 4500,
-    /* The per-setting help caption. Its own range so control_colour() can mute
-     * it without asking what a static's text says. */
-    IDC_HELP_BASE = 5000,
-    /* A slider's value, to its right, and the balance row's left end. */
-    IDC_VALUE_BASE = 5500,
-    IDC_FLANK_BASE = 6000,
-    IDC_SUB_BASE = 6500,
-    /* The Graphics page's card of what each game gets. */
-    IDC_READOUT = 7000
-};
 
 static const char *const k_nav_name[] = {
     "Play", "Graphics", "Sound", "Controls", "Game System", "Link Play",
@@ -180,10 +88,15 @@ static const char *const k_page_intro[] = {
 #define BOX_GAP  22
 #define BOX_HEAD 26
 
+/* A single-line EDIT draws its text at its top, so it is shorter than the row
+ * and centred in it. */
+#define EDIT_H   28
+#define BUTTON_W 90             /* Browse..., Detect, Choose...            */
+
 /* A page's header: the intro's top, and on a Controls page the height of the
  * tab row under it. page_header_bottom() and the renderers both read these. */
 #define PAGE_INTRO_Y   16
-#define CONTROLS_TAB_H 24
+#define CONTROLS_TAB_H CTRL_H
 
 /* Each box's heading, by VCT_GROUP_ID(). Box 0 is a page's one box of bare
  * rows, titled per page by settings_box_title(). */
@@ -199,10 +112,28 @@ typedef char page_table_check[
     sizeof k_nav_name / sizeof k_nav_name[0] == NAV_COUNT &&
     sizeof k_nav_page / sizeof k_nav_page[0] == NAV_COUNT ? 1 : -1];
 
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+
 static HWND s_window, s_nav, s_page, s_status, s_apply, s_close;
 /* The controller's navigation state (launcher_pad.h). */
 static launcher_pad_t s_pad;
 static int s_compact, s_tiny;
+/* THE DESIGN'S OWN SIZE, in logical units. The scale fits it to the window's
+ * client area and never drops below Windows' scale for the monitor
+ * (launcher_dpi()), so a window of the size the launcher opens at draws at
+ * Windows' scale, and a larger one -- maximised, or the whole screen --
+ * magnifies the same design rather than spreading it out. A smaller one keeps
+ * Windows' scale and falls back to the compact form. */
+#define DESIGN_W 960
+#define DESIGN_H 600
+/* The widest page worth having; past it the window centres one column. */
+#define PAGE_MAX_W 1000
+/* Whether the window covers its monitor, which follows [graphics] fullscreen
+ * (launcher_set_fullscreen()), and where it was before it did. */
+static int s_fullscreen;
+static WINDOWPLACEMENT s_windowed_place;
 static int s_page_index = PAGE_HOME;
 /* WHICH BINDING SLOTS ARE LIT RIGHT NOW, one bit per action per slot. A
  * wheel's buttons are numbered and unlabelled, so `Button 9` says nothing about
@@ -211,18 +142,16 @@ static int s_page_index = PAGE_HOME;
  * costs a comparison at 33 ms. */
 static uint32_t s_lit_slot[BINDING_SLOTS];
 static int s_dirty, s_loading, s_page_scroll, s_content_height;
+/* A press-and-drag scrolling the page: where it began, and the offset then. */
+static int s_dragging, s_drag_y, s_drag_from;
 /* The page's width when its children were last built, and whether a rebuild is
  * queued. A resize INSIDE one layout mode moves the page; without a rebuild its
  * children keep their creation coordinates, so anything laid out to the right
  * edge ends up outside the page and unreachable, it scrolls vertically only. */
 static int s_rendered_page_w, s_relayout_pending;
-/* THE LINES UNDER THE LIVE BARS and the raw-view checkbox: the note and Set
- * up's line 2, reserved at exactly the height of what is showing. The render
- * and place_note_lines() measure at the same stored width and text, or they
- * could disagree about a wrap and rebuild forever. */
-#define NOTE_GAP 12             /* from the control above to the note      */
-static int s_note_text_h, s_note_w;
-static char s_note_last[512];   /* the last note shown, redrawn by a rebuild */
+/* Inside a drag of the window's edge or caption (WM_ENTERSIZEMOVE): the scale
+ * waits for the drop rather than following every step. */
+static int s_sizing;
 /* WHICH PAGE THE CHILDREN ON SCREEN BELONG TO, so a rebuild can tell "the same
  * page again" from "a different page". -1 until the first render. */
 static int s_rendered_page = -1;
@@ -279,7 +208,6 @@ static int tab_is_selected(int id)
  * and that is the whole of the boundary between them. */
 static int launcher_slot_lit(int id);
 static int launcher_slot_empty(int id);
-static void update_reset_button(void);
 
 theme_button_t launcher_button_kind(int id)
 {
@@ -308,7 +236,7 @@ theme_button_t launcher_button_kind(int id)
 int launcher_control_is_caption(int id)
 {
     return (id >= IDC_HELP_BASE && id < IDC_HELP_BASE + (int)SETTING_COUNT) ||
-           (id >= IDC_BEZEL_NOTE && id < IDC_BEZEL_NOTE + MODEL_TITLES);
+           (id >= IDC_BEZEL_NOTE && id < IDC_BEZEL_NOTE + MODEL_BEZELS);
 }
 
 static int setting_inert(unsigned index);
@@ -488,7 +416,7 @@ static int draw_nav_tile(const DRAWITEMSTRUCT *d)
     ink = lit ? (dark ? RGB(255, 255, 255) : GetSysColor(COLOR_HIGHLIGHTTEXT))
               : (dark ? RGB(240, 240, 240) : GetSysColor(COLOR_BTNTEXT));
     brush = CreateSolidBrush(face);
-    pen = CreatePen(PS_SOLID, 1, edge);
+    pen = CreatePen(PS_INSIDEFRAME, max(1, scale_px(THEME_EDGE)), edge);
     old_brush = SelectObject(d->hDC, brush);
     old_pen = SelectObject(d->hDC, pen);
     Rectangle(d->hDC, tile.left, tile.top, tile.right, tile.bottom);
@@ -519,6 +447,36 @@ static int draw_nav_tile(const DRAWITEMSTRUCT *d)
         InflateRect(&focus, -scale_px(3), -scale_px(3));
         DrawFocusRect(d->hDC, &focus);
     }
+    return 1;
+}
+
+/* THE MARK IN THE ABOUT BOX: the window's own icon, loaded at the size it is
+ * drawn at, so Windows scales it once from the largest image. */
+static HICON s_logo_icon;
+static int s_logo_size;
+
+static int draw_logo(const DRAWITEMSTRUCT *d)
+{
+    RECT rc;
+    int size;
+
+    if (!d || d->CtlType != ODT_STATIC || d->CtlID != IDC_LOGO)
+        return 0;
+    rc = d->rcItem;
+    FillRect(d->hDC, &rc, theme_page_brush());
+    size = min(rc.right - rc.left, rc.bottom - rc.top);
+    if (size != s_logo_size) {
+        if (s_logo_icon)
+            DestroyIcon(s_logo_icon);
+        s_logo_icon = (HICON)LoadImageA(theme_instance(),
+                                        MAKEINTRESOURCEA(IDI_VCTHUNDER),
+                                        IMAGE_ICON, size, size, 0);
+        s_logo_size = size;
+    }
+    if (s_logo_icon)
+        DrawIconEx(d->hDC, rc.left + (rc.right - rc.left - size) / 2,
+                   rc.top + (rc.bottom - rc.top - size) / 2, s_logo_icon,
+                   size, size, 0, NULL, DI_NORMAL);
     return 1;
 }
 
@@ -840,6 +798,16 @@ static int save_settings(HWND owner)
     return 1;
 }
 
+static void pull_page(void);
+
+/* Before anything that reads the file from disk: the page into the model,
+ * and the model into the file if it changed. */
+int launcher_save_if_dirty(void)
+{
+    pull_page();
+    return !s_dirty || save_settings(s_window);
+}
+
 void mark_dirty(void)
 {
     char why[256];
@@ -872,7 +840,7 @@ void request_relayout(void)
 /* EVERY SETTING BACK TO WHAT A FRESH UNZIP GIVES: the shipped ini, whole.
  * It asks, because it replaces every line, and keeps the old file beside it
  * under a name no Apply overwrites. */
-static void restore_defaults(HWND owner)
+static int restore_defaults(HWND owner)
 {
     char why[MAX_PATH + 64], question[512];
     const void *data;
@@ -880,7 +848,7 @@ static void restore_defaults(HWND owner)
 
     if (!config_default_ini(&data, &size)) {
         set_status("This build carries no default settings to restore.");
-        return;
+        return 0;
     }
     snprintf(question, sizeof question,
              "Put every setting back to how VCThunder comes?\n\n"
@@ -892,17 +860,17 @@ static void restore_defaults(HWND owner)
                        "");
     if (MessageBoxA(owner, question, "Restore default settings",
                     MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION) != IDYES)
-        return;
+        return 0;
     if (!model_defaults_restore(data, size, why, sizeof why)) {
         MessageBoxA(owner, why, "VCThunder settings", MB_OK | MB_ICONERROR);
         set_status(why);
-        return;
+        return 0;
     }
     if (!model_reopen()) {
         MessageBoxA(owner, "The default settings were written, but they could "
                     "not be read back. Close the launcher and reopen it.",
                     "VCThunder settings", MB_OK | MB_ICONERROR);
-        return;
+        return 0;
     }
     s_loading = 1;
     load_settings();
@@ -914,6 +882,7 @@ static void restore_defaults(HWND owner)
     set_status("Restored the default settings. The file as it was is "
                "vcthunder.ini" MODEL_RESTORE_SUFFIX ".");
     request_relayout();
+    return 1;
 }
 
 /* The nth choice of an `a|b|c` set, into `out`. One walk of that grammar, used
@@ -967,11 +936,16 @@ static const char *probe_axis_label_for(const char *name, int *reported)
     return probe_axis_label_on(s_probe_selected, name, reported);
 }
 
+/* An SF_CHOICES boolean's two choices, in item-data order: 0 is false. */
+#define BOOL_CHOICES "false|true"
+
 /* WHAT A CHOICE READS AS IN THE LAUNCHER: no ini spelling is shown to a
  * person. Display only: the item data still carries the ini value, and
  * pull_page() writes that. A row of axes or pedal modes is matched by its
  * family, so the three providers' rows cannot drift apart. */
 static const struct { const char *key, *value, *text; } k_choice_text[] = {
+    { "fullscreen",       "false",       "Windowed"             },
+    { "fullscreen",       "true",        "Fullscreen"           },
     { "aspect",           "raster",      "As the game draws it" },
     { "aspect",           "4:3",         "4:3"                  },
     { "aspect",           "16:9",        "16:9"                 },
@@ -986,6 +960,8 @@ static const struct { const char *key, *value, *text; } k_choice_text[] = {
     { "texmag",           "catmull_rom", "Smooth (Catmull-Rom)" },
     { "frame_rate",       "30",          "30 Hz"                },
     { "frame_rate",       "60",          "60 Hz"                },
+    { "vsync",            "off",         "Off - for variable refresh" },
+    { "vsync",            "auto",        "On"                   },
     { "widescreen_hud",   "centre",      "4:3 - original"       },
     { "widescreen_hud",   "edges",       "16:9 - screen edges"  },
     { "video_mode",       "auto",        "Automatic"            },
@@ -1142,8 +1118,8 @@ static void combo_select_value(HWND combo, const char *choices,
     }
 }
 
-/* THE TWO SCALE ROWS ARE DROPDOWNS, and the card at the top of the page
- * says what the chosen scale produces for each game (scale_cell()). They stay
+/* THE TWO SCALE ROWS ARE DROPDOWNS, and the lines beside each say what the
+ * chosen scale produces for each game (scale_lines()). They stay
  * ST_UINT / ST_AUTO_UINT in settings.def: the file holds the same numbers
  * either way, so an item's data is the number (0 for automatic, -1 for a
  * value the file holds that no item is, kept verbatim so opening the page
@@ -1216,9 +1192,11 @@ static int picture_raster(int title, int *w, int *h)
     return 1;
 }
 
-/* The Bezel box's row names, by MODEL_TITLE_*. */
-static const char *const k_bezel_name[MODEL_TITLES] = {
-    "Hydro Thunder", "Offroad Thunder", "Arctic Thunder" };
+/* The Bezel box's row names, by MODEL_TITLE_* and then
+ * MODEL_BEZEL_UARCTIC. */
+static const char *const k_bezel_name[MODEL_BEZELS] = {
+    "Hydro Thunder", "Offroad Thunder", "Arctic Thunder",
+    "Ultimate Arctic Thunder" };
 
 /* What a bezel file is: its size and its opening's height, or why it cannot
  * be used. Decoded once per
@@ -1234,7 +1212,7 @@ typedef struct {
 
 static const bezel_info_t *bezel_info(const char *path)
 {
-    static bezel_info_t cache[4];
+    static bezel_info_t cache[8];
     static unsigned next;
     WIN32_FILE_ATTRIBUTE_DATA fa;
     char full[MAX_PATH];
@@ -1245,12 +1223,12 @@ static const bezel_info_t *bezel_info(const char *path)
     ini_resolve_path(path, full, sizeof full);
     memset(&fa, 0, sizeof fa);
     GetFileAttributesExA(full, GetFileExInfoStandard, &fa);
-    for (i = 0; i < 4; i++)
+    for (i = 0; i < 8; i++)
         if (cache[i].path[0] && !_stricmp(cache[i].path, full) &&
             !CompareFileTime(&cache[i].written, &fa.ftLastWriteTime) &&
             cache[i].size == fa.nFileSizeLow)
             return &cache[i];
-    e = &cache[next++ % 4];
+    e = &cache[next++ % 8];
     memset(e, 0, sizeof *e);
     snprintf(e->path, sizeof e->path, "%s", full);
     e->written = fa.ftLastWriteTime;
@@ -1325,15 +1303,22 @@ static int title_scale_size(int title, int row, int scale, int *w, int *h)
     return 1;
 }
 
-/* The largest window scale whose window, frame included, fits the work area,
- * as window.c's window_scale_for() and arctic.c's resolve_window_scale()
- * pick it. */
+/* The largest window scale whose window, frame included, fits the work area
+ * of the launcher's monitor, which is where Play opens the game, as
+ * window.c's window_scale_for() and arctic.c's resolve_window_scale() pick
+ * it. */
 static int title_fit_scale(int title)
 {
+    MONITORINFO monitor;
     RECT work, r;
     int scale, w, h;
 
-    if (!SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0))
+    memset(&monitor, 0, sizeof monitor);
+    monitor.cbSize = sizeof monitor;
+    if (GetMonitorInfoA(MonitorFromWindow(s_window, MONITOR_DEFAULTTOPRIMARY),
+                        &monitor))
+        work = monitor.rcWork;
+    else if (!SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0))
         return 0;
     for (scale = 8; scale > 1; scale--) {
         if (!title_scale_size(title, SCALE_ROW_WINDOW, scale, &w, &h))
@@ -1359,7 +1344,15 @@ static void scale_item_text(int scale, char *out, size_t size)
 /* What a scale row's value gives one game. A window too big for the screen
  * is opened at the largest that fits, so the cell gives that size and says
  * why. */
-static void scale_cell(int row, int title, theme_cell_t *cell)
+/* One game's answer: a size, then `text`; or `text` alone where there is no
+ * size. */
+typedef struct {
+    int w, h;
+    char text[48];
+    int warn;                   /* amber: a choice that did not hold        */
+} scale_size_t;
+
+static void scale_cell(int row, int title, scale_size_t *cell)
 {
     char buf[INI_VALUE_CAP];
     const char *have = title_graphics(title, row == SCALE_ROW_WINDOW ?
@@ -1403,7 +1396,7 @@ static void scale_cell(int row, int title, theme_cell_t *cell)
 
 /* Borderless fullscreen covers the monitor; the launcher's own stands in
  * for the one the game will open on. */
-static int fullscreen_cell(int title, theme_cell_t *cell)
+static int fullscreen_cell(int title, scale_size_t *cell)
 {
     MONITORINFO mi;
 
@@ -1420,80 +1413,196 @@ static int fullscreen_cell(int title, theme_cell_t *cell)
     return 1;
 }
 
-/* THE PAGE'S ONE LIST OF THE GAMES, one line each, so a game never shows two
- * sizes without the heading that says which is which. Widescreen is a column
- * only while some game has it on. */
-static void readout_line(int title, int wide, theme_readout_t *line)
-{
-    char path[MAX_PATH], buf[INI_VALUE_CAP];
-    theme_cell_t *cell = line->cell;
+/* THE SIZES A SCALE ROW GIVES, beside its dropdown: a line per game, and
+ * games that come out the same share one, so Hydro and Offroad are usually
+ * one line and Arctic the other. Drawn as owner-drawn statics in wide text:
+ * the multiplication sign is not in every ANSI code page. */
+#define SCALE_LINES 3
 
-    memset(line, 0, sizeof *line);
-    line->game = title == MODEL_TITLE_ARCTIC  ? THEME_BUTTON_ARCTIC :
-                 title == MODEL_TITLE_OFFROAD ? THEME_BUTTON_OFFROAD :
-                                                THEME_BUTTON_HYDRO;
-    line->name = title == MODEL_TITLE_ARCTIC  ? "Arctic" :
-                 title == MODEL_TITLE_OFFROAD ? "Offroad" : "Hydro";
-    if (!fullscreen_cell(title, cell))
-        scale_cell(SCALE_ROW_WINDOW, title, cell);
-    scale_cell(SCALE_ROW_RENDER, title, ++cell);
-    if (wide) {
-        ++cell;
-        snprintf(cell->text, sizeof cell->text, "%s",
-                 !title_bool(title, "widescreen") ? "off" :
-                 !_stricmp(title_graphics(title, "widescreen_hud", buf,
-                                          sizeof buf), "edges")
-                 ? "on, HUD at the edges" : "on");
+static int text_lines_height(HFONT font, const char *text, int width);
+
+/* A line is two columns, the games and the size, so the sizes of both rows
+ * start at one x (draw_scale_line()). */
+static wchar_t s_scale_name[3][SCALE_LINES][32], s_scale_size[3][SCALE_LINES][64];
+static int s_scale_warn[3][SCALE_LINES], s_scale_n[3];
+
+static int scale_lines(int row)
+{
+    static const int title[SCALE_LINES] = {
+        MODEL_TITLE_HYDRO, MODEL_TITLE_OFFROAD, MODEL_TITLE_ARCTIC };
+    static const char *const name[SCALE_LINES] = {
+        "Hydro", "Offroad", "Arctic" };
+    wchar_t size[SCALE_LINES][64];
+    int warn[SCALE_LINES], used[SCALE_LINES] = { 0 }, i, j, n = 0;
+
+    for (i = 0; i < SCALE_LINES; i++) {
+        scale_size_t cell;
+
+        memset(&cell, 0, sizeof cell);
+        /* Fullscreen is the monitor's size alone: the Display row above
+         * already says Fullscreen. */
+        if (row == SCALE_ROW_WINDOW && fullscreen_cell(title[i], &cell))
+            cell.text[0] = 0;
+        else
+            scale_cell(row, title[i], &cell);
+        if (cell.w)
+            _snwprintf(size[i], 64, L"%d \x00d7 %d%hs%hs", cell.w, cell.h,
+                       cell.text[0] ? ", " : "", cell.text);
+        else
+            _snwprintf(size[i], 64, L"%hs", cell.text);
+        size[i][63] = 0;
+        warn[i] = cell.warn;
     }
-    ++cell;
-    if (!model_bezel_get(title, path, sizeof path)) {
-        snprintf(cell->text, sizeof cell->text, "off");
-    } else if (bezel_info(path)->ok) {
-        snprintf(cell->text, sizeof cell->text, "on");
-    } else {
-        snprintf(cell->text, sizeof cell->text, "cannot be used");
-        cell->warn = 1;
+    for (i = 0; i < SCALE_LINES; i++) {
+        char names[64];
+        int same = 1;
+
+        if (used[i])
+            continue;
+        snprintf(names, sizeof names, "%s", name[i]);
+        for (j = i + 1; j < SCALE_LINES; j++)
+            if (!used[j] && warn[j] == warn[i] && !wcscmp(size[j], size[i])) {
+                used[j] = 1;
+                same++;
+                snprintf(names + strlen(names), sizeof names - strlen(names),
+                         "/%s", name[j]);
+            }
+        _snwprintf(s_scale_name[row][n], 32, L"%hs:",
+                   same == SCALE_LINES ? "All" : names);
+        s_scale_name[row][n][31] = 0;
+        wcscpy(s_scale_size[row][n], size[i]);
+        s_scale_warn[row][n++] = warn[i];
     }
-    ++cell;
-    /* Arctic runs at its own 60 and reads no frame_rate. */
-    snprintf(cell->text, sizeof cell->text, "%s Hz",
-             title == MODEL_TITLE_ARCTIC ? "60" :
-             title_graphics(title, "frame_rate", buf, sizeof buf));
+    s_scale_n[row] = n;
+    return n;
 }
 
-#define READOUT_LINES 3
-
-static const int k_readout_title[READOUT_LINES] = {
-    MODEL_TITLE_HYDRO, MODEL_TITLE_OFFROAD, MODEL_TITLE_ARCTIC
-};
-
-static LRESULT CALLBACK readout_proc(HWND h, UINT message, WPARAM wparam,
-                                     LPARAM lparam)
+static int scale_line_h(void)
 {
-    if (message == WM_ERASEBKGND)
-        return TRUE;
-    if (message == WM_PAINT) {
-        static const char *const head[] = {
-            "Window", "3D picture", "Bezel", "Frame rate" };
-        static const char *const head_wide[THEME_READOUT_COLUMNS] = {
-            "Window", "3D picture", "Widescreen", "Bezel", "Frame rate" };
-        theme_readout_t line[READOUT_LINES];
-        PAINTSTRUCT paint;
-        RECT rc;
-        HDC dc = BeginPaint(h, &paint);
-        int i, wide = 0;
+    return text_lines_height(theme_font(), "Ag", 400) + 2;
+}
 
-        for (i = 0; i < READOUT_LINES; i++)
-            wide |= title_bool(k_readout_title[i], "widescreen");
-        for (i = 0; i < READOUT_LINES; i++)
-            readout_line(k_readout_title[i], wide, &line[i]);
-        GetClientRect(h, &rc);
-        draw_readout(dc, &rc, wide ? head_wide : head,
-                     wide ? THEME_READOUT_COLUMNS : 4, line, READOUT_LINES);
-        EndPaint(h, &paint);
-        return 0;
+/* THE LINES SIT IN AN OUTLINE AS TALL AS THE DROPDOWN, taller only for more
+ * lines than that holds; SCALE_PAD between the outline and the text. */
+#define SCALE_PAD 10
+
+static int scale_frame_h(int lines)
+{
+    return max(CTRL_H, lines * scale_line_h() + 4);
+}
+
+/* BOTH ROWS' LINES, MEASURED ONCE per page build or refresh, not per caller:
+ * the lines, the widest line in logical units (the widest name, the gap, the
+ * widest size, as draw_scale_line() lays them out, and the padding), the
+ * widest name in pixels, and whether they sit beside the dropdown -- while
+ * every line fits there, and under it otherwise: a line cut short is a size
+ * nobody can read. render_page() and scale_lines_refresh() clear
+ * s_scale_measured. */
+static int s_scale_measured, s_scale_beside, s_scale_width, s_scale_name_px;
+
+static void scale_measure(void)
+{
+    HDC dc;
+    HGDIOBJ old;
+    SIZE extent;
+    int row, k, name = 0, size = 0, width = page_width();
+
+    if (s_scale_measured || !s_page)
+        return;
+    for (row = SCALE_ROW_WINDOW; row <= SCALE_ROW_RENDER; row++)
+        scale_lines(row);
+    s_scale_width = INT_MAX;
+    dc = GetDC(s_page);
+    if (dc) {
+        old = SelectObject(dc, theme_font());
+        for (row = SCALE_ROW_WINDOW; row <= SCALE_ROW_RENDER; row++)
+            for (k = 0; k < s_scale_n[row]; k++) {
+                if (GetTextExtentPoint32W(dc, s_scale_name[row][k],
+                                          (int)wcslen(s_scale_name[row][k]),
+                                          &extent))
+                    name = max(name, (int)extent.cx);
+                if (GetTextExtentPoint32W(dc, s_scale_size[row][k],
+                                          (int)wcslen(s_scale_size[row][k]),
+                                          &extent))
+                    size = max(size, (int)extent.cx);
+            }
+        SelectObject(dc, old);
+        ReleaseDC(s_page, dc);
+        s_scale_width = unscale_px(name + size) + 8 + 2 + 2 * SCALE_PAD;
     }
-    return DefWindowProcA(h, message, wparam, lparam);
+    s_scale_name_px = name;
+    s_scale_beside = !s_compact &&
+        width - 22 - (244 + min(310, width - 266) + 16) >= s_scale_width;
+    s_scale_measured = 1;
+}
+
+/* How much taller the row is for its lines: under the dropdown all of them,
+ * beside it whatever does not fit the dropdown's height. */
+static int scale_lines_extra(unsigned index)
+{
+    int row = scale_row(index), block;
+
+    if (!row || !s_page)
+        return 0;
+    scale_measure();
+    block = scale_frame_h(s_scale_n[row]);
+    return s_scale_beside ? block - CTRL_H : block + 4;
+}
+
+static void render_scale_lines(unsigned index, int y, int control_w)
+{
+    int row = scale_row(index), n, k, line = scale_line_h(), frame_h, x, w, top;
+    HWND frame;
+
+    scale_measure();
+    n = s_scale_n[row];
+    frame_h = scale_frame_h(n);
+    if (s_scale_beside) {
+        /* Both rows' outlines are as wide as the widest line of either. */
+        x = 244 + control_w + 16;
+        top = y;
+        w = min(s_scale_width, page_width() - 22 - x);
+    } else {
+        /* Under the dropdown, as wide as it is, unless a line would not fit. */
+        x = s_compact ? 22 : 244;
+        top = (s_compact ? y + STACK_DY : y) + CTRL_H + 4;
+        w = max(control_w, min(s_scale_width, page_width() - 22 - x));
+    }
+    for (k = 0; k < n; k++)
+        make_control(0, "STATIC", "", SS_OWNERDRAW, x + SCALE_PAD,
+                     top + (frame_h - n * line) / 2 + k * line,
+                     w - 2 * SCALE_PAD, line, s_page,
+                     IDC_SCALE_LINE_BASE + row * SCALE_LINES + k);
+    /* Under the lines it frames: a later sibling clips an earlier one. */
+    frame = make_control(0, "STATIC", "", SS_OWNERDRAW, x, top, w, frame_h,
+                         s_page, IDC_SCALE_FRAME_BASE + row);
+    SetWindowPos(frame, HWND_BOTTOM, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+static int draw_scale_line(const DRAWITEMSTRUCT *d)
+{
+    int at;
+
+    if (!d || d->CtlType != ODT_STATIC)
+        return 0;
+    if ((int)d->CtlID >= IDC_SCALE_FRAME_BASE &&
+        (int)d->CtlID < IDC_SCALE_FRAME_BASE + 3) {
+        FillRect(d->hDC, &d->rcItem, theme_page_brush());
+        FrameRect(d->hDC, &d->rcItem, theme_dark() ? theme_border_brush() :
+                                      GetSysColorBrush(COLOR_WINDOWTEXT));
+        return 1;
+    }
+    if ((int)d->CtlID < IDC_SCALE_LINE_BASE ||
+        (int)d->CtlID >= IDC_SCALE_LINE_BASE + 3 * SCALE_LINES)
+        return 0;
+    at = (int)d->CtlID - IDC_SCALE_LINE_BASE;
+    /* The sizes start where the widest name of either row ends. */
+    theme_draw_line(d, s_scale_name[at / SCALE_LINES][at % SCALE_LINES],
+                    s_scale_size[at / SCALE_LINES][at % SCALE_LINES],
+                    s_scale_name_px + scale_px(8),
+                    s_scale_warn[at / SCALE_LINES][at % SCALE_LINES]);
+    return 1;
 }
 
 /* (Re)fill one scale dropdown and select the model's value. */
@@ -1559,7 +1668,7 @@ static void scale_combo_value(HWND combo, char *out, size_t size)
  * scroll bar's width when the bar is shown, and a page is built before
  * update_scrollbar() decides that, so the bar's room is always kept: every
  * box on every page has the same right edge. */
-static int page_width(void)
+int page_width(void)
 {
     RECT rc;
     int w, bar = GetSystemMetrics(SM_CXVSCROLL);
@@ -1570,12 +1679,34 @@ static int page_width(void)
     w = rc.right - rc.left;
     if (GetWindowLongA(s_page, GWL_STYLE) & WS_VSCROLL)
         w += bar;
-    return max(unscale_px(w - bar) - 18, s_tiny ? 230 : 300);
+    /* The bar's room once, and nothing more: the boxes' right edges then sit
+     * as far from it as their left edges from the page's. */
+    return max(unscale_px(w - bar), s_tiny ? 230 : 300);
 }
 
-static int text_block_height(HFONT font, const char *text, int width);
-static void place_note_lines(void);
-static int  note_text_height(const char *first, const char *second);
+/* AN OUTLINE `margin` IN FROM BOTH SIDES OF THE PAGE, placed by its pixel
+ * edges: a scaled left plus a scaled width rounds, and the two gaps can then
+ * differ by a pixel. */
+static int page_right_px(int margin)
+{
+    RECT rc;
+    int right;
+
+    GetClientRect(s_page, &rc);
+    right = rc.right;
+    if (!(GetWindowLongA(s_page, GWL_STYLE) & WS_VSCROLL))
+        right -= GetSystemMetrics(SM_CXVSCROLL);
+    return max(right, scale_px(page_width())) - scale_px(margin);
+}
+
+static void place_outline(HWND c, int margin, int y, int h)
+{
+    if (!c || !s_page)
+        return;
+    MoveWindow(c, scale_px(margin), scale_px(y),
+               page_right_px(margin) - scale_px(margin), scale_px(h), FALSE);
+}
+
 
 /* Where a page's content starts: under its header, MEASURED. A Controls page
  * has the tab row under the intro, and the intro wraps, one line at 1200
@@ -1622,7 +1753,7 @@ static int controls_tab_y(void)
  * air, so 6 put the frame's top line above the bottom of the text box, through
  * the descenders of an intro that had wrapped. A Controls page has its tab row
  * between the intro and the first card. */
-static int page_header_bottom(void)
+int page_header_bottom(void)
 {
     if (page_is_controls(s_page_index))
         return controls_tab_y() + CONTROLS_TAB_H + 22;
@@ -1673,7 +1804,7 @@ static int text_lines_height(HFONT font, const char *text, int width)
 /* The same, at least a row's 20 units: what a control is sized to. Above
  * 100% DPI the floor is taller than one line of text, so text stacked line
  * under line is measured by text_lines_height() instead. */
-static int text_block_height(HFONT font, const char *text, int width)
+int text_block_height(HFONT font, const char *text, int width)
 {
     int height = text_lines_height(font, text, width);
 
@@ -1721,7 +1852,7 @@ static void box_title(int x, int y, int w, int h, const char *text,
     SendMessage(c, WM_SETFONT, (WPARAM)theme_heading_font(), TRUE);
 }
 
-static int frame_topic(int top, int bottom)
+int frame_topic(int top, int bottom)
 {
     HWND frame;
     int w = page_width() - 24, h = bottom - top + 12;
@@ -1731,11 +1862,39 @@ static int frame_topic(int top, int bottom)
     frame = make_control(0, theme_dark() ? "VCThunderLauncherCard" : "BUTTON",
                          "", theme_dark() ? 0 : BS_GROUPBOX,
                          12, top - 8, w, h, s_page, 0);
+    place_outline(frame, 12, top - 8, h);
     SetWindowPos(frame, HWND_BOTTOM, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     /* Where the next box's title goes: BOX_GAP, the same air between two
      * outlines as the settings rows' boxes have, on every page. */
     return bottom + BOX_GAP;
+}
+
+/* A group's heading and the one button belonging to it: right-aligned beside
+ * the heading where there is room, on its own line under it where there is
+ * not. Every constant is a maximum. */
+int group_header(int y, const char *text, int button_id,
+                 const char *button_text, int button_w, int enabled)
+{
+    int width = page_width();
+    int right = width - 20;
+    int stacked = button_id && width < 400;
+    int x = right - min(button_w, max(90, width - 200));
+    HWND button;
+
+    if (button_id) {
+        button_w = stacked ? min(button_w, width - 40) : right - x;
+        button = make_control(0, "BUTTON", button_text,
+                              BS_PUSHBUTTON | WS_TABSTOP,
+                              stacked ? 20 : x, stacked ? y + 22 : y - 4,
+                              button_w, CTRL_H, s_page, button_id);
+        EnableWindow(button, enabled);
+    }
+    box_title(20, y, (button_id && !stacked ? x - 30 : right - 20), 20, text,
+              SS_ENDELLIPSIS);
+    if (!button_id)
+        return y + 26;
+    return y + (stacked ? 22 + CTRL_H + 4 : CTRL_H + 2);
 }
 
 /* Where each note goes, and where the settings rows start below them. Both
@@ -1811,7 +1970,7 @@ static void render_advanced_toggle(int y)
 
     make_control(0, "BUTTON", "Show advanced settings on every page",
                  BS_AUTOCHECKBOX | WS_TABSTOP | WS_GROUP, 20, y, width - 40,
-                 22, s_page, IDC_SHOW_ADVANCED);
+                 CTRL_H, s_page, IDC_SHOW_ADVANCED);
     SendDlgItemMessage(s_page, IDC_SHOW_ADVANCED, BM_SETCHECK,
                        s_advanced ? BST_CHECKED : BST_UNCHECKED, 0);
 }
@@ -1821,7 +1980,7 @@ static void render_advanced_toggle(int y)
  * Layout and render both ask here rather than agreeing by hand. */
 #define ADVANCED_HEAD_DY  0
 #define ADVANCED_CHECK_DY 24
-#define ADVANCED_NOTE_DY  50
+#define ADVANCED_NOTE_DY  (ADVANCED_CHECK_DY + CTRL_H + 4)
 
 static int trouble_advanced_height(void)
 {
@@ -1886,10 +2045,13 @@ static int render_trouble_problems(int y)
     return y + 8;
 }
 
-/* The About card: heading, the version 24 under it, the link 22 under that. */
+/* The About card: heading, the version 24 under it, then the author and the
+ * link 22 apart. */
 #define ABOUT_VERSION_DY 24
-#define ABOUT_LINK_DY    46
+#define ABOUT_AUTHOR_DY  46
+#define ABOUT_LINK_DY    68
 #define ABOUT_H          (ABOUT_LINK_DY + 20)
+#define ABOUT_LOGO       (ABOUT_H - ABOUT_VERSION_DY)
 
 /* A card of a heading, two measured sentences and one button under them:
  * the first 22 under the heading, the second directly under the first, the
@@ -1905,7 +2067,7 @@ static int button_card_layout(int y, const char *const note[2], int *note_y,
         note_h[i] = text_lines_height(theme_font(), note[i], page_width() - 40);
         *button_y += note_h[i];
     }
-    return *button_y + 26 + BOX_GAP;
+    return *button_y + CTRL_H + BOX_GAP;
 }
 
 static void render_button_card(int y, const char *title,
@@ -1921,8 +2083,8 @@ static void render_button_card(int y, const char *title,
     make_control(0, "STATIC", note[1], SS_LEFT, 20, note_y + note_h[0],
                  width - 40, note_h[1], s_page, 0);
     make_control(0, "BUTTON", button, BS_PUSHBUTTON | WS_TABSTOP, 20,
-                 button_y, min(240, width - 40), 26, s_page, id);
-    frame_topic(y, button_y + 26);
+                 button_y, min(240, width - 40), CTRL_H, s_page, id);
+    frame_topic(y, button_y + CTRL_H);
 }
 
 /* Top to bottom: About, the file's problems if it has any, Reporting a
@@ -1981,17 +2143,31 @@ static void render_trouble_panel(void)
 {
     int problems_y, report_y, reset_y, adv_y;
     int width = page_width(), about_y = page_header_bottom();
+    int logo = width - 40 >= 200 + ABOUT_LOGO + 12 ? ABOUT_LOGO : 0;
+    int text_w = width - 40 - (logo ? logo + 12 : 0);
+    HWND author;
 
     trouble_panel_layout(&problems_y, &report_y, &reset_y, &adv_y);
-    /* ABOUT: the version, which only this box shows, and where the project
-     * lives. The link is a static: SysLink needs common
-     * controls 6, which this window does not load. */
-    box_title(20, about_y, width - 40, 20, "About", SS_ENDELLIPSIS);
+    /* ABOUT: the version, which only this box shows, where the project
+     * lives, and the mark at the right, as tall as the three lines, centred
+     * on the outline (frame_topic() draws it 8 above the title and 4 below
+     * the last line), and only where the text keeps 200 px beside it. The
+     * link is a static: SysLink needs common controls 6, which this window
+     * does not load. The author line is set wide, so the copyright sign does
+     * not depend on the ANSI code page. */
+    box_title(20, about_y, text_w, 20, "About", SS_ENDELLIPSIS);
     make_control(0, "STATIC", "VCThunder " VCT_VERSION, SS_LEFT, 20,
-                 about_y + ABOUT_VERSION_DY, width - 40, 20, s_page, 0);
+                 about_y + ABOUT_VERSION_DY, text_w, 20, s_page, 0);
+    author = make_control(0, "STATIC", "", SS_LEFT, 20,
+                          about_y + ABOUT_AUTHOR_DY, text_w, 20, s_page, 0);
+    SetWindowTextW(author, VCT_COPYRIGHT);
     make_control(0, "STATIC", VCT_REPO_URL, SS_LEFT | SS_NOTIFY, 20,
-                 about_y + ABOUT_LINK_DY, min(320, width - 40), 20, s_page,
+                 about_y + ABOUT_LINK_DY, min(320, text_w), 20, s_page,
                  IDC_ABOUT_LINK);
+    if (logo)
+        make_control(0, "STATIC", "", SS_OWNERDRAW, width - 20 - logo,
+                     about_y + (ABOUT_H - 4 - logo) / 2, logo, logo, s_page,
+                     IDC_LOGO);
     frame_topic(about_y, about_y + ABOUT_H);
     render_trouble_problems(problems_y);
     render_button_card(report_y, "Reporting a problem", k_report_note,
@@ -2013,19 +2189,9 @@ static void render_trouble_panel(void)
     }
 }
 
-/* ---- the live panel ------------------------------------------------------
- *
- * ONE BAR PER ROLE, AND THE BAR IS THE MAPPED VALUE: what the cabinet will be
- * handed, with deadzone, pedal mode and inversion applied. Carrying a raw table
- * alongside it meant one pedal moved two bars in opposite directions under the
- * shipped `dinput_throttle_invert = true`. Only the mapped value answers "does
- * the car get my accelerator"; the raw table is one click away.
- *
- * MEASURED rather than laid out from constants: the row count is a property of
- * what is plugged in. */
-#define AXIS_ROW_PITCH 22
-
-static unsigned probe_axis_rows(void)
+/* The raw table's rows: every axis the controller reports, as far as the
+ * probe holds them. */
+unsigned probe_axis_rows(void)
 {
     unsigned n = input_probe_axis_count();
 
@@ -2038,7 +2204,6 @@ static unsigned probe_axis_rows(void)
 static int files_panel_layout(int *note_y, int *note_h, int *button_y,
                               int *state_y);
 
-static int graphics_panel_layout(void);
 
 static int page_settings_top(void)
 {
@@ -2050,8 +2215,6 @@ static int page_settings_top(void)
         return trouble_panel_layout(NULL, NULL, NULL, NULL);
     if (s_page_index == PAGE_FILES)
         return files_panel_layout(NULL, NULL, NULL, NULL);
-    if (s_page_index == PAGE_GRAPHICS)
-        return graphics_panel_layout();
     return page_header_bottom();
 }
 
@@ -2213,38 +2376,41 @@ static int setting_help_height(unsigned index)
     return s_help_h[index];
 }
 
-/* The Graphics page's card: a heading line and a line per game, of the
- * page's font, which only the DPI changes. */
-static int readout_height(void)
+/* The lines follow the scale, fullscreen, raster, aspect, widescreen and
+ * bezel settings and the launcher's monitor, so any change on the page, and a
+ * move, recomputes them; a change in how many there are, where they sit or how
+ * wide the widest is moves the rows under them, which is a rebuild. */
+static void scale_lines_refresh(void)
 {
-    static int height;
-    static UINT dpi;
+    int beside = s_scale_beside, width = s_scale_width, row, k;
+    int n[3] = { 0, s_scale_n[1], s_scale_n[2] };
 
-    if (!height || dpi != theme_dpi()) {
-        height = (READOUT_LINES + 1) *
-                 (text_lines_height(theme_font(), "Ag", 400) + 4) + 8;
-        dpi = theme_dpi();
+    if (!s_page || s_page_index != PAGE_GRAPHICS)
+        return;
+    s_scale_measured = 0;
+    scale_measure();
+    /* Moved, a new widest line (the outlines are that wide) or another
+     * number of lines: a rebuild. Otherwise the same lines repaint. */
+    if (s_scale_beside != beside || s_scale_width != width ||
+        s_scale_n[1] != n[1] || s_scale_n[2] != n[2]) {
+        request_relayout();
+        return;
     }
-    return height;
-}
-
-/* The card follows the scale, fullscreen, raster, aspect, widescreen and
- * frame-rate rows, so any change on the page repaints it; its height never
- * moves. The bezel box rebuilds the page. */
-static void scale_readouts_refresh(void)
-{
-    HWND c;
-
-    if (s_page && s_page_index == PAGE_GRAPHICS &&
-        (c = GetDlgItem(s_page, IDC_READOUT)))
-        InvalidateRect(c, NULL, FALSE);
+    for (row = SCALE_ROW_WINDOW; row <= SCALE_ROW_RENDER; row++)
+        for (k = 0; k < s_scale_n[row]; k++) {
+            HWND c = GetDlgItem(s_page, IDC_SCALE_LINE_BASE +
+                                        row * SCALE_LINES + k);
+            if (c)
+                InvalidateRect(c, NULL, FALSE);
+        }
 }
 
 /* A row drawn as a checkbox: a boolean, or an SF_TOGGLE enum while advanced
  * settings are hidden, which is ticked for any choice but the first. */
 static int setting_is_check(unsigned index)
 {
-    return k_settings[index].type == ST_BOOL ||
+    return (k_settings[index].type == ST_BOOL &&
+            !(k_settings[index].flags & SF_CHOICES)) ||
            ((k_settings[index].flags & SF_TOGGLE) && !s_advanced);
 }
 
@@ -2267,11 +2433,15 @@ static int toggle_is_on(unsigned index)
  * mode is itself under the label. A checkbox is its own label in both modes. */
 static int balance_stacked(unsigned index);
 
+static int scale_lines_extra(unsigned index);
+
 static int setting_caption_offset(unsigned index)
 {
     if (balance_stacked(index))
-        return 51;
-    return (s_compact && !setting_is_check(index)) ? 51 : 26;
+        return STACK_DY + CTRL_H + 2;
+    return ((s_compact && !setting_is_check(index)) ? STACK_DY + CTRL_H + 2 :
+                                                      CTRL_H + 2) +
+           scale_lines_extra(index);
 }
 
 /* Which of the three provider prefixes a key belongs to, or NULL. One
@@ -2358,8 +2528,9 @@ static int setting_on_page(unsigned index)
 
 static int setting_row_height(unsigned index)
 {
-    return (s_compact || balance_stacked(index) ? 58 : 36) +
-           setting_help_height(index);
+    return (s_compact || balance_stacked(index) ? STACK_DY + CTRL_H + 9 :
+                                                  CTRL_H + 12) +
+           scale_lines_extra(index) + setting_help_height(index);
 }
 
 
@@ -2429,7 +2600,7 @@ static int setting_inert(unsigned index)
     renderer = model_value("graphics", "vcglide_renderer");
     if (!strcmp(d->key, "vcglide_threads"))
         return !_stricmp(renderer, "gpu");
-    if (!strcmp(d->key, "render_scale"))
+    if (!strcmp(d->key, "render_scale") || !strcmp(d->key, "vsync"))
         return !_stricmp(renderer, "cpu");
     if (!strcmp(d->key, "texmag") || !strcmp(d->key, "upscale_2d"))
         return !_stricmp(renderer, "cpu") ||
@@ -2437,6 +2608,8 @@ static int setting_inert(unsigned index)
                                &scale) && scale == 1);
     if (!strcmp(d->key, "widescreen_hud"))
         return !model_bool("graphics", "widescreen");
+    if (!strcmp(d->key, "window_scale"))
+        return model_bool("graphics", "fullscreen");
     return 0;
 }
 
@@ -2475,7 +2648,7 @@ static void page_show_inert(void)
 }
 
 /* A setting checkbox is the box alone; its label is a static beside it. */
-#define CHECK_BOX_W 20
+#define CHECK_BOX_W 32
 
 /* ---- sliders -------------------------------------------------------------
  *
@@ -2614,8 +2787,16 @@ static LRESULT CALLBACK slider_proc(HWND h, UINT message, WPARAM wparam,
  * And BM_SETCHECK on a radio sets or clears its WS_TABSTOP with the check,
  * which would leave every unpicked radio out of focusable(); the tab stop is
  * kept whatever the check. */
-static WNDPROC s_radio_proc;
 static int s_radio_focus;
+/* Each radio's own previous procedure: under this one is make_control()'s
+ * painter for a radio with a mark and the plain button for a tab, and one
+ * stored procedure for both would hand every radio the first one's. */
+static const char k_radio_next[] = "VCThunderRadioNext";
+
+static WNDPROC radio_next(HWND h)
+{
+    return (WNDPROC)GetPropA(h, k_radio_next);
+}
 
 static LRESULT CALLBACK quiet_radio_proc(HWND, UINT, WPARAM, LPARAM);
 
@@ -2637,13 +2818,19 @@ static unsigned quiet_radio_checks(HWND h, HWND *radio, LRESULT *check,
 static LRESULT CALLBACK quiet_radio_proc(HWND h, UINT message, WPARAM wparam,
                                          LPARAM lparam)
 {
+    if (message == WM_NCDESTROY) {
+        WNDPROC next = radio_next(h);
+
+        RemovePropA(h, k_radio_next);
+        return CallWindowProcA(next, h, message, wparam, lparam);
+    }
     if (message == WM_SETFOCUS) {
         HWND radio[64];
         LRESULT check[64], result;
         unsigned n = quiet_radio_checks(h, radio, check, 64), i, pass;
 
         s_radio_focus++;
-        result = CallWindowProcA(s_radio_proc, h, message, wparam, lparam);
+        result = CallWindowProcA(radio_next(h), h, message, wparam, lparam);
         /* Unchecks first: putting a check back unchecks its group again. */
         for (pass = 0; pass < 2; pass++)
             for (i = 0; i < n; i++)
@@ -2655,7 +2842,7 @@ static LRESULT CALLBACK quiet_radio_proc(HWND h, UINT message, WPARAM wparam,
     }
     if (message == BM_SETCHECK) {
         LONG_PTR style = GetWindowLongPtrA(h, GWL_STYLE), now;
-        LRESULT result = CallWindowProcA(s_radio_proc, h, message, wparam,
+        LRESULT result = CallWindowProcA(radio_next(h), h, message, wparam,
                                          lparam);
 
         now = GetWindowLongPtrA(h, GWL_STYLE);
@@ -2664,15 +2851,15 @@ static LRESULT CALLBACK quiet_radio_proc(HWND h, UINT message, WPARAM wparam,
                               (now & ~WS_TABSTOP) | (style & WS_TABSTOP));
         return result;
     }
-    return CallWindowProcA(s_radio_proc, h, message, wparam, lparam);
+    return CallWindowProcA(radio_next(h), h, message, wparam, lparam);
 }
 
-static void quiet_radio(HWND radio)
+void quiet_radio(HWND radio)
 {
     if (!radio)
         return;
-    if (!s_radio_proc)
-        s_radio_proc = (WNDPROC)GetWindowLongPtrA(radio, GWLP_WNDPROC);
+    SetPropA(radio, k_radio_next,
+             (HANDLE)GetWindowLongPtrA(radio, GWLP_WNDPROC));
     SetWindowLongPtrA(radio, GWLP_WNDPROC, (LONG_PTR)quiet_radio_proc);
 }
 
@@ -2698,15 +2885,15 @@ static HWND render_slider(unsigned index, int x, int y, int w)
 
     slider_text(index, pos, right, sizeof right);
     if (ends) {
-        make_control(0, "STATIC", "Front", SS_RIGHT, x, y + 4, left_w - 6, 20,
-                     s_page, IDC_FLANK_BASE + (int)index);
+        make_control(0, "STATIC", "Front", SS_RIGHT, x, y + LABEL_DY,
+                     left_w - 6, 20, s_page, IDC_FLANK_BASE + (int)index);
         make_control(0, "STATIC", "Subwoofer", SS_LEFT,
-                     x + left_w + bar_w + 6, y + 4, end_w - 6, 20, s_page,
-                     IDC_SUB_BASE + (int)index);
+                     x + left_w + bar_w + 6, y + LABEL_DY, end_w - 6, 20,
+                     s_page, IDC_SUB_BASE + (int)index);
     }
     bar = make_control(0, TRACKBAR_CLASSA, "",
                        TBS_HORZ | TBS_BOTTOM | WS_TABSTOP, x + left_w, y,
-                       bar_w, 26, s_page, IDC_SETTING_BASE + (int)index);
+                       bar_w, CTRL_H, s_page, IDC_SETTING_BASE + (int)index);
     SendMessage(bar, TBM_SETRANGEMIN, FALSE, (LPARAM)d->minimum);
     SendMessage(bar, TBM_SETRANGEMAX, FALSE, (LPARAM)slider_max(index));
     SendMessage(bar, TBM_SETLINESIZE, 0, 1);
@@ -2724,7 +2911,7 @@ static HWND render_slider(unsigned index, int x, int y, int w)
         s_trackbar_proc = (WNDPROC)GetWindowLongPtrA(bar, GWLP_WNDPROC);
     SetWindowLongPtrA(bar, GWLP_WNDPROC, (LONG_PTR)slider_proc);
     make_control(0, "STATIC", right, SS_LEFT,
-                 x + left_w + bar_w + end_w + 6, y + 4, value_w - 6, 20,
+                 x + left_w + bar_w + end_w + 6, y + LABEL_DY, value_w - 6, 20,
                  s_page, IDC_VALUE_BASE + (int)index);
     return bar;
 }
@@ -2759,11 +2946,11 @@ static void render_setting(unsigned index)
          * bold rather than greyed; a static of its own is dimmed by
          * launcher_control_tone(), and a click on it presses the box. */
         control = make_control(0, "BUTTON", "",
-            BS_AUTOCHECKBOX | WS_TABSTOP, 22, y, CHECK_BOX_W, 24,
+            BS_AUTOCHECKBOX | WS_TABSTOP, 22, y, CHECK_BOX_W, CTRL_H,
             s_page, IDC_SETTING_BASE + (int)index);
         SendMessage(control, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
         make_control(0, "STATIC", d->label, SS_LEFT | SS_NOTIFY | SS_ENDELLIPSIS,
-                     22 + CHECK_BOX_W, y + 4,
+                     22 + CHECK_BOX_W, y + LABEL_DY,
                      (s_compact ? width - 44 : min(510, width - 44)) -
                      CHECK_BOX_W, 20, s_page, IDC_LABEL_BASE + (int)index);
         if (scoped_both)
@@ -2773,18 +2960,30 @@ static void render_setting(unsigned index)
          * wider than its column WRAPS into the help caption underneath and
          * the two overlap, which is worse than a truncation that says so.
          * Caught on "Wheel: how much of its rotation to use (%)". */
-        make_control(0, "STATIC", d->label, SS_LEFT | SS_ENDELLIPSIS, 22, y + 4,
+        make_control(0, "STATIC", d->label, SS_LEFT | SS_ENDELLIPSIS, 22,
+                     s_compact ? y + 4 : y + LABEL_DY,
                      s_compact ? width - 44 : 215, 22,
                      s_page, IDC_LABEL_BASE + (int)index);
-        control_w = s_compact ? width - 44 - (has_button ? 90 : 0)
+        control_w = s_compact ? width - 44 - (has_button ? BUTTON_W + 8 : 0)
                               : min(310, width - 244 - 22 -
-                                         (has_button ? 90 : 0));
+                                         (has_button ? BUTTON_W + 8 : 0));
         if (control_w < 120)
             control_w = 120;
-        if (d->type == ST_ENUM) {
+        if (d->type == ST_BOOL) {
+            /* SF_CHOICES: both answers named, the value spelled canonically
+             * whatever spelling of a boolean the file has. */
             control = make_control(0, "COMBOBOX", "",
                 CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
-                s_compact ? 22 : 244, s_compact ? y + 25 : y,
+                s_compact ? 22 : 244, s_compact ? y + STACK_DY : y,
+                control_w, 240, s_page,
+                IDC_SETTING_BASE + (int)index);
+            combo_add_choices(control, d->key, BOOL_CHOICES, NULL);
+            combo_select_value(control, BOOL_CHOICES,
+                               model_bool(d->section, d->key) ? "true" : "false");
+        } else if (d->type == ST_ENUM) {
+            control = make_control(0, "COMBOBOX", "",
+                CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
+                s_compact ? 22 : 244, s_compact ? y + STACK_DY : y,
                 control_w, 240, s_page,
                 IDC_SETTING_BASE + (int)index);
             /* AN AXIS ROW IS ANNOTATED FROM THE SELECTED DEVICE, and only
@@ -2804,10 +3003,11 @@ static void render_setting(unsigned index)
         } else if (scale_row(index)) {
             control = make_control(0, "COMBOBOX", "",
                 CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP,
-                s_compact ? 22 : 244, s_compact ? y + 25 : y,
+                s_compact ? 22 : 244, s_compact ? y + STACK_DY : y,
                 control_w, 240, s_page,
                 IDC_SETTING_BASE + (int)index);
             scale_combo_fill(control, index);
+            render_scale_lines(index, y, control_w);
         } else if (slider_row(index)) {
             /* The balance row's two labelled ends need more than a plain
              * value column; nothing sits beside it, so it takes the room a
@@ -2818,7 +3018,7 @@ static void render_setting(unsigned index)
                                          control_w;
 
             control = render_slider(index, stack ? 22 : 244,
-                                    stack ? y + 25 : y, w);
+                                    stack ? y + STACK_DY : y, w);
         } else {
             if (d->type == ST_MHZ_UINT) {
                 char *end;
@@ -2831,19 +3031,19 @@ static void render_setting(unsigned index)
             }
             control = make_control(WS_EX_CLIENTEDGE, "EDIT", control_text,
                 ES_AUTOHSCROLL | WS_TABSTOP, s_compact ? 22 : 244,
-                s_compact ? y + 25 : y, control_w, 24,
-                s_page, IDC_SETTING_BASE + (int)index);
+                (s_compact ? y + STACK_DY : y) + (CTRL_H - EDIT_H) / 2,
+                control_w, EDIT_H, s_page, IDC_SETTING_BASE + (int)index);
             SendMessage(control, EM_SETLIMITTEXT, INI_VALUE_CAP - 1, 0);
         }
-        button_x = s_compact ? width - 104 : 244 + control_w + 8;
+        button_x = s_compact ? width - 22 - BUTTON_W : 244 + control_w + 8;
         if (d->flags & (SF_DIR | SF_OPEN_FILE | SF_SAVE_FILE))
             make_control(0, "BUTTON", "Browse...", BS_PUSHBUTTON | WS_TABSTOP,
-                         button_x, s_compact ? y + 25 : y, 82, 24,
-                         s_page, IDC_BROWSE_BASE + (int)index);
+                         button_x, s_compact ? y + STACK_DY : y, BUTTON_W,
+                         CTRL_H, s_page, IDC_BROWSE_BASE + (int)index);
         if (d->flags & SF_AXIS)
             make_control(0, "BUTTON", "Detect", BS_PUSHBUTTON | WS_TABSTOP,
-                         button_x, s_compact ? y + 25 : y, 82, 24,
-                         s_page, IDC_DETECT_BASE + (int)index);
+                         button_x, s_compact ? y + STACK_DY : y, BUTTON_W,
+                         CTRL_H, s_page, IDC_DETECT_BASE + (int)index);
         if (scoped_both) {
             HWND button;
 
@@ -2886,19 +3086,33 @@ static void add_page_header(void)
  * radio group the SYSTEM draws pressed in the user's own colours. Both take
  * which is lit from tab_is_selected(). The width is a MAXIMUM, as everything
  * here is. Returns the row's bottom edge. */
-static int add_tab_row_at(int x, int y, int height, int max_w,
-                          const char *const *labels, const int *ids,
-                          unsigned count)
+/* THE TWO TAB ROWS ARE ONE WIDTH: Controls / Force Feedback above, the three
+ * games in the box under it, their outer edges in line. */
+int tab_rows_width(void)
 {
-    int tab_w = min(max_w, (page_width() - 24 - x) / (int)count);
+    return min(MODEL_TITLES * 160 + (MODEL_TITLES - 1) * 4, page_width() - 44);
+}
+
+/* `count` tabs filling `total` from `x`, 4 apart. Each edge is placed rather
+ * than each width repeated, so the last tab ends exactly at x + total. */
+int add_tab_row_at(int x, int y, int height, int total,
+                   const char *const *labels, const int *ids,
+                   unsigned count)
+{
     unsigned i;
 
     for (i = 0; i < count; i++) {
+        int left = x + (int)i * (total + 4) / (int)count;
+        int right = x + (int)(i + 1) * (total + 4) / (int)count - 4;
         HWND tab = make_control(0, "BUTTON", labels[i],
             theme_dark() ? BS_PUSHBUTTON | WS_TABSTOP :
                           BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP |
                           (i ? 0 : WS_GROUP),
-            x + (int)i * (tab_w + 4), y, tab_w, height, s_page, ids[i]);
+            left, y, right - left, height, s_page, ids[i]);
+        /* By its scaled edges: a scaled left plus a scaled width can land a
+         * pixel off the other row's edge. */
+        MoveWindow(tab, scale_px(left), scale_px(y),
+                   scale_px(right) - scale_px(left), scale_px(height), FALSE);
         if (!theme_dark()) {
             quiet_radio(tab);
             SendMessage(tab, BM_SETCHECK,
@@ -2909,11 +3123,11 @@ static int add_tab_row_at(int x, int y, int height, int max_w,
     return y + height;
 }
 
-static int add_tab_row(int y, int height, int max_w,
+static int add_tab_row(int y, int height, int total,
                        const char *const *labels, const int *ids,
                        unsigned count)
 {
-    return add_tab_row_at(20, y, height, max_w, labels, ids, count);
+    return add_tab_row_at(20, y, height, total, labels, ids, count);
 }
 
 /* TWO TABS. Devices and axes are the top half of the page this one heads. */
@@ -2928,96 +3142,12 @@ static void add_controls_header(void)
     labels[0] = page_name(PAGE_CONTROLS);
     labels[1] = page_name(PAGE_FFB);
     add_page_header();
-    add_tab_row(controls_tab_y(), CONTROLS_TAB_H, 220, labels, ids, 2);
+    add_tab_row(controls_tab_y(), CONTROLS_TAB_H, tab_rows_width(), labels, ids, 2);
 }
 
-/* ---- importing a game from a CHD --------------------------------------------
- *
- * THE FRONT DOOR FOR SOMEONE WHO DOES NOT BUILD ANYTHING. src/ingest.c does the
- * work on a thread of its own; this window shows it on the Launch page, above
- * the card it is filling, and a timer moves the bar. A card whose game is not
- * there yet offers the import where its Play button would be, because a greyed
- * Play is a dead end for someone who has never seen this window. */
-#define IMPORT_TIMER 2
-#define IMPORT_MAX_FILES 8
-
-static void pull_page(void);
-static void render_page(void);
 static void layout_window(void);
 
-static struct {
-    HANDLE thread;
-    CRITICAL_SECTION lock;
-    int lock_ready;
-    volatile LONG cancel, finished;
-    volatile LONG64 done, total;
-    char line[256];             /* the importer's last sentence, under lock */
-    char data_dir[MAX_PATH];
-    wchar_t files[IMPORT_MAX_FILES][MAX_PATH];
-    int nfiles, at, replace;
-    ingest_result_t result;
-    ingest_ident_t ident;
-    char why[1024];
-    char results[2048];         /* what the finished imports said */
-} s_import;
-
-static int import_running(void)
-{
-    return s_import.thread != NULL;
-}
-
-static void import_say(void *ctx, const char *line)
-{
-    (void)ctx;
-    EnterCriticalSection(&s_import.lock);
-    snprintf(s_import.line, sizeof s_import.line, "%s", line);
-    LeaveCriticalSection(&s_import.lock);
-}
-
-static void import_progress(void *ctx, uint64_t done, uint64_t total)
-{
-    (void)ctx;
-    InterlockedExchange64(&s_import.total, (LONG64)total);
-    InterlockedExchange64(&s_import.done, (LONG64)done);
-}
-
-static DWORD WINAPI import_main(LPVOID unused)
-{
-    ingest_ui_t ui = { import_say, import_progress, &s_import.cancel, NULL };
-    (void)unused;
-    s_import.result = ingest_file(s_import.files[s_import.at],
-                                 s_import.data_dir, s_import.replace, 0, &ui,
-                                 &s_import.ident, s_import.why,
-                                 sizeof s_import.why);
-    InterlockedExchange(&s_import.finished, 1);
-    return 0;
-}
-
-static const char *import_file_name(void)
-{
-    static char name[MAX_PATH];
-    const wchar_t *f = s_import.files[s_import.at], *slash = wcsrchr(f, L'\\');
-    WideCharToMultiByte(CP_UTF8, 0, slash ? slash + 1 : f, -1, name,
-                        sizeof name, NULL, NULL);
-    return name;
-}
-
-static int import_start_current(void)
-{
-    s_import.cancel = s_import.finished = 0;
-    s_import.done = s_import.total = 0;
-    s_import.why[0] = s_import.line[0] = 0;
-    s_import.thread = CreateThread(NULL, 0, import_main, NULL, 0, NULL);
-    if (!s_import.thread) {
-        snprintf(s_import.results, sizeof s_import.results,
-                 "The import could not be started.");
-        return 0;
-    }
-    SetTimer(s_window, IMPORT_TIMER, 100, NULL);
-    return 1;
-}
-
-static void show_page(int page)
+void show_page(int page)
 {
     pull_page();
     s_page_index = page;
@@ -3027,216 +3157,6 @@ static void show_page(int page)
     abandon_capture();
     render_page();
     layout_window();
-}
-
-/* Begin importing `n` files into the data folder the file names. The window
- * shows the Launch page, where the progress is. */
-static void import_begin(const wchar_t (*files)[MAX_PATH], int n)
-{
-    int i;
-    if (import_running() || n <= 0)
-        return;
-    if (!s_import.lock_ready) {
-        InitializeCriticalSection(&s_import.lock);
-        s_import.lock_ready = 1;
-    }
-    /* Into the folder the game will be read from, so an unsaved change to it
-     * is saved first, exactly as Play does. */
-    pull_page();
-    if (s_dirty && !save_settings(s_window))
-        return;
-    snprintf(s_import.data_dir, sizeof s_import.data_dir, "%s",
-             model_value("paths", "data_dir"));
-    for (i = 0; i < n && i < IMPORT_MAX_FILES; i++)
-        wcscpy(s_import.files[i], files[i]);
-    s_import.nfiles = i;
-    s_import.at = 0;
-    s_import.replace = 0;
-    s_import.results[0] = 0;
-    import_start_current();
-    show_page(PAGE_HOME);
-}
-
-/* The CHDs to import, from the system's own file dialog. */
-static void import_pick(void)
-{
-    static wchar_t buf[32768];
-    static wchar_t picked[IMPORT_MAX_FILES][MAX_PATH];
-    OPENFILENAMEW ofn;
-    wchar_t *p;
-    int n = 0;
-
-    if (import_running())
-        return;
-    memset(&ofn, 0, sizeof ofn);
-    buf[0] = 0;
-    ofn.lStructSize = sizeof ofn;
-    ofn.hwndOwner = s_window;
-    ofn.lpstrFilter = L"MAME CHDs and CD images (*.chd, *.cue, *.toc, *.iso, "
-                      L"*.bin)\0*.chd;*.cue;*.toc;*.iso;*.bin\0"
-                      L"All files\0*.*\0";
-    ofn.lpstrFile = buf;
-    ofn.nMaxFile = sizeof buf / sizeof buf[0];
-    ofn.lpstrTitle = L"Import a game from your MAME CHD";
-    ofn.Flags = OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST |
-                OFN_PATHMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
-    if (!GetOpenFileNameW(&ofn))
-        return;
-    /* One file: its full path. Several: the folder, then each name. */
-    p = buf + wcslen(buf) + 1;
-    if (!*p) {
-        wcsncpy(picked[n++], buf, MAX_PATH - 1);
-    } else {
-        for (; *p && n < IMPORT_MAX_FILES; p += wcslen(p) + 1)
-            _snwprintf(picked[n++], MAX_PATH, L"%ls\\%ls", buf, p);
-    }
-    import_begin((const wchar_t (*)[MAX_PATH])picked, n);
-}
-
-/* The CHDs beside VCThunder.exe, for each game not imported yet: 1 when it
- * started importing them. */
-static int import_beside_exe(void)
-{
-    static wchar_t found[IMPORT_MAX_FILES][MAX_PATH];
-    wchar_t own[MAX_PATH];
-    int n;
-
-    if (import_running())
-        return 0;
-    ingest_own_folder(own, MAX_PATH);
-    n = ingest_find(own, model_value("paths", "data_dir"), found,
-                    IMPORT_MAX_FILES);
-    if (n)
-        import_begin((const wchar_t (*)[MAX_PATH])found, n);
-    return n > 0;
-}
-
-static void append_result(const char *line)
-{
-    size_t used = strlen(s_import.results);
-    snprintf(s_import.results + used, sizeof s_import.results - used, "%s%s",
-             used ? "\r\n" : "", line);
-}
-
-/* The timer: move the bar, and when an import ends, say how and start the
- * next. Rebuilds the page at the end, so a card that can now play says so. */
-static void import_tick(void)
-{
-    char text[320];
-    if (!import_running()) {
-        KillTimer(s_window, IMPORT_TIMER);
-        return;
-    }
-    if (!s_import.finished) {
-        LONG64 done = s_import.done, total = s_import.total;
-        HWND bar = s_page ? GetDlgItem(s_page, IDC_IMPORT_BAR) : NULL;
-        if (bar)
-            SendMessage(bar, PBM_SETPOS,
-                        total ? (WPARAM)(done * 1000 / total) : 0, 0);
-        if (total)
-            snprintf(text, sizeof text, "%s: %lld of %lld MB written",
-                     import_file_name(), (long long)(done >> 20),
-                     (long long)(total >> 20));
-        else {
-            EnterCriticalSection(&s_import.lock);
-            snprintf(text, sizeof text, "%s", s_import.line[0] ?
-                     s_import.line : "Reading the CHD...");
-            LeaveCriticalSection(&s_import.lock);
-        }
-        if (s_page && !s_import.cancel)
-            SetDlgItemTextA(s_page, IDC_IMPORT_TEXT, text);
-        return;
-    }
-    WaitForSingleObject(s_import.thread, INFINITE);
-    CloseHandle(s_import.thread);
-    s_import.thread = NULL;
-    KillTimer(s_window, IMPORT_TIMER);
-    /* The title folder holds something else: ask, once, and only then. */
-    if (s_import.result == INGEST_EXISTS && !s_import.replace) {
-        char ask[1400];
-        snprintf(ask, sizeof ask, "%s\n\nReplace those files with the game "
-                 "from %s?", s_import.why, import_file_name());
-        if (MessageBoxA(s_window, ask, "Import from CHD",
-                        MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES) {
-            s_import.replace = 1;
-            if (import_start_current()) {
-                render_page();
-                return;
-            }
-        }
-    }
-    append_result(s_import.why);
-    s_import.replace = 0;
-    if (s_import.result != INGEST_CANCELLED && ++s_import.at < s_import.nfiles &&
-        import_start_current()) {
-        render_page();
-        return;
-    }
-    render_page();
-}
-
-/* Closing the window while an import runs stops it; the importer removes what
- * it had written. */
-static int import_stop_for_close(void)
-{
-    if (!import_running())
-        return 1;
-    if (MessageBoxA(s_window, "A game is being imported. Stop the import and "
-                    "close?", "Import from CHD",
-                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES)
-        return 0;
-    InterlockedExchange(&s_import.cancel, 1);
-    WaitForSingleObject(s_import.thread, INFINITE);
-    CloseHandle(s_import.thread);
-    s_import.thread = NULL;
-    KillTimer(s_window, IMPORT_TIMER);
-    return 1;
-}
-
-/* Files given before the window opened: CHDs dropped on VCThunder.exe. */
-static wchar_t s_queued[IMPORT_MAX_FILES][MAX_PATH];
-static int s_nqueued;
-
-void launcher_queue_import(const wchar_t *file)
-{
-    if (s_nqueued < IMPORT_MAX_FILES)
-        wcsncpy(s_queued[s_nqueued++], file, MAX_PATH - 1);
-}
-
-/* The Launch page's import block: running, a bar and a Cancel; finished, what
- * each import said. Returns where the cards start. */
-static int render_import_block(int y, int x, int w)
-{
-    if (import_running()) {
-        char head[MAX_PATH + 32];
-        HWND bar, cancel;
-        int head_h;
-        snprintf(head, sizeof head, "Importing %s%s", import_file_name(),
-                 s_import.nfiles > 1 ? " (one of several)" : "");
-        head_h = text_block_height(theme_font(), head, w - 120);
-        make_control(0, "STATIC", head, SS_LEFT, x, y, w - 120, head_h,
-                     s_page, 0);
-        cancel = make_control(0, "BUTTON", s_import.cancel ? "Stopping" :
-                              "Cancel", BS_PUSHBUTTON | WS_TABSTOP,
-                              x + w - 100, y, 100, 26, s_page,
-                              IDC_IMPORT_CANCEL);
-        EnableWindow(cancel, !s_import.cancel);
-        y += max(head_h, 26) + 6;
-        bar = make_control(0, PROGRESS_CLASSA, "", PBS_SMOOTH, x, y, w, 16,
-                           s_page, IDC_IMPORT_BAR);
-        SendMessage(bar, PBM_SETRANGE32, 0, 1000);
-        y += 22;
-        make_control(0, "STATIC", "Reading the CHD...", SS_LEFT, x, y, w, 20,
-                     s_page, IDC_IMPORT_TEXT);
-        return y + 32;
-    }
-    if (s_import.results[0]) {
-        int h = text_block_height(theme_font(), s_import.results, w);
-        make_control(0, "STATIC", s_import.results, SS_LEFT, x, y, w, h,
-                     s_page, IDC_IMPORT_TEXT);
-        return y + h + 14;
-    }
-    return y;
 }
 
 /* The Launch page's cards and Files & Logging's list, in this order. Ultimate
@@ -3284,8 +3204,8 @@ static int files_panel_layout(int *note_y, int *note_h, int *button_y,
     if (note_y) *note_y = top + 26;
     if (note_h) *note_h = nh;
     if (button_y) *button_y = top + 26 + nh + 8;
-    if (state_y) *state_y = top + 26 + nh + 8 + 34;
-    return top + 26 + nh + 8 + 34 + PLAY_TITLES * 20 + BOX_GAP;
+    if (state_y) *state_y = top + 26 + nh + 8 + CTRL_H + 8;
+    return top + 26 + nh + 8 + CTRL_H + 8 + PLAY_TITLES * 20 + BOX_GAP;
 }
 
 static int game_path(const char *title, char *out, size_t out_size);
@@ -3302,7 +3222,7 @@ static void render_files_panel(void)
                  note_h, s_page, 0);
     button = make_control(0, "BUTTON", import_running() ? "Importing..." :
                           "Import from CHD...", BS_PUSHBUTTON | WS_TABSTOP,
-                          20, button_y, min(240, width - 40), 26, s_page,
+                          20, button_y, min(240, width - 40), CTRL_H, s_page,
                           IDC_IMPORT);
     EnableWindow(button, !import_running());
     for (i = 0; i < PLAY_TITLES; i++) {
@@ -3417,100 +3337,134 @@ static void render_home(void)
         if (after != top)
             next_card_y = after + (s_tiny ? 6 : 14);
     }
-    /* Each card is as tall as what is in it. At a constant height, a larger
-     * title face or a save directory spelled out in full puts the second line
+    /* TWO COLUMNS IN THE WIDE FORM, one in the compact: all four games on a
+     * screen the size of a handheld's, each Play button as wide as its card.
+     * The compact form keeps the button beside the text. Each card is as tall
+     * as what is in it, and a row as tall as its taller card: at a constant
+     * height a larger title face or a long status line puts the second line
      * outside the box, where it is simply not drawn. */
-    for (i = 0; i < PLAY_TITLES; i++) {
-        const char *name = k_play[i].id, *exe;
-        char path[MAX_PATH + 64], status[MAX_PATH + 96];
-        int ready = game_path(k_play[i].id, path, sizeof path);
-        int importable = k_play[i].importable;
-        int play_w = s_tiny ? 72 : (s_compact ? 92 : 184);
-        int play_h = s_tiny ? 28 : (s_compact ? 30 : 60);
+    {
+        int columns = s_compact ? 1 : 2;
+        int card_w = columns == 1 ? group_w : (group_w - 12) / 2;
+        int play_h = columns == 1 ? CTRL_H : 60;
+        int play_w = columns == 1 ? (s_tiny ? 72 : 92) : card_w - 36;
         int play_inset = s_tiny ? 10 : 18;
-        /* The text ends where the button begins, whatever the card's width. */
-        int status_w = group_w - play_w - play_inset - 30;
-        /* The title line has a face of its own, so it is a control of its own
-         * and the block below it is what is left of the old one. */
-        int pad_top = s_tiny ? 6 : (s_compact ? 8 : 22);
-        int pad_bottom = s_tiny ? 6 : (s_compact ? 10 : 22);
-        /* 112, so all four cards fit the standard 1200x850 window. */
-        int floor_h = s_tiny ? 48 : (s_compact ? 72 : 112);
-        int card_y = next_card_y;
-        int title_y = card_y + pad_top;
-        int title_h, status_h, path_y, bottom, card_h, play_y;
+        int pad_top = s_tiny ? 6 : (s_compact ? 8 : 18);
+        int pad_bottom = s_tiny ? 6 : (s_compact ? 10 : 18);
+        /* The text ends where the button begins in one column, and spans
+         * the card above the button in two. */
+        int status_w = columns == 1 ? card_w - play_w - play_inset - 30 :
+                                      card_w - 36;
+        int floor_h = pad_top + CTRL_H + pad_bottom;
         HFONT title_font = s_tiny ? theme_title_small_font() : theme_title_font();
-        HWND play, title_label, card = NULL;
+        int title_h[PLAY_TITLES], status_h[PLAY_TITLES], card_h[PLAY_TITLES];
+        int ready[PLAY_TITLES];
+        char status[PLAY_TITLES][MAX_PATH + 96];
+        const char *name[PLAY_TITLES];
 
         if (!title_font)
             title_font = theme_font();
-        title_files(k_play[i].id, &name, &exe);
+        for (i = 0; i < PLAY_TITLES; i++) {
+            char path[MAX_PATH + 64];
+            const char *exe;
+            int importable = k_play[i].importable;
 
-        /* ONE LINE UNDER THE TITLE: ready, or what stops Play. */
-        if (!ready && !importable)
-            snprintf(status, sizeof status, "%s", s_tiny || s_compact ?
-                     "Not installed." :
-                     "Not installed, and it cannot be imported from here yet.");
-        else if (!ready)
-            snprintf(status, sizeof status, "%s", s_tiny ? "Not imported yet." :
-                     s_compact ? "Not imported yet." : k_play[i].from ?
-                     k_play[i].from :
-                     "Not imported yet: import it from your own MAME CHD.");
-        else if (import_running())
-            snprintf(status, sizeof status,
-                     "Play is off while a game is being imported.");
-        else if (!settings_valid) {
-            char where[96];
+            name[i] = k_play[i].id;
+            ready[i] = game_path(k_play[i].id, path, sizeof path);
+            title_files(k_play[i].id, &name[i], &exe);
+            /* ONE LINE UNDER THE TITLE: ready, or what stops Play. */
+            if (!ready[i] && !importable)
+                snprintf(status[i], sizeof status[i], "%s", s_tiny || s_compact ?
+                         "Not installed." :
+                         "Not installed, and it cannot be imported from here yet.");
+            else if (!ready[i])
+                snprintf(status[i], sizeof status[i], "%s",
+                         s_tiny || s_compact ? "Not imported yet." :
+                         k_play[i].from ? k_play[i].from :
+                         "Not imported yet: import it from your own MAME CHD.");
+            else if (import_running())
+                snprintf(status[i], sizeof status[i],
+                         "Play is off while a game is being imported.");
+            else if (!settings_valid) {
+                char where[96];
 
-            page_where(invalid_page, where, sizeof where);
-            if (invalid_page != PAGE_HOME)
-                snprintf(status, sizeof status,
-                         "Play is off until this is fixed on %s: %s", where,
-                         validation);
-            else
-                snprintf(status, sizeof status,
-                         "Play is off until this is fixed: %s", validation);
-        } else
-            snprintf(status, sizeof status, "Ready to play.");
-        title_h = text_block_height(title_font, name, status_w);
-        path_y = title_y + title_h + 6;
-        status_h = text_block_height(theme_font(), status, status_w);
-        bottom = path_y + status_h;
-        card_h = bottom + pad_bottom - card_y;
-        if (card_h < floor_h)
-            card_h = floor_h;
-        play_y = card_y + (card_h - play_h) / 2;
-
-        if (theme_dark()) {
-            card = make_control(0, "VCThunderLauncherCard", "", 0,
-                                group_x, card_y, group_w, card_h, s_page, 0);
-        } else {
-            make_control(0, "BUTTON", "", BS_GROUPBOX,
-                         group_x, card_y - (s_tiny ? 8 : 14), group_w,
-                         card_h + (s_tiny ? 8 : 16), s_page, 0);
+                page_where(invalid_page, where, sizeof where);
+                if (invalid_page != PAGE_HOME)
+                    snprintf(status[i], sizeof status[i],
+                             "Play is off until this is fixed on %s: %s", where,
+                             validation);
+                else
+                    snprintf(status[i], sizeof status[i],
+                             "Play is off until this is fixed: %s", validation);
+            } else
+                snprintf(status[i], sizeof status[i], "Ready to play.");
+            title_h[i] = text_block_height(title_font, name[i], status_w);
+            status_h[i] = text_block_height(theme_font(), status[i], status_w);
+            card_h[i] = pad_top + title_h[i] + 6 + status_h[i] + pad_bottom +
+                        (columns == 1 ? 0 : 14 + play_h);
+            if (card_h[i] < floor_h)
+                card_h[i] = floor_h;
         }
-        title_label = make_control(0, "STATIC", name, SS_LEFT,
-                                   group_x + 18, title_y, status_w, title_h,
-                                   s_page, 0);
-        if (title_font)
-            SendMessage(title_label, WM_SETFONT, (WPARAM)title_font, TRUE);
-        make_control(0, "STATIC", status, SS_LEFT, group_x + 18, path_y,
-                     status_w, status_h, s_page, 0);
-        /* A game that is not there yet is imported from this button. */
-        play = make_control(0, "BUTTON",
-                            ready || !importable ? "Play" : "Import...",
-                            BS_DEFPUSHBUTTON | WS_TABSTOP,
-                            group_x + group_w - play_w - play_inset, play_y,
-                            play_w, play_h, s_page, k_play[i].play);
-        if (!s_compact && theme_play_font())
-            SendMessage(play, WM_SETFONT, (WPARAM)theme_play_font(), TRUE);
-        EnableWindow(play, !import_running() &&
-                           (ready ? settings_valid : importable));
-        if (card)
-            SetWindowPos(card, HWND_BOTTOM, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        /* The air between two outlines, as between any two boxes. */
-        next_card_y = card_y + card_h + (s_tiny ? 9 : BOX_GAP - 12);
+        for (i = 0; i < PLAY_TITLES; i += columns) {
+            int row_h = card_h[i], c;
+
+            for (c = 1; c < columns && i + c < PLAY_TITLES; c++)
+                row_h = max(row_h, card_h[i + c]);
+            for (c = 0; c < columns && i + c < PLAY_TITLES; c++) {
+                int t = i + c;
+                int importable = k_play[t].importable;
+                int card_x = group_x + c * (card_w + 12);
+                int card_y = next_card_y;
+                int title_y = card_y + pad_top;
+                int path_y = title_y + title_h[t] + 6;
+                int play_x = columns == 1 ?
+                    card_x + card_w - play_w - play_inset : card_x + 18;
+                int play_y = columns == 1 ? card_y + (row_h - play_h) / 2 :
+                                            card_y + row_h - pad_bottom - play_h;
+                HWND play, title_label, card = NULL;
+
+                if (theme_dark()) {
+                    card = make_control(0, "VCThunderLauncherCard", "", 0,
+                                        card_x, card_y, card_w, row_h, s_page, 0);
+                    /* The last column ends where every box on the page ends. */
+                    if (c == columns - 1)
+                        MoveWindow(card, scale_px(card_x), scale_px(card_y),
+                                   page_right_px(group_x) - scale_px(card_x),
+                                   scale_px(row_h), FALSE);
+                } else {
+                    HWND box = make_control(0, "BUTTON", "", BS_GROUPBOX,
+                                 card_x, card_y - (s_tiny ? 8 : 14), card_w,
+                                 row_h + (s_tiny ? 8 : 16), s_page, 0);
+
+                    if (c == columns - 1)
+                        MoveWindow(box, scale_px(card_x),
+                                   scale_px(card_y - (s_tiny ? 8 : 14)),
+                                   page_right_px(group_x) - scale_px(card_x),
+                                   scale_px(row_h + (s_tiny ? 8 : 16)), FALSE);
+                }
+                title_label = make_control(0, "STATIC", name[t], SS_LEFT,
+                                           card_x + 18, title_y, status_w,
+                                           title_h[t], s_page, 0);
+                SendMessage(title_label, WM_SETFONT, (WPARAM)title_font, TRUE);
+                make_control(0, "STATIC", status[t], SS_LEFT, card_x + 18,
+                             path_y, status_w, status_h[t], s_page, 0);
+                /* A game that is not there yet is imported from this button. */
+                play = make_control(0, "BUTTON",
+                                    ready[t] || !importable ? "Play" : "Import...",
+                                    BS_DEFPUSHBUTTON | WS_TABSTOP,
+                                    play_x, play_y, play_w, play_h, s_page,
+                                    k_play[t].play);
+                if (!s_compact && theme_play_font())
+                    SendMessage(play, WM_SETFONT, (WPARAM)theme_play_font(), TRUE);
+                EnableWindow(play, !import_running() &&
+                                   (ready[t] ? settings_valid : importable));
+                if (card)
+                    SetWindowPos(card, HWND_BOTTOM, 0, 0, 0, 0,
+                                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+            /* The air between two outlines, as between any two boxes. */
+            next_card_y += row_h + (s_tiny ? 9 : BOX_GAP - 12);
+        }
     }
     s_content_height = next_card_y + 8;
 }
@@ -3532,7 +3486,7 @@ const char *probe_product_name(const input_probe_device_t *device)
     return colon ? colon + 2 : (device ? device->name : "");
 }
 
-static const char *probe_provider(const input_probe_device_t *device)
+const char *probe_provider(const input_probe_device_t *device)
 {
     return device->backend == INPUT_PROBE_DINPUT ? "dinput" :
            device->backend == INPUT_PROBE_XINPUT ? "xinput" : "winmm";
@@ -3561,8 +3515,8 @@ static unsigned probe_ids(const char *provider, ini_device_id_t *ids,
 }
 
 /* `d`'s place in its provider's list, or -1. */
-static int probe_id_of(const input_probe_device_t *d, ini_device_id_t *ids,
-                       unsigned *count)
+int probe_id_of(const input_probe_device_t *d, ini_device_id_t *ids,
+                unsigned *count)
 {
     unsigned row[INPUT_PROBE_MAX_DEVICES], k;
 
@@ -3680,631 +3634,17 @@ static int probe_adopt_pending(const probe_adopt_t *p)
             strcmp(model_value("analog", p->name_key), p->name) != 0);
 }
 
-/* ---- the Controls page ----------------------------------------------------
- *
- * Three groups down one page, in the order somebody sets a wheel up: which
- * controllers are attached, what drives the car, what the buttons do. It
- * replaces the Bindings and Devices & Axes tabs, the same job cut by
- * mechanism, and the `Test controller` combo, which was a mode nothing on
- * screen declared. Every attached controller is polled every tick, so nothing
- * has to be selected before it can be used. */
-
-/* A WinMM row is a second view of a controller DirectInput already listed, and
- * this host reads one provider at a time, so two of them are two rows nobody
- * can tell apart. Behind the legacy disclosure rather than gone: a device no
- * other backend enumerates is still one click away. */
-/* The [devices] label this controller ALREADY has, without creating one:
- * device_what() runs from the render and the 30 Hz refresh, and a lookup that
- * writes would put a line in the file for every controller merely looked at. */
-static int device_label_of(const input_probe_device_t *d, char *out,
-                           size_t out_size)
-{
-    ini_device_id_t ids[INPUT_PROBE_MAX_DEVICES];
-    unsigned count;
-    int which;
-
-    if (!d || (which = probe_id_of(d, ids, &count)) < 0)
-        return 0;
-    return model_device_label_find(probe_provider(d), ids, count,
-                                   (unsigned)which, out, out_size);
-}
-
-static int device_listed(unsigned i)
-{
-    const input_probe_device_t *d = input_probe_device(i);
-
-    if (!d)
-        return 0;
-    return d->backend != INPUT_PROBE_WINMM || s_show_legacy;
-}
-
-/* WHAT THE CONTROLLER IS, in terms this host can answer: how many axes and
- * buttons it reports, and whether it publishes force feedback. Not "wheel,
- * pedals"; a guess here is the per-model table this project has twice
- * refused to build. */
-static void device_what(unsigned i, char *out, size_t out_size)
-{
-    const input_probe_device_t *d = input_probe_device(i);
-    size_t at;
-
-    if (!d) {
-        out[0] = '\0';
-        return;
-    }
-    /* "FORCE FEEDBACK" MEANS THE WHEEL'S MOTOR, AND AN XInput PAD HAS NOT GOT
-     * ONE. input_probe sets the flag for every XInput device because every one
-     * can be TESTED, but the game's force is a DirectInput effect, and a pad
-     * gets the derived model behind [ffb] rumble, a different switch on a
-     * different page. */
-    at = (size_t)snprintf(out, out_size, "%u axes, %u buttons%s",
-                          d->axis_count, d->button_count,
-                          !d->force_feedback ? "" :
-                          d->backend == INPUT_PROBE_XINPUT ?
-                          ", rumble motors" : ", force feedback");
-    /* The label the device's bindings carry, so the list and the binding rows
-     * share one vocabulary. An XInput or WinMM row names its [analog.<label>]
-     * section instead. */
-    if (at < out_size) {
-        char label[INI_LABEL_CAP];
-        if (device_label_of(d, label, sizeof label))
-            at += (size_t)snprintf(out + at, out_size - at,
-                                   d->backend == INPUT_PROBE_DINPUT ?
-                                   "   called \"%s\" in bindings" :
-                                   "   [analog.%s]; its buttons bind as plain "
-                                   "numbers", label);
-    }
-    if (at < out_size && i < INPUT_PROBE_MAX_DEVICES && s_dev_active[i] &&
-        (DWORD)(GetTickCount() - s_dev_active[i]) < DEVICE_ACTIVE_MS)
-        snprintf(out + at, out_size - at, "   <- moving");
-}
-
-/* A group's heading, and the one button that belongs to it, right-aligned and
- * never off the page: every constant here is a maximum. */
-/* A group's heading and the one button belonging to it: right-aligned beside
- * the heading where there is room, on its own line under it where there is not;
- * at 320 units the heading was ellipsised to make room. Every constant is a
- * maximum, which here was not sufficient: two things sharing a line need a rule
- * for when they stop sharing it. */
-static int group_header(int y, const char *text, int button_id,
-                        const char *button_text, int button_w, int enabled)
-{
-    int width = page_width();
-    int right = width - 20;
-    int stacked = button_id && width < 400;
-    int x = right - min(button_w, max(90, width - 200));
-    HWND button;
-
-    if (button_id) {
-        button_w = stacked ? min(button_w, width - 40) : right - x;
-        button = make_control(0, "BUTTON", button_text,
-                              BS_PUSHBUTTON | WS_TABSTOP,
-                              stacked ? 20 : x, stacked ? y + 22 : y - 3,
-                              button_w, 26, s_page, button_id);
-        EnableWindow(button, enabled);
-    }
-    box_title(20, y, (button_id && !stacked ? x - 30 : right - 20), 20, text,
-              SS_ENDELLIPSIS);
-    return y + (stacked ? 52 : 26);
-}
-
-static int muted_line(int y, const char *text, int id)
-{
-    int width = page_width();
-    int h = text_block_height(theme_font(), text, width - 40);
-
-    make_control(0, "STATIC", text, SS_LEFT, 20, y, width - 40, h, s_page, id);
-    return y + h + 6;
-}
-
-/* One row per axis the controller reports, RAW. Behind its own disclosure and
- * headed with what it is: the analog bars are the map's answer and these
- * are the device's, and the two disagreeing is the finding rather than a
- * display fault. */
-static int render_axis_table(int y)
-{
-    int width = page_width();
-    unsigned rows = probe_axis_rows(), i;
-    int name_w, bar_w, value_w = 56, bar_x, value_x;
-
-    if (!rows)
-        return y;
-    name_w = min(178, (width - 40) / 2);
-    bar_x = 20 + name_w + 10;
-    value_x = width - 20 - value_w;
-    bar_w = value_x - 10 - bar_x;
-    if (bar_w < 50) {
-        bar_w = 50;
-        value_x = bar_x + bar_w + 10;
-    }
-    y = muted_line(y, "Raw values, before your mapping. A row that does not "
-                      "move is an axis the controller is not writing.",
-                   IDC_AXIS_TABLE_HEAD);
-    y += 2;
-    for (i = 0; i < rows; i++, y += AXIS_ROW_PITCH) {
-        const char *name = input_probe_axis_name(i);
-        const char *label = input_probe_axis_label(i);
-        char text[96];
-
-        /* THE DRIVER'S NAME, WHERE THERE IS ONE. WinMM publishes none at all,
-         * so those rows carry the ini name alone rather than a label this
-         * launcher invented for them. */
-        if (label && label[0])
-            snprintf(text, sizeof text, "%s  -  %s", name ? name : "?", label);
-        else
-            snprintf(text, sizeof text, "%s", name ? name : "?");
-        make_control(0, "STATIC", text, SS_LEFT | SS_ENDELLIPSIS, 38, y + 2,
-                     name_w - 18, 18, s_page, IDC_AXIS_NAME_BASE + (int)i);
-        make_control(0, PROGRESS_CLASSA, "", PBS_SMOOTH, bar_x, y, bar_w, 16,
-                     s_page, IDC_AXIS_BAR_BASE + (int)i);
-        SendDlgItemMessage(s_page, IDC_AXIS_BAR_BASE + (int)i,
-                           PBM_SETRANGE32, 0, 1000);
-        make_control(0, "STATIC", "", SS_LEFT, value_x, y + 2, value_w, 18,
-                     s_page, IDC_AXIS_VALUE_BASE + (int)i);
-    }
-    make_control(0, "STATIC", "Buttons down: none", SS_LEFT | SS_ENDELLIPSIS,
-                 38, y + 4, width - 58, 20, s_page, IDC_LIVE_BUTTONS);
-    return y + 28;
-}
-
-/* A machine with a pad and no force feedback wheel: the tick picks the pad,
- * and what it gets is the rumble. */
-static int devices_pad_only(void)
-{
-    unsigned i;
-    int pad = 0;
-
-    for (i = 0; i < input_probe_count(); i++) {
-        const input_probe_device_t *d = input_probe_device(i);
-
-        if (!d || !device_listed(i))
-            continue;
-        if (d->backend == INPUT_PROBE_DINPUT && d->force_feedback)
-            return 0;
-        if (d->backend == INPUT_PROBE_XINPUT)
-            pad = 1;
-    }
-    return pad;
-}
-
-/* Why nothing, or something unexpected, is ticked, when the file is the
- * reason: no controller at all, or a named one that is not attached. Empty
- * otherwise. */
-static void device_problem_text(char *out, size_t out_size)
-{
-    const char *provider = model_value("analog", "provider");
-    const char *name = model_value("analog", "dinput_name");
-
-    out[0] = '\0';
-    if (!_stricmp(provider, "none"))
-        snprintf(out, out_size, "No controller is in use. Select one to use "
-                 "it.");
-    else if (*name && (!_stricmp(provider, "auto") ||
-                       !_stricmp(provider, "dinput")) &&
-             launcher_default_row() < 0)
-        snprintf(out, out_size, "Your wheel, %s, is not plugged in. Plug it "
-                 "in and press Rescan.", name);
-}
-
-/* A CHECKBOX WHOSE LABEL IS A SENTENCE: long enough to wrap on a narrow
- * page, and a checkbox does not wrap by itself, so multiline and as tall as
- * its text beside the box. Returns the y under it. */
-static int sentence_checkbox(int y, const char *text, int id, int checked)
-{
-    int width = page_width();
-    int h = max(22, text_block_height(theme_font(), text, width - 64));
-
-    make_control(0, "BUTTON", text,
-                 BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP | WS_TABSTOP |
-                 WS_GROUP, 20, y, width - 40, h, s_page, id);
-    SendDlgItemMessage(s_page, id, BM_SETCHECK,
-                       checked ? BST_CHECKED : BST_UNCHECKED, 0);
-    return y + h + 8;
-}
-
-/* ONE CONTROLLER FOR BOTH GAMES, OR ONE EACH, LAST IN ITS BOX: what a
- * person with one wheel never needs to think about, so it is under the list
- * rather than over it. Unticked is the file with no [<title>.analog] choice
- * in it. Ticked, the game row at the
- * top picks whose controller this card and the analog card show. */
-static int render_cabinet_choice(int y)
-{
-    y = sentence_checkbox(y, "Separate controller per game",
-                          IDC_SEPARATE_CONTROLLER, model_controls_split()) - 2;
-    if (!model_controls_split())
-        return y;
-    return muted_line(y, "Pick a game in the row at the top of the page, then "
-                         "the controller it uses in the list above.", 0);
-}
-
-static int render_device_group(int y)
-{
-    unsigned i;
-    int width = page_width(), first = 1;
-    char text[256];
-
-    snprintf(text, sizeof text, "YOUR CONTROLLERS - %s",
-             !model_controls_split() ? "All games" :
-             model_title_name(model_controls_title()));
-    y = group_header(y, text, IDC_PROBE_REFRESH, "Rescan", 92, 1);
-    if (!input_probe_count()) {
-        y = muted_line(y, "No controller detected. Plug one in and press "
-                          "Rescan; the keyboard works either way.", 0);
-        return render_cabinet_choice(y) + 6;
-    }
-    /* What the tick means, above the list it is about. Steering, pedals and
-     * buttons can come from any controller; the tick picks the one that gets
-     * the force feedback. */
-    y = muted_line(y, devices_pad_only() ?
-                      "Pick the controller you drive with: it steers and it "
-                      "shakes. Buttons and keys work on every controller, "
-                      "picked or not." :
-                      "Pick the wheel you drive with: it steers and it pushes "
-                      "back. Buttons and keys work on every controller, "
-                      "picked or not.", 0);
-    for (i = 0; i < input_probe_count(); i++) {
-        const input_probe_device_t *d = input_probe_device(i);
-        HWND radio;
-
-        if (!device_listed(i))
-            continue;
-        /* ITS OWN GROUP, or an auto radio would join the cabinet tabs above
-         * it and clicking a controller would untick the game. */
-        radio = make_control(0, "BUTTON", d->name,
-            BS_AUTORADIOBUTTON | WS_TABSTOP | (first ? WS_GROUP : 0),
-            20, y, width - 40, 22, s_page, IDC_DEVICE_BASE + (int)i);
-        quiet_radio(radio);
-        first = 0;
-        /* The controller the host will use as the main one, which is not
-         * necessarily the one the file pins: the shipped `provider = auto`
-         * pins nothing and the host still picks one. Clicking another row
-         * pins it. */
-        SendMessage(radio, BM_SETCHECK,
-                    (int)i == s_probe_selected ? BST_CHECKED : BST_UNCHECKED,
-                    0);
-        y += 21;
-        device_what(i, text, sizeof text);
-        make_control(0, "STATIC", text, SS_LEFT | SS_ENDELLIPSIS, 38, y,
-                     width - 58, 18, s_page, IDC_DEVICE_CAP_BASE + (int)i);
-        y += 22;
-    }
-    device_problem_text(text, sizeof text);
-    y = *text ? muted_line(y + 2, text, 0) : y + 2;
-    y = sentence_checkbox(y, "Also list my controllers the old way (only "
-                             "needed if yours is missing from the list above)",
-                          IDC_SHOW_LEGACY, s_show_legacy);
-    return render_cabinet_choice(y) - 4;
-}
-
-/* The line under the three bars when nothing more urgent holds it. */
-static const char k_driving_hint[] =
-    "Move your controls and watch the bars follow. Steering rests in the "
-    "middle, so its bar starts half full.";
-
-/* Set up's button, whose words follow what pressing it would do. */
-static const char *setup_button_text(void)
-{
-    return capture_wizard_running() ? "Skip step" : "Set up...";
-}
-
-static int render_driving_group(int y)
-{
-    static const char *const k_role[3] = { "Steering", "Accelerator", "Brake" };
-    const input_probe_device_t *d = s_probe_selected >= 0 ?
-        input_probe_device((unsigned)s_probe_selected) : NULL;
-    char head[96];
-    int width = page_width();
-    int right = width - 20;
-    int label_w = min(104, max(70, (width - 40) / 3));
-    int src_x = 20 + label_w + 8;
-    int src_w = min(120, max(60, (right - src_x) / 3));
-    int bar_x = src_x + src_w + 8;
-    int bar_w = right - bar_x;
-    unsigned i;
-
-    /* SET UP ONLY WHERE IT CAN RUN. It measures a wheel's axes; a gamepad's
-     * are fixed by its API and already mapped, and a Set up button that only
-     * beeps reads as broken. */
-    snprintf(head, sizeof head, "ANALOG CONTROLS - %s",
-             !model_controls_split() ? "All games" :
-             model_title_name(model_controls_title()));
-    y = group_header(y, head,
-                     d && d->backend == INPUT_PROBE_DINPUT ? IDC_SETUP_AXES : 0,
-                     setup_button_text(), 108, 1);
-    if (!d)
-        return muted_line(y, "No controller is selected, so nothing drives "
-                             "the car but the keyboard.", 0) + 6;
-    if (bar_w < 60) {           /* a page too narrow for three columns drops */
-        src_w = 0;              /* the middle one, which is the least urgent */
-        bar_x = src_x;
-        bar_w = right - bar_x;
-    }
-    for (i = 0; i < 3; i++) {
-        make_control(0, "STATIC", k_role[i], SS_LEFT, 20, y + 2, label_w, 20,
-                     s_page, 0);
-        if (src_w)
-            make_control(0, "STATIC", "", SS_LEFT | SS_ENDELLIPSIS, src_x,
-                         y + 2, src_w, 20, s_page,
-                         IDC_LIVE_ROLE_BASE + (int)i);
-        make_control(0, PROGRESS_CLASSA, "", PBS_SMOOTH, bar_x, y, bar_w, 18,
-                     s_page, IDC_LIVE_STEER + (int)i);
-        SendDlgItemMessage(s_page, IDC_LIVE_STEER + (int)i, PBM_SETRANGE32,
-                           0, 1000);
-        /* STEERING'S CENTRE, MARKED: at rest its bar is half full, which
-         * otherwise reads as something held down. Made after the bar, so it
-         * stays on top of every repaint (WS_CLIPSIBLINGS). */
-        if (i == 0)
-            make_control(0, "STATIC", "",
-                         theme_dark() ? SS_WHITERECT : SS_BLACKRECT,
-                         bar_x + bar_w / 2 - 1, y - 3, 2, 24, s_page, 0);
-        y += 26;
-    }
-    /* Two controls, not one string with a "\r\n": text_block_height() says
-     * why. place_note_lines() sizes and stacks them. */
-    {
-        HFONT font = theme_note_font();
-        const char *first = capture_note() ? capture_note() :
-                            s_note_last[0] ? s_note_last :
-                            k_driving_hint;
-        HWND line;
-
-        s_note_w = width - 40;
-        s_note_text_h = note_text_height(first, capture_note_say());
-        line = make_control(0, "STATIC", first, SS_LEFT, 20, y + NOTE_GAP,
-                            s_note_w, 0, s_page, IDC_LIVE_NOTE);
-        SendMessage(line, WM_SETFONT, (WPARAM)font, TRUE);
-        line = make_control(0, "STATIC", capture_note_say(), SS_LEFT, 20,
-                            y + NOTE_GAP, s_note_w, 0, s_page, IDC_LIVE_SAY);
-        SendMessage(line, WM_SETFONT, (WPARAM)font, TRUE);
-        place_note_lines();
-        y += NOTE_GAP + s_note_text_h + 6;
-    }
-    /* THE RAW TABLE, UNDER THE BARS IT EXPLAINS: the question it answers is
-     * "why does this bar not move", and this is where that is asked. */
-    y = sentence_checkbox(y, "Bars not moving the way you expect? Show "
-                             "everything this controller sends, before any "
-                             "mapping", IDC_SHOW_RAW, s_show_raw) - 4;
-    if (s_show_raw)
-        y = render_axis_table(y);
-    return y + 4;
-}
-
-/* THE ORDER THE BUTTON LIST IS READ IN: what you drive with first, the
- * operator's buttons last. Display only; bindings.def keeps the order every
- * other consumer, the ini and the control ids follow. An action in no group
- * is still shown, under "Other", so a new row in bindings.def cannot vanish. */
-static const struct {
-    const char *head;
-    const char *keys[11];
-} k_button_groups[] = {
-    { "Driving", { "steer_left", "steer_right", "throttle", "brake", "boost",
-                   "shift_up", "shift_down", "shift1", "shift2", "shift3",
-                   NULL } },
-    { "Camera", { "view_high", "view_low", "view_pilot", NULL } },
-    { "Select screens", { "menu_prev", "menu_next", NULL } },
-    { "Starting a game", { "coin1", "start1", NULL } },
-    { "Arcade cabinet", { "coin2", "service1", "service_mode", "volume_down",
-                          "volume_up", NULL } },
-};
-#define BUTTON_GROUP_COUNT (sizeof k_button_groups / sizeof k_button_groups[0])
-
-/* `order` gets every visible action once, grouped; `head[k]` is the heading
- * to draw before order[k], or NULL. A group with nothing visible gets no
- * heading. Returns how many entries were written. */
-static unsigned button_order(unsigned order[ACTION_COUNT],
-                             const char *head[ACTION_COUNT])
-{
-    unsigned char placed[ACTION_COUNT] = { 0 };
-    const char *pending;
-    unsigned n = 0, g, j, a;
-
-    for (g = 0; g <= BUTTON_GROUP_COUNT; g++) {
-        pending = g < BUTTON_GROUP_COUNT ? k_button_groups[g].head : "Other";
-        for (j = 0; j < ACTION_COUNT; j++) {
-            if (g < BUTTON_GROUP_COUNT) {
-                const char *key = k_button_groups[g].keys[j];
-
-                if (!key)
-                    break;
-                for (a = 0; a < ACTION_COUNT && strcmp(k_actions[a].key, key);
-                     a++)
-                    ;
-            } else {
-                a = j;          /* "Other": whatever no group named */
-            }
-            if (a >= ACTION_COUNT || placed[a] || !action_visible(a))
-                continue;
-            placed[a] = 1;
-            head[n] = pending;
-            pending = NULL;
-            order[n++] = a;
-        }
-    }
-    return n;
-}
-
-static int render_button_group(int y)
-{
-    int width = page_width();
-    int right = width - 20;
-    /* Below this the label gets a line of its own and the slots the second. */
-    int stacked = width < 470;
-    int label_w = min(132, max(90, (width - 40) / 3));
-    int value_x, slot_w, reset_w;
-    unsigned i, k, s, shown, order[ACTION_COUNT];
-    const char *heads[ACTION_COUNT];
-    char head[64];
-
-    value_x = stacked ? 20 : 20 + label_w + 8;
-    /* A slot is a control, not a line: wide enough for `thrustmaster button
-     * 12`, and no wider however wide the page is. */
-    slot_w = min(240, max((right - value_x - 6 * (BINDING_SLOTS - 1)) /
-                          BINDING_SLOTS, 60));
-    snprintf(head, sizeof head, "BUTTONS - %s",
-             model_title_name(model_controls_title()));
-    /* WHICH CABINET'S MAP IS BELOW is the game row's question, and only the
-     * game row answers it: one place to switch, not two. */
-    y = group_header(y, head, 0, NULL, 0, 1);
-    /* THE TWO CABINETS DO NOT SHARE A CONTROL PANEL and the file says so: six
-     * of the fifteen shared actions have a different default on each, and
-     * Offroad has five controls Hydro does not have at all. A "both games"
-     * column would therefore be six rows reading "differs" and a shared line
-     * that BEATS the per-title default rather than losing to it. One cabinet
-     * at a time is what the file is. */
-    y = muted_line(y, "Click a slot, then press the key or button for it, on "
-                      "any controller. Delete empties the slot; Backspace "
-                      "puts back its default.", 0);
-    shown = button_order(order, heads);
-    for (k = 0; k < shown; k++) {
-        const action_desc_t *a = &k_actions[order[k]];
-        const char *label;
-        int row_y;
-
-        i = order[k];
-        if (heads[k]) {
-            HWND sub = make_control(0, "STATIC", heads[k], SS_LEFT,
-                                    20, y + 6, width - 40, 20, s_page, 0);
-            SendMessage(sub, WM_SETFONT, (WPARAM)theme_note_font(), TRUE);
-            y += 30;
-        }
-        row_y = stacked ? y + 22 : y;
-        label = a->label[model_controls_title()];
-        make_control(0, "STATIC", label ? label : a->key,
-                     SS_LEFT | SS_ENDELLIPSIS, 20, y + 4,
-                     stacked ? width - 40 : label_w, 20, s_page, 0);
-        /* Created captionless; update_binding_display() writes each slot's
-         * text, the one place it is decided. */
-        for (s = 0; s < BINDING_SLOTS; s++)
-            make_control(0, "BUTTON", "", BS_PUSHBUTTON | WS_TABSTOP,
-                         value_x + (int)s * (slot_w + 6), row_y, slot_w, 24,
-                         s_page,
-                         IDC_BIND_SLOT_BASE + (int)(i * BINDING_SLOTS + s));
-        update_binding_display(i);
-        y += stacked ? 52 : 28;
-    }
-    reset_w = min(160, width - 40);
-    make_control(0, "BUTTON", "Reset to defaults", BS_PUSHBUTTON | WS_TABSTOP,
-                 value_x, y + 8, reset_w, 26, s_page, IDC_BIND_RESET);
-    update_reset_button();
-    return y + 8 + 26 + 6;
-}
-
-/* THE GAME ROW: one row of tabs, one variable, above everything it
- * governs. Buttons always follow it; the controller cards only while each
- * game has its own, and their headings say which. */
-static int render_game_row(int y)
-{
-    static const int ids[MODEL_TITLES] = {
-        IDC_TITLE_HYDRO, IDC_TITLE_OFFROAD, IDC_TITLE_ARCTIC };
-    static const char *const k_short[MODEL_TITLES] = {
-        "Hydro", "Offroad", "Arctic" };
-    const char *labels[MODEL_TITLES];
-    /* A tab narrower than "Offroad Thunder" clips it, so the narrow window
-     * names the games by their first word. */
-    int narrow = (page_width() - 44) / MODEL_TITLES < 140;
-    int t;
-
-    for (t = 0; t < MODEL_TITLES; t++)
-        labels[t] = narrow ? k_short[t] : model_title_name(t);
-    /* No "Game:" label: the names say what the row is. */
-    return add_tab_row_at(20, y, 24, 160, labels, ids, MODEL_TITLES);
-}
-
-static void render_controls_panel(void)
-{
-    int top = page_header_bottom(), y;
-
-    /* THE GAME ROW IS A CARD OF ITS OWN, 8 of air above and below the tabs,
-     * then three topics, three cards. The disclosure below them is not one:
-     * it is the door to the rest of this page, not a thing on it. */
-    y = frame_topic(top, render_game_row(top) + 4);
-    top = y;
-    y = frame_topic(top, render_device_group(y));
-    top = y;
-    y = frame_topic(top, render_driving_group(y));
-    top = y;
-    y = frame_topic(top, render_button_group(y));
-    /* The settings rows' box comes next, the same gap under the last card. */
-    s_panel_bottom = y;
-}
-
-/* WHAT THE GAME WILL ACTUALLY DO WITH THIS CONTROLLER, which is not what the
- * Test button proves. Test drives the DEVICE: it commands a DirectInput effect
- * or an XInput vibration and says nothing about whether the host will ever ask
- * for one, so a pad with `[ffb] rumble = false` buzzes on the bench and stays
- * dead in the race.
- *
- * The three cases are the three sinks. `[ffb] enabled` gates the wheel's motor
- * (dinput.c: `s_have_ffb && s_cfg.ffb_enabled`); `[ffb] rumble` gates the
- * derived pad model; and **the rumble sink is XInput and only XInput**
- * (io_host_rumble), so a controller that is neither an XInput device nor a
- * DirectInput one publishing effects has nowhere for either to go.
- *
- * It reads the MODEL, so it answers to what the page is showing rather than to
- * what the file last said, and it follows the selected controller for the same
- * reason the bars above do. */
-static const char *ffb_reaches_device(const input_probe_device_t *d)
-{
-    if (!d)
-        return NULL;
-    if (d->backend == INPUT_PROBE_XINPUT)
-        return model_bool("ffb", "rumble") ? NULL :
-            "Gamepad rumble below is off, so the game will not drive this "
-            "pad's motors, Test only proves the motors work.";
-    if (d->backend == INPUT_PROBE_DINPUT && d->force_feedback)
-        return model_bool("ffb", "enabled") ? NULL :
-            "Enable force feedback below is off, so the game will not command "
-            "this wheel; Test only proves the motor works.";
-    return "This is not an XInput pad and it publishes no force-feedback "
-           "effects, so neither the wheel force nor the derived rumble has "
-           "anywhere to go on it.";
-}
-
-static void render_ffb_panel(void)
-{
-    const input_probe_device_t *d = s_probe_selected >= 0 ?
-        input_probe_device((unsigned)s_probe_selected) : NULL;
-    int y = page_header_bottom(), top = y;
-    const char *gap = ffb_reaches_device(d);
-    char label[MAX_PATH + 48];
-
-    /* THE SAME GAME ROW AS THE CONTROLS PAGE, one variable: every row below
-     * is the shown game's, [<title>.ffb] over [ffb]. */
-    y = frame_topic(top, render_game_row(top) + 4);
-    top = y;
-    snprintf(label, sizeof label, "FORCE FEEDBACK - %s",
-             d ? probe_product_name(d) : "no controller selected");
-    y = group_header(y, label, IDC_FFB_TEST, "Test", 108,
-                     d && d->force_feedback);
-    if (gap)
-        y = muted_line(y, gap, 0);
-    s_panel_bottom = frame_topic(top, y);
-}
-
-/* THE GRAPHICS PAGE OPENS WITH WHAT EACH GAME GETS: every row below feeds
- * the one card, so a change shows here and the games are listed once. The
- * card is the page's first box itself, in frame_topic()'s place and outline,
- * with no title: its heading line says what it is. */
-static int graphics_panel_layout(void)
-{
-    return page_header_bottom() - 8 + readout_height() - 4 + BOX_GAP;
-}
-
-static void render_graphics_panel(void)
-{
-    make_control(0, "VCThunderLauncherReadout", "", 0, 12,
-                 page_header_bottom() - 8, page_width() - 24, readout_height(),
-                 s_page, IDC_READOUT);
-}
-
 /* THE BEZEL BOX, last on the Graphics page: each game its own art, so a row
  * per game, each a switch, the file and Choose..., and a line saying what the
- * file is. The file is copied into bezels\ on Apply (model_save()). */
+ * file is. The file is copied into bezels\ on Apply (model_save()). Ultimate
+ * Arctic Thunder's row shows Arctic's art until it is given its own. */
 static int render_bezel_panel(int top)
 {
     const char *const *name = k_bezel_name;
     static const char intro[] = "PNG art with a transparent screen opening.";
     int width = page_width(), y, t;
-    int control_w = s_compact ? width - 44 - 90 : min(310, width - 244 - 22 - 90);
+    int control_w = s_compact ? width - 44 - BUTTON_W - 8 :
+                                min(310, width - 244 - 22 - BUTTON_W - 8);
 
     if (control_w < 120)
         control_w = 120;
@@ -4315,15 +3655,16 @@ static int render_bezel_panel(int top)
                      s_page, 0);
         y += h + 10;
     }
-    for (t = 0; t < MODEL_TITLES; t++) {
-        char path[MAX_PATH], note[224];
+    for (t = 0; t < MODEL_BEZELS; t++) {
+        char path[MAX_PATH], note[224], art[192];
+        int inherits = model_bezel_inherits(t);
         const char *base;
         int on = model_bezel_get(t, path, sizeof path);
-        int value_y = s_compact ? y + 25 : y;
+        int value_y = s_compact ? y + CTRL_H + 2 : y;
         HWND box;
 
         box = make_control(0, "BUTTON", name[t], BS_AUTOCHECKBOX | WS_TABSTOP,
-                           22, y, s_compact ? width - 44 : 215, 24, s_page,
+                           22, y, s_compact ? width - 44 : 215, CTRL_H, s_page,
                            IDC_BEZEL_ENABLE + t);
         SendMessage(box, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
         base = strrchr(path, '\\');
@@ -4332,27 +3673,39 @@ static int render_bezel_panel(int top)
         base = base ? base + 1 : path;
         make_control(0, "STATIC", path[0] ? base : "None",
                      SS_LEFT | SS_ENDELLIPSIS, s_compact ? 22 : 244,
-                     value_y + 4, control_w, 20, s_page, IDC_BEZEL_FILE + t);
+                     value_y + LABEL_DY, control_w, 20, s_page,
+                     IDC_BEZEL_FILE + t);
         make_control(0, "BUTTON", "Choose...", BS_PUSHBUTTON | WS_TABSTOP,
-                     s_compact ? width - 104 : 244 + control_w + 8, value_y,
-                     82, 24, s_page, IDC_BEZEL_CHOOSE + t);
+                     s_compact ? width - 22 - BUTTON_W : 244 + control_w + 8,
+                     value_y, BUTTON_W, CTRL_H, s_page, IDC_BEZEL_CHOOSE + t);
         if (!path[0]) {
-            snprintf(note, sizeof note, "No art chosen.");
+            snprintf(art, sizeof art, "No art chosen.");
         } else {
             const bezel_info_t *info = bezel_info(path);
             if (info->ok)
-                snprintf(note, sizeof note, "%dx%d.", info->w, info->h);
+                snprintf(art, sizeof art, "%dx%d.", info->w, info->h);
             else
-                snprintf(note, sizeof note, "This file cannot be used: %s.",
+                snprintf(art, sizeof art, "This file cannot be used: %s.",
                          info->why);
         }
-        y = value_y + 28;
+        snprintf(note, sizeof note, "%s%s",
+                 inherits ? "Same as Arctic Thunder. " : "", art);
+        y = value_y + CTRL_H + 4;
         {
             int h = text_block_height(theme_font(), note, width - 44);
             make_control(0, "STATIC", note, SS_LEFT, 22, y, width - 44, h,
                          s_page, IDC_BEZEL_NOTE + t);
-            y += h + (t < MODEL_TITLES - 1 ? 10 : 0);
+            y += h;
         }
+        /* Ultimate's own art, or its own off, can go back to Arctic's. */
+        if (t == MODEL_BEZEL_UARCTIC && !inherits) {
+            make_control(0, "BUTTON", "Same as Arctic Thunder",
+                         BS_PUSHBUTTON | WS_TABSTOP, 22, y + 6,
+                         min(200, width - 44), CTRL_H, s_page,
+                         IDC_BEZEL_INHERIT);
+            y += 6 + CTRL_H;
+        }
+        y += t < MODEL_BEZELS - 1 ? 10 : 0;
     }
     frame_topic(top, y);
     return y;
@@ -4367,17 +3720,15 @@ static void render_settings_page(void)
     else
         add_page_header();
     if (s_page_index == PAGE_CONTROLS)
-        render_controls_panel();
+        s_panel_bottom = render_controls_panel();
     else if (s_page_index == PAGE_FFB)
-        render_ffb_panel();
+        s_panel_bottom = render_ffb_panel();
     else if (s_page_index == PAGE_LINK)
         render_link_panel();
     else if (s_page_index == PAGE_TROUBLE)
         render_trouble_panel();
     else if (s_page_index == PAGE_FILES)
         render_files_panel();
-    else if (s_page_index == PAGE_GRAPHICS)
-        render_graphics_panel();
     {
         int top = page_settings_top(), bottom = top, group = -1;
 
@@ -4426,11 +3777,21 @@ static void pull_page(void)
         c = GetDlgItem(s_page, IDC_SETTING_BASE + (int)i);
         if (!c)
             continue;
-        if (k_settings[i].type == ST_BOOL)
+        if (k_settings[i].type == ST_BOOL && control_is_button(c))
             snprintf(model_slot(i), INI_VALUE_CAP, "%s",
                      SendMessage(c, BM_GETCHECK, 0, 0) == BST_CHECKED ?
                      "true" : "false");
-        else if ((k_settings[i].flags & SF_TOGGLE) && control_is_button(c)) {
+        else if (k_settings[i].type == ST_BOOL) {
+            /* Unchanged is left as the file spells it, so opening the page
+             * and pressing Apply writes nothing. */
+            LRESULT sel = SendMessage(c, CB_GETCURSEL, 0, 0);
+            int on = sel != CB_ERR &&
+                     SendMessage(c, CB_GETITEMDATA, (WPARAM)sel, 0) == 1;
+
+            if (on != model_bool(k_settings[i].section, k_settings[i].key))
+                snprintf(model_slot(i), INI_VALUE_CAP, "%s",
+                         on ? "true" : "false");
+        } else if ((k_settings[i].flags & SF_TOGGLE) && control_is_button(c)) {
             /* By the control on screen, not by s_advanced: the switch flips
              * before the pull that precedes the rebuild. Ticked keeps a
              * filter already chosen (fsr1 stays fsr1) and otherwise takes
@@ -4488,6 +3849,9 @@ static void pull_page(void)
 static LRESULT CALLBACK card_proc(HWND h, UINT message, WPARAM wparam,
                                   LPARAM lparam)
 {
+    /* A box's background is the page's: a press on it drags the page. */
+    if (message == WM_NCHITTEST)
+        return HTTRANSPARENT;
     if (message == WM_ERASEBKGND) {
         RECT rc;
         GetClientRect(h, &rc);
@@ -4617,8 +3981,43 @@ static void place_focus_ring(void)
 static LRESULT CALLBACK page_proc(HWND h, UINT message, WPARAM wparam,
                                   LPARAM lparam)
 {
-    if (message == WM_DRAWITEM && draw_dark_button((DRAWITEMSTRUCT *)lparam))
+    if (message == WM_DRAWITEM &&
+        (draw_dark_button((DRAWITEMSTRUCT *)lparam) ||
+         theme_draw_combo_item((DRAWITEMSTRUCT *)lparam) ||
+         draw_scale_line((DRAWITEMSTRUCT *)lparam) ||
+         draw_logo((DRAWITEMSTRUCT *)lparam)))
         return TRUE;
+    /* PRESS AND DRAG ON THE PAGE ITSELF SCROLLS IT, for everyone: a finger
+     * has no wheel, and gamescope delivers a touchscreen as a mouse. A press
+     * on a control is the control's; one on a caption or a box's background
+     * reaches the page, because neither answers a hit test. */
+    if (message == WM_LBUTTONDOWN) {
+        s_drag_y = GET_Y_LPARAM(lparam);
+        s_drag_from = s_page_scroll;
+        s_dragging = 1;
+        SetCapture(h);
+        return 0;
+    }
+    /* Only a move made with the button down: moving the children under the
+     * pointer makes Windows send a move of its own, and the capture delivers
+     * the release however the drag ends. */
+    if (message == WM_MOUSEMOVE && s_dragging && (wparam & MK_LBUTTON)) {
+        set_page_scroll(h, s_drag_from - (GET_Y_LPARAM(lparam) - s_drag_y));
+        return 0;
+    }
+    if (message == WM_LBUTTONUP) {
+        if (s_dragging)
+            ReleaseCapture();
+        s_dragging = 0;
+        return 0;
+    }
+    /* A CAPTURE TAKEN AWAY ENDS THE DRAG: Alt+Tab or a message box takes it,
+     * the release then goes elsewhere, and a drag left standing would jump
+     * the page from its old anchor at the next press-and-move. */
+    if (message == WM_CAPTURECHANGED && (HWND)lparam != h) {
+        s_dragging = 0;
+        return 0;
+    }
     if (message == WM_CTLCOLORSTATIC &&
         GetDlgCtrlID((HWND)lparam) == IDC_FOCUS_RING) {
         static HBRUSH ring;
@@ -4733,8 +4132,6 @@ static void update_scrollbar(void)
                   scale_px(s_content_height) > rc.bottom - rc.top);
 }
 
-static void layout_window(void);
-
 static void choose_initial_probe(void);
 
 /* What s_cabinet_op asked for, now that the page has been pulled. */
@@ -4765,7 +4162,7 @@ static void run_cabinet_op(void)
     choose_initial_probe();
 }
 
-static void render_page(void)
+void render_page(void)
 {
     RECT rc;
     /* A REBUILD OF THE SAME PAGE KEEPS THE READER WHERE THEY WERE. This page
@@ -4812,6 +4209,7 @@ static void render_page(void)
      * responsive child computes page_width(). */
     layout_window();
     s_rendered_page_w = page_width();
+    s_scale_measured = 0;
     if (s_page_index == PAGE_HOME)
         render_home();
     else
@@ -4823,47 +4221,128 @@ static void render_page(void)
     s_loading = 0;
 }
 
+static UINT launcher_dpi(HWND h)
+{
+    RECT rc;
+    UINT fit;
+
+    GetClientRect(h, &rc);
+    fit = (UINT)min(MulDiv(rc.right, 96, DESIGN_W),
+                    MulDiv(rc.bottom, 96, DESIGN_H));
+    return max(theme_floor_dpi(h), fit);
+}
+
+/* BORDERLESS OVER THE MONITOR THE WINDOW IS ON, as window.c's
+ * apply_fullscreen() covers it for a game; the display mode is never touched.
+ * VCT_LAUNCHER_SCREEN=WxH stands in for a screen this one is not: the window
+ * takes that size in the monitor's corner, which is how a handheld's screen is
+ * shot from a desktop. */
+static void cover_monitor(void)
+{
+    MONITORINFO monitor;
+    const char *screen = getenv("VCT_LAUNCHER_SCREEN");
+    RECT r;
+    int w, h;
+
+    memset(&monitor, 0, sizeof monitor);
+    monitor.cbSize = sizeof monitor;
+    if (!GetMonitorInfoA(MonitorFromWindow(s_window, MONITOR_DEFAULTTONEAREST),
+                         &monitor))
+        return;
+    r = monitor.rcMonitor;
+    if (screen && sscanf(screen, "%dx%d", &w, &h) == 2 && w >= 320 && h >= 240) {
+        r.right = r.left + w;
+        r.bottom = r.top + h;
+    }
+    SetWindowPos(s_window, HWND_TOP, r.left, r.top, r.right - r.left,
+                 r.bottom - r.top, SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+}
+
+/* THE LAUNCHER IS FULLSCREEN WHEN THE GAMES ARE: [graphics] fullscreen as the
+ * file says it, when the window opens and after an Apply. One switch for both,
+ * and no key of the launcher's own, so the menu shows what Play will do. */
+static void launcher_set_fullscreen(int on)
+{
+    LONG_PTR style;
+
+    on = on ? 1 : 0;
+    if (!s_window || on == s_fullscreen)
+        return;
+    style = GetWindowLongPtrA(s_window, GWL_STYLE);
+    if (on) {
+        s_windowed_place.length = sizeof s_windowed_place;
+        GetWindowPlacement(s_window, &s_windowed_place);
+        s_fullscreen = 1;
+        SetWindowLongPtrA(s_window, GWL_STYLE,
+                          (style & ~(LONG_PTR)(WS_OVERLAPPEDWINDOW |
+                                               WS_MAXIMIZE | WS_MINIMIZE)) |
+                          WS_POPUP);
+        cover_monitor();
+    } else {
+        s_fullscreen = 0;
+        SetWindowLongPtrA(s_window, GWL_STYLE,
+                          (style & ~(LONG_PTR)WS_POPUP) | WS_OVERLAPPEDWINDOW);
+        SetWindowPlacement(s_window, &s_windowed_place);
+        SetWindowPos(s_window, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER |
+                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
+}
+
 static void layout_window(void)
 {
     RECT rc;
     int margin = scale_px(12), nav_w = s_compact ? 0 : nav_width();
-    int top = scale_px(s_compact ? 40 : 12);
-    int footer = scale_px(s_tiny ? 36 : (s_compact ? 48 : 54));
-    int button_w = scale_px(s_tiny ? 72 : 88);
-    int button_h = scale_px(s_tiny ? 26 : 28);
+    int top = scale_px(s_compact ? 8 + CTRL_H + 8 : 12);
+    int footer = scale_px(s_tiny ? CTRL_H + 8 : CTRL_H + 26);
+    int button_w = scale_px(s_tiny ? 80 : 104);
+    int button_h = scale_px(CTRL_H);
+    int button_y, left, width;
+
     GetClientRect(s_window, &rc);
+    button_y = rc.bottom - (footer + button_h) / 2;
+    /* ONE COLUMN, CENTRED, once the page would be wider than it can use: a
+     * screen wider than 16:10 grows the design sideways, and a box stretched
+     * across an ultrawide is a line nobody can follow. */
+    left = margin;
+    width = rc.right - margin * 2;
+    if (!s_compact && width > nav_w + scale_px(12 + PAGE_MAX_W)) {
+        width = nav_w + scale_px(12 + PAGE_MAX_W);
+        left = (rc.right - width) / 2;
+    }
     if (s_compact) {
-        MoveWindow(s_nav, margin, scale_px(s_tiny ? 6 : 8),
-                   rc.right - margin * 2,
+        MoveWindow(s_nav, left, scale_px(s_tiny ? 6 : 8), width,
                    scale_px(240), TRUE);
         if (s_page)
-            MoveWindow(s_page, margin, top, rc.right - margin * 2,
-                       rc.bottom - top - footer, TRUE);
+            MoveWindow(s_page, left, top, width, rc.bottom - top - footer,
+                       TRUE);
     } else {
         int rows = (int)SendMessage(s_nav, LB_GETCOUNT, 0, 0);
-        int nav_h = rc.bottom - top - footer;
+        int nav_h = rc.bottom - top - footer, tiles_h = nav_h;
 
-        MoveWindow(s_nav, margin, top, nav_w, nav_h, TRUE);
-        /* TALL TILES WHILE THEY FIT, smaller ones in a short window. */
-        if (rows > 0)
-            SendMessage(s_nav, LB_SETITEMHEIGHT, 0,
-                        min(scale_px(60), max(scale_px(34), nav_h / rows)));
+        /* TALL TILES WHILE THEY FIT, never shorter than a control. */
+        if (rows > 0) {
+            int item_h = min(scale_px(60),
+                             max(scale_px(CTRL_H + NAV_TILE_GAP), nav_h / rows));
+
+            SendMessage(s_nav, LB_SETITEMHEIGHT, 0, item_h);
+            tiles_h = min(nav_h, rows * item_h);
+        }
+        /* The list ends at its last tile. */
+        MoveWindow(s_nav, left, top, nav_w, tiles_h, TRUE);
         InvalidateRect(s_nav, NULL, TRUE);
         if (s_page)
-            MoveWindow(s_page, margin + nav_w + scale_px(12), top,
-                       rc.right - margin * 2 - nav_w - scale_px(12),
+            MoveWindow(s_page, left + nav_w + scale_px(12), top,
+                       width - nav_w - scale_px(12),
                        rc.bottom - top - footer, TRUE);
     }
     ShowWindow(s_status, s_tiny ? SW_HIDE : SW_SHOW);
     if (!s_tiny)
-        MoveWindow(s_status, margin, rc.bottom - scale_px(38),
-                   rc.right - margin * 2 - button_w * 2 - scale_px(16),
-                   scale_px(24), TRUE);
-    MoveWindow(s_apply, rc.right - margin - button_w * 2 - scale_px(8),
-               rc.bottom - scale_px(s_tiny ? 32 : 42),
+        MoveWindow(s_status, left, button_y + (button_h - scale_px(24)) / 2,
+                   width - button_w * 2 - scale_px(16), scale_px(24), TRUE);
+    MoveWindow(s_apply, left + width - button_w * 2 - scale_px(8), button_y,
                button_w, button_h, TRUE);
-    MoveWindow(s_close, rc.right - margin - button_w,
-               rc.bottom - scale_px(s_tiny ? 32 : 42),
+    MoveWindow(s_close, left + width - button_w, button_y,
                button_w, button_h, TRUE);
     update_scrollbar();
 }
@@ -5032,9 +4511,12 @@ void update_model_control(const char *section, const char *key)
     c = GetDlgItem(s_page, IDC_SETTING_BASE + index);
     if (!c)
         return;
-    if (k_settings[index].type == ST_BOOL)
+    if (k_settings[index].type == ST_BOOL && control_is_button(c))
         SendMessage(c, BM_SETCHECK,
                     model_bool(section, key) ? BST_CHECKED : BST_UNCHECKED, 0);
+    else if (k_settings[index].type == ST_BOOL)
+        combo_select_value(c, BOOL_CHOICES,
+                           model_bool(section, key) ? "true" : "false");
     else if ((k_settings[index].flags & SF_TOGGLE) && control_is_button(c))
         SendMessage(c, BM_SETCHECK,
                     toggle_is_on((unsigned)index) ? BST_CHECKED : BST_UNCHECKED,
@@ -5048,7 +4530,7 @@ void update_model_control(const char *section, const char *key)
         slider_show_value((unsigned)index);
     } else
         SetWindowTextA(c, model_slot(index));
-    scale_readouts_refresh();
+    scale_lines_refresh();
     page_show_inert();
 }
 
@@ -5248,70 +4730,25 @@ int launcher_note_visible(void)
     return s_page && s_page_index == PAGE_CONTROLS;
 }
 
-/* How tall the note and the line under it are together, at `s_note_w`. */
-static int note_text_height(const char *first, const char *second)
+HWND launcher_page(void)
 {
-    HFONT font = theme_note_font();
-    int h = text_block_height(font, first ? first : "", s_note_w);
-
-    if (second && second[0])
-        h += 2 + text_block_height(font, second, s_note_w);
-    return h;
+    return s_page;
 }
 
-/* Each line as tall as its text, line 2 directly under line 1, whose top
- * never moves. Text needing a different height than was reserved (Set up
- * starting or ending) rebuilds the page. */
-static void place_note_lines(void)
+int launcher_show_raw(void)
 {
-    HWND one, two;
-    RECT r1, r2;
-    char t1[512], t2[256];
-    int h1, h2, y2;
-
-    if (!launcher_note_visible())
-        return;
-    one = GetDlgItem(s_page, IDC_LIVE_NOTE);
-    two = GetDlgItem(s_page, IDC_LIVE_SAY);
-    if (!one || !two)
-        return;
-    GetWindowRect(one, &r1);
-    GetWindowRect(two, &r2);
-    MapWindowPoints(NULL, s_page, (POINT *)&r1, 2);
-    MapWindowPoints(NULL, s_page, (POINT *)&r2, 2);
-    GetWindowTextA(one, t1, sizeof t1);
-    GetWindowTextA(two, t2, sizeof t2);
-    if (note_text_height(t1, t2) != s_note_text_h)
-        request_relayout();
-    h1 = scale_px(text_block_height(theme_note_font(), t1, s_note_w));
-    h2 = t2[0] ? scale_px(text_block_height(theme_note_font(), t2, s_note_w))
-               : 0;
-    y2 = r1.top + h1 + (h2 ? scale_px(2) : 0);
-    if (r1.bottom - r1.top != h1)
-        SetWindowPos(one, NULL, r1.left, r1.top, r1.right - r1.left, h1,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
-    if (r2.top != y2 || r2.bottom - r2.top != h2)
-        SetWindowPos(two, NULL, r2.left, y2, r2.right - r2.left, h2,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+    return s_show_raw;
 }
 
-/* Re-placed only when a text changed: the idle hint is rewritten at 30 Hz. */
-void launcher_note_lines(const char *first, const char *second)
+int launcher_show_legacy(void)
 {
-    char now1[512], now2[256];
+    return s_show_legacy;
+}
 
-    if (!launcher_note_visible())
-        return;
-    first = first ? first : "";
-    second = second ? second : "";
-    GetDlgItemTextA(s_page, IDC_LIVE_NOTE, now1, sizeof now1);
-    GetDlgItemTextA(s_page, IDC_LIVE_SAY, now2, sizeof now2);
-    snprintf(s_note_last, sizeof s_note_last, "%s", first);
-    if (!strcmp(now1, first) && !strcmp(now2, second))
-        return;
-    SetDlgItemTextA(s_page, IDC_LIVE_NOTE, first);
-    SetDlgItemTextA(s_page, IDC_LIVE_SAY, second);
-    place_note_lines();
+int launcher_device_moving(unsigned index)
+{
+    return index < INPUT_PROBE_MAX_DEVICES && s_dev_active[index] &&
+           (DWORD)(GetTickCount() - s_dev_active[index]) < DEVICE_ACTIVE_MS;
 }
 
 int launcher_binding_title(void)
@@ -5477,14 +4914,12 @@ static void update_device_rows(void)
 {
     static int lit[INPUT_PROBE_MAX_DEVICES];
     unsigned i, n = input_probe_count();
-    DWORD now = GetTickCount();
     char text[256];
 
     if (n > INPUT_PROBE_MAX_DEVICES)
         n = INPUT_PROBE_MAX_DEVICES;
     for (i = 0; i < n; i++) {
-        int on = s_dev_active[i] &&
-                 (DWORD)(now - s_dev_active[i]) < DEVICE_ACTIVE_MS;
+        int on = launcher_device_moving(i);
         if (on == lit[i])
             continue;
         lit[i] = on;
@@ -5864,7 +5299,7 @@ void update_binding_display(unsigned action)
 }
 
 /* Greyed while every row of the game shown is already on its default. */
-static void update_reset_button(void)
+void update_reset_button(void)
 {
     HWND control = s_page ? GetDlgItem(s_page, IDC_BIND_RESET) : NULL;
     BOOL enable = FALSE;
@@ -5934,8 +5369,7 @@ static int prepare_play(const char *title)
     char path[MAX_PATH];
     int i;
 
-    pull_page();
-    if (s_dirty && !save_settings(s_window))
+    if (!launcher_save_if_dirty())
         return 0;
     if (!s_dirty) {
         char why[256];
@@ -5954,8 +5388,14 @@ static int prepare_play(const char *title)
         return 0;
     }
     for (i = 0; i < PLAY_TITLES; i++)
-        if (!_stricmp(title, k_play[i].id))
+        if (!_stricmp(title, k_play[i].id)) {
+            const char *name = title, *exe;
+
             s_result = k_play[i].result;
+            title_files(k_play[i].id, &name, &exe);
+            handoff_play(s_window, name, theme_game_colour(
+                launcher_button_kind(k_play[i].play)));
+        }
     DestroyWindow(s_window);
     return 1;
 }
@@ -6544,7 +5984,8 @@ static void handle_command(WPARAM wparam, LPARAM lparam)
     }
     if (id == IDC_APPLY && notify == BN_CLICKED) {
         pull_page();
-        save_settings(s_window);
+        if (save_settings(s_window))
+            launcher_set_fullscreen(model_bool("graphics", "fullscreen"));
         return;
     }
     if (id == IDC_CLOSE && notify == BN_CLICKED) {
@@ -6566,7 +6007,7 @@ static void handle_command(WPARAM wparam, LPARAM lparam)
         return;
     }
     if (id == IDC_IMPORT_CANCEL && notify == BN_CLICKED) {
-        InterlockedExchange(&s_import.cancel, 1);
+        import_cancel();
         SetDlgItemTextA(s_page, IDC_IMPORT_TEXT, "Stopping; nothing will be "
                         "kept...");
         EnableWindow(GetDlgItem(s_page, IDC_IMPORT_CANCEL), FALSE);
@@ -6589,21 +6030,31 @@ static void handle_command(WPARAM wparam, LPARAM lparam)
         layout_window();
         return;
     }
-    if (id >= IDC_BEZEL_CHOOSE && id < IDC_BEZEL_CHOOSE + MODEL_TITLES &&
+    if (id >= IDC_BEZEL_CHOOSE && id < IDC_BEZEL_CHOOSE + MODEL_BEZELS &&
         notify == BN_CLICKED) {
         if (choose_bezel(id - IDC_BEZEL_CHOOSE))
             render_page();
         return;
     }
+    if (id == IDC_BEZEL_INHERIT && notify == BN_CLICKED) {
+        model_bezel_inherit(MODEL_BEZEL_UARCTIC);
+        mark_dirty();
+        set_status("Ultimate Arctic Thunder's bezel is Arctic Thunder's. "
+                   "Press Apply to keep it.");
+        render_page();
+        return;
+    }
     /* Toggled from the model, not read off the box. Turning on a game that
-     * has no art yet asks for the art; cancelling leaves it off. */
-    if (id >= IDC_BEZEL_ENABLE && id < IDC_BEZEL_ENABLE + MODEL_TITLES &&
+     * has no art of its own yet asks for the art; cancelling leaves it as it
+     * was. Ultimate's row that is Arctic's becomes its own either way. */
+    if (id >= IDC_BEZEL_ENABLE && id < IDC_BEZEL_ENABLE + MODEL_BEZELS &&
         notify == BN_CLICKED) {
         int title = id - IDC_BEZEL_ENABLE;
-        char path[MAX_PATH];
+        char path[MAX_PATH], own[MAX_PATH];
         int on = model_bezel_get(title, path, sizeof path);
 
-        if (!on && !path[0]) {
+        model_bezel_own(title, own, sizeof own);
+        if (!on && !own[0]) {
             choose_bezel(title);
         } else {
             char text[96];
@@ -6701,7 +6152,10 @@ static void handle_command(WPARAM wparam, LPARAM lparam)
     if (id == IDC_RESTORE_DEFAULTS && notify == BN_CLICKED) {
         /* So the question knows whether anything unapplied is about to go. */
         pull_page();
-        restore_defaults(s_window);
+        /* Only a restored file moves the launcher: a declined or failed one
+         * leaves the page's unapplied Display choice in the model. */
+        if (restore_defaults(s_window))
+            launcher_set_fullscreen(model_bool("graphics", "fullscreen"));
         return;
     }
     if (id == IDC_SHOW_LOGS && notify == BN_CLICKED) {
@@ -6763,7 +6217,7 @@ static void handle_command(WPARAM wparam, LPARAM lparam)
         (notify == EN_CHANGE || notify == CBN_SELCHANGE || notify == BN_CLICKED)) {
         pull_page();
         mark_dirty();
-        scale_readouts_refresh();
+        scale_lines_refresh();
         page_show_inert();
     }
 }
@@ -6777,6 +6231,7 @@ static LRESULT CALLBACK launcher_proc(HWND h, UINT message, WPARAM wparam,
         return DefWindowProcA(h, message, wparam, lparam);
     case WM_CREATE: {
         RECT rc;
+        theme_set_dpi(launcher_dpi(h), NULL);
         GetClientRect(h, &rc);
         s_compact = rc.right < scale_px(760);
         s_tiny = rc.right < scale_px(420) || rc.bottom < scale_px(300);
@@ -6804,7 +6259,8 @@ static LRESULT CALLBACK launcher_proc(HWND h, UINT message, WPARAM wparam,
         return 0;
     case WM_DRAWITEM:
         if (draw_nav_tile((DRAWITEMSTRUCT *)lparam) ||
-            draw_dark_button((DRAWITEMSTRUCT *)lparam))
+            draw_dark_button((DRAWITEMSTRUCT *)lparam) ||
+            theme_draw_combo_item((DRAWITEMSTRUCT *)lparam))
             return TRUE;
         break;
     case WM_CTLCOLORSTATIC:
@@ -6848,13 +6304,7 @@ static LRESULT CALLBACK launcher_proc(HWND h, UINT message, WPARAM wparam,
         /* CHDs dropped on VCThunder.exe start importing as the window
          * opens; with none, a game not imported yet is looked for beside
          * it. */
-        if (s_nqueued) {
-            int n = s_nqueued;
-            s_nqueued = 0;
-            import_begin((const wchar_t (*)[MAX_PATH])s_queued, n);
-        } else {
-            import_beside_exe();
-        }
+        import_open();
         return 0;
     case WM_APP + 3:
         confirm_axis_detect();
@@ -6884,17 +6334,28 @@ static LRESULT CALLBACK launcher_proc(HWND h, UINT message, WPARAM wparam,
     case WM_SIZE:
         if (wparam != SIZE_MINIMIZED) {
             RECT rc;
-            int compact, tiny, compact_changed, tiny_changed;
+            int compact, tiny, compact_changed, tiny_changed, rescaled;
+            UINT dpi = launcher_dpi(h);
+
+            /* A NEW SCALE IS A NEW LAYOUT: the forms are chosen in logical
+             * units, so they are decided after it. The page is pulled first,
+             * while its controls still hold what was typed into them. */
+            rescaled = s_nav && !s_sizing && dpi != theme_dpi();
+            if (rescaled) {
+                pull_page();
+                theme_set_dpi(dpi, h);
+            }
             GetClientRect(h, &rc);
             compact = rc.right < scale_px(760);
             tiny = rc.right < scale_px(420) || rc.bottom < scale_px(300);
             compact_changed = compact != s_compact;
             tiny_changed = tiny != s_tiny;
-            if (s_nav && (compact_changed || tiny_changed)) {
-                pull_page();
+            if (s_nav && (compact_changed || tiny_changed || rescaled)) {
+                if (!rescaled)
+                    pull_page();
                 s_compact = compact;
                 s_tiny = tiny;
-                if (compact_changed)
+                if (compact_changed || rescaled)
                     create_navigation(h);
                 layout_window();
                 s_relayout_pending = 1;
@@ -6913,6 +6374,42 @@ static LRESULT CALLBACK launcher_proc(HWND h, UINT message, WPARAM wparam,
             }
         }
         return 0;
+    case WM_ENTERSIZEMOVE:
+        s_sizing = 1;
+        return 0;
+    case WM_EXITSIZEMOVE:
+        /* The drop: the scale the window now has, once, and the size lines
+         * for the monitor it is now on. */
+        s_sizing = 0;
+        if (s_nav && launcher_dpi(h) != theme_dpi())
+            SendMessage(h, WM_SIZE, SIZE_RESTORED, 0);
+        else
+            scale_lines_refresh();
+        return 0;
+    case WM_DISPLAYCHANGE:
+        scale_lines_refresh();
+        break;
+    case WM_DPICHANGED:
+        /* Another monitor, another Windows scale: the floor under the fit
+         * moves, and WM_SIZE re-decides the scale from it. A fullscreen
+         * window covers its new monitor instead of taking the suggestion. */
+        if (s_fullscreen)
+            cover_monitor();
+        else {
+            const RECT *r = (const RECT *)lparam;
+
+            SetWindowPos(h, NULL, r->left, r->top, r->right - r->left,
+                         r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return 0;
+    /* A WHEEL THAT REACHES THE WINDOW SCROLLS THE PAGE: the compact form's
+     * closed page dropdown hands its wheel here, as every closed dropdown
+     * hands its own to its parent, and a top-level window has no parent to
+     * pass it on to. */
+    case WM_MOUSEWHEEL:
+        if (s_page)
+            SendMessage(s_page, message, wparam, lparam);
+        return 0;
     case WM_GETMINMAXINFO: {
         MINMAXINFO *mm = (MINMAXINFO *)lparam;
         MONITORINFO monitor;
@@ -6923,8 +6420,12 @@ static LRESULT CALLBACK launcher_proc(HWND h, UINT message, WPARAM wparam,
         GetMonitorInfoA(display, &monitor);
         available_w = monitor.rcWork.right - monitor.rcWork.left;
         available_h = monitor.rcWork.bottom - monitor.rcWork.top;
-        mm->ptMinTrackSize.x = min(scale_px(320), available_w);
-        mm->ptMinTrackSize.y = min(scale_px(240), available_h);
+        /* At Windows' scale for the monitor, not the fitted one: after a
+         * large window the fit would hold a restored one large. */
+        mm->ptMinTrackSize.x = min(MulDiv(320, (int)theme_floor_dpi(h), 96),
+                                   available_w);
+        mm->ptMinTrackSize.y = min(MulDiv(240, (int)theme_floor_dpi(h), 96),
+                                   available_h);
         return 0;
     }
     case WM_CLOSE:
@@ -6953,6 +6454,7 @@ launcher_result_t launcher_run(const char *ini_path)
     MONITORINFO monitor;
     HINSTANCE instance = NULL;
     POINT cursor;
+    RECT back;
     HMONITOR display;
     RECT work;
     int width, height, x, y;
@@ -6977,8 +6479,14 @@ launcher_result_t launcher_run(const char *ini_path)
     /* BEFORE THE WORK AREA IS MEASURED, or it comes back in the scaled
      * coordinates this call is about to stop using. */
     theme_enable_dpi_awareness();
-    GetCursorPos(&cursor);
-    display = MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+    /* The monitor a game was on when it reopened the launcher, or else the
+     * one under the pointer. */
+    if (handoff_return_monitor(&back))
+        display = MonitorFromRect(&back, MONITOR_DEFAULTTONEAREST);
+    else {
+        GetCursorPos(&cursor);
+        display = MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY);
+    }
     memset(&monitor, 0, sizeof monitor);
     monitor.cbSize = sizeof monitor;
     if (GetMonitorInfoA(display, &monitor))
@@ -7009,13 +6517,6 @@ launcher_result_t launcher_run(const char *ini_path)
     if (!RegisterClassA(&wc))
         goto unregister_page;
     memset(&wc, 0, sizeof wc);
-    wc.lpfnWndProc = readout_proc;
-    wc.hInstance = theme_instance();
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.lpszClassName = "VCThunderLauncherReadout";
-    if (!RegisterClassA(&wc))
-        goto unregister_card;
-    memset(&wc, 0, sizeof wc);
     wc.lpfnWndProc = launcher_proc;
     wc.hInstance = theme_instance();
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
@@ -7023,7 +6524,7 @@ launcher_result_t launcher_run(const char *ini_path)
     wc.hbrBackground = theme_main_brush();
     wc.lpszClassName = "VCThunderLauncher";
     if (!RegisterClassA(&wc))
-        goto unregister_readout;
+        goto unregister_card;
 
     width = scale_px(960);
     height = scale_px(680);
@@ -7039,6 +6540,8 @@ launcher_result_t launcher_run(const char *ini_path)
     enable_dark_title_bar(s_window);
     SendMessage(s_window, WM_SETICON, ICON_BIG, (LPARAM)icon);
     SendMessage(s_window, WM_SETICON, ICON_SMALL, (LPARAM)icon);
+    s_fullscreen = 0;
+    launcher_set_fullscreen(model_bool("graphics", "fullscreen"));
     ShowWindow(s_window, SW_SHOW);
     UpdateWindow(s_window);
     PostMessage(s_window, WM_APP + 1, 0, 0);
@@ -7070,9 +6573,11 @@ launcher_result_t launcher_run(const char *ini_path)
     }
 
 unregister_main:
+    if (s_logo_icon)
+        DestroyIcon(s_logo_icon);
+    s_logo_icon = NULL;
+    s_logo_size = 0;
     UnregisterClassA("VCThunderLauncher", theme_instance());
-unregister_readout:
-    UnregisterClassA("VCThunderLauncherReadout", theme_instance());
 unregister_card:
     UnregisterClassA("VCThunderLauncherCard", theme_instance());
 unregister_page:

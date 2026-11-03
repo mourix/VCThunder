@@ -677,15 +677,29 @@ static uint32_t decode_texel(const vgl_tmu_t *u, const uint8_t *p)
     }
 }
 
+/* Build decode tables from decode_texel, which remains authoritative. Validate
+ * one-byte, separable two-byte, and explicit-alpha compositions over all input
+ * pairs; unsupported compositions retain arithmetic decoding. */
+enum { DEC_ARITH = 0, DEC_LUT1, DEC_LUT2A, DEC_LUT2 };
+
+/* decode_texel's ARGB as the bytes R, G, B, A. */
+static inline uint32_t argb_to_rgba(uint32_t c)
+{
+    return (c & 0xff00ff00u) | ((c >> 16) & 0xffu) | ((c & 0xffu) << 16);
+}
+
 /* Export one selected level as tightly described RGBA8 for an accelerated
  * backend. Texture memory layout and format decoding stay owned by this file;
  * the SDL GPU path receives pixels, not a second interpretation of Glide
- * memory. Missing parity levels return false and are never sampled there. */
+ * memory. Missing parity levels return false and are never sampled there.
+ * The sampler's decode tables are used when they hold this format and
+ * palette; they are built from decode_texel and validated against it. */
 int vgl_tex_export_rgba(int tmu, int lod, uint8_t *dst, unsigned pitch)
 {
     const vgl_tmu_t *u;
     const uint8_t *src;
-    int x, y, w, h;
+    const uint32_t *lo, *hi;
+    int x, y, w, h, kind;
     uint64_t end;
 
     if (tmu < 0 || tmu >= VGL_TMUS || lod < 0 || lod > VGL_MAX_LOD || !dst)
@@ -702,24 +716,36 @@ int vgl_tex_export_rgba(int tmu, int lod, uint8_t *dst, unsigned pitch)
     if (end > u->mem_bytes)
         return 0;
     src = u->mem + u->base + (uint32_t)u->lod_off[lod];
+    kind = u->lut_fmt == u->format && u->lut_pal_ver == u->pal_ver
+               ? u->dec_kind : DEC_ARITH;
+    lo = u->dec_lo;
+    hi = u->dec_hi;
     for (y = 0; y < h; y++) {
-        uint8_t *row = dst + (size_t)y * pitch;
-        for (x = 0; x < w; x++) {
-            uint32_t c = decode_texel(u, src +
-                ((size_t)y * (size_t)w + (size_t)x) * u->bpp);
-            row[x * 4 + 0] = (uint8_t)(c >> 16);
-            row[x * 4 + 1] = (uint8_t)(c >> 8);
-            row[x * 4 + 2] = (uint8_t)c;
-            row[x * 4 + 3] = (uint8_t)(c >> 24);
+        const uint8_t *s = src + (size_t)y * (size_t)w * u->bpp;
+        uint32_t *row = (uint32_t *)(void *)(dst + (size_t)y * pitch);
+
+        switch (kind) {
+        case DEC_LUT1:
+            for (x = 0; x < w; x++)
+                row[x] = argb_to_rgba(lo[s[x]]);
+            break;
+        case DEC_LUT2A:
+            for (x = 0; x < w; x++)
+                row[x] = argb_to_rgba((lo[s[2 * x]] & 0x00ffffffu) |
+                                      ((uint32_t)s[2 * x + 1] << 24));
+            break;
+        case DEC_LUT2:
+            for (x = 0; x < w; x++)
+                row[x] = argb_to_rgba(lo[s[2 * x]] | hi[s[2 * x + 1]]);
+            break;
+        default:
+            for (x = 0; x < w; x++)
+                row[x] = argb_to_rgba(decode_texel(u, s + (size_t)x * u->bpp));
+            break;
         }
     }
     return 1;
 }
-
-/* Build decode tables from decode_texel, which remains authoritative. Validate
- * one-byte, separable two-byte, and explicit-alpha compositions over all input
- * pairs; unsupported compositions retain arithmetic decoding. */
-enum { DEC_ARITH = 0, DEC_LUT1, DEC_LUT2A, DEC_LUT2 };
 
 static int8_t s_fmt_kind[16];           /* 0 = not yet classified */
 
@@ -759,7 +785,11 @@ static int classify_format(const vgl_tmu_t *u)
                 if (!ok2 && !ok2a)
                     return DEC_ARITH;
             }
-        return ok2 ? DEC_LUT2 : DEC_LUT2A;
+        /* LUT2A first: where alpha is the high byte, it holds for any
+         * palette or NCC table. LUT2 can hold only by accident of the
+         * table loaded now (none: every colour the same), and then ORs
+         * entry 0's colour into every texel once a real one arrives. */
+        return ok2a ? DEC_LUT2A : DEC_LUT2;
     }
 }
 
@@ -782,7 +812,8 @@ static void build_decode_tables(vgl_tmu_t *u)
         kind = classify_format(u);
         /* P_8 and AP_88 decode THROUGH the palette, so a classification made
          * with one palette has to hold for any other. It does: the palette is
-         * indexed by p0 in both, which is the byte the tables are keyed on. */
+         * indexed by p0 in both, which is the byte the tables are keyed on,
+         * and AP_88's alpha is p1 itself (classify_format prefers LUT2A). */
         s_fmt_kind[u->format] = (int8_t)kind;
     }
     for (i = 0; i < 256; i++) {

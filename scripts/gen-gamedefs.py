@@ -46,7 +46,8 @@ OUTDIR = os.path.join(REPO, "generated")
 
 # Ceilings must match src/game.h. Duplicated deliberately: the
 # generator refusing is a better failure than the shim overrunning an array.
-MAX = {"glide": 96, "imp": 160, "w32": 96, "loop": 32, "hud": 16, "hudtext": 16}
+MAX = {"glide": 96, "imp": 160, "w32": 96, "loop": 32, "hud": 16, "hudtext": 16,
+       "splash": 3}
 
 # --- hardware boundaries the shim implements itself -----------------------
 #
@@ -1730,6 +1731,81 @@ def d_finish_stats(t, log):
     return flags, bit
 
 
+def d_splash_loads(t, log):
+    """The two loads a full-screen splash stays up for: the title splash after
+    START and the screen before a race. Each title puts the picture up, starts
+    its sound and then loads synchronously, so the load's length is the
+    splash's. Hydro:
+
+        call _wpr_attract_Close ; push 3 ; call <state enter>      title splash
+        call _race_Init                                            loading screen
+
+    The second is in the pre-race state, a static function after
+    _statemgr_EndRace and before the next public symbol.
+
+    Offroad, whose loads start the next screen's music themselves, reaches its
+    title load three ways, each only after START has put the splash up: from
+    the still attract screens (__attract_Master, task 2), from an aborted demo
+    race (__attract_LaunchDemo) and from a race (_attract_Launch(0xf)):
+
+        call __attract_LaunchWrapper              once in each of those three
+        call _wrapper_StartLoadingMusic ; push imm32 ; call _race_Launch
+
+    Returns ([title_site, ...], race_site), each an E8 to redirect, or
+    ([], 0)."""
+    d = t.read()
+
+    def calls(lo, hi, target):
+        out = []
+        for i in range(lo - t.image_base, hi - t.image_base - 4):
+            if d[i] == 0xE8 and \
+               i + 5 + struct.unpack_from("<i", d, i + 1)[0] + t.image_base == target:
+                out.append(i + t.image_base)
+        return out
+
+    starts = sorted(v["va"] for v in t.symbols().values() if v.get("va"))
+    nxt = lambda va: next((s for s in starts if s > va), va + 0x2000)
+    at = lambda va, n: d[va - t.image_base:va - t.image_base + n]
+
+    if t.va("_wpr_attract_Close"):
+        close, race_init = t.va("_wpr_attract_Close"), t.va("_race_Init")
+        work, end_race = t.va("_statemgr_Work"), t.va("_statemgr_EndRace")
+        if not (race_init and work and end_race):
+            return [], 0
+        title = [va + 7 for va in calls(work, nxt(work), close)
+                 if at(va + 5, 3) == b"\x6a\x03\xe8"]
+        race = calls(end_race, nxt(end_race), race_init)
+        if len(title) != 1:
+            raise SystemExit(f"gen-gamedefs: {t.id} splash loads: {len(title)} "
+                             f"title sites, wanted one")
+    elif t.va("__attract_LaunchWrapper"):
+        launch = t.va("__attract_LaunchWrapper")
+        routes = [t.va(n) for n in ("__attract_Master", "__attract_LaunchDemo",
+                                    "_attract_Launch")]
+        music, race_launch = t.va("_wrapper_StartLoadingMusic"), t.va("_race_Launch")
+        start_race = t.va("__wrapper_StartRace")
+        if not (all(routes) and music and race_launch and start_race):
+            return [], 0
+        title = []
+        for fn in routes:
+            hit = calls(fn, nxt(fn), launch)
+            if len(hit) != 1:
+                raise SystemExit(f"gen-gamedefs: {t.id} splash loads: {len(hit)} "
+                                 f"wrapper launches in 0x{fn:08X}, wanted one")
+            title += hit
+        race = [va + 10 for va in calls(start_race, nxt(start_race), music)
+                if at(va + 5, 1) == b"\x68" and va + 10 in
+                calls(va + 10, va + 15, race_launch)]
+    else:
+        return [], 0
+    if len(race) != 1:
+        raise SystemExit(f"gen-gamedefs: {t.id} splash loads: {len(race)} race "
+                         f"sites, wanted one")
+    log(f"splash loads              : title "
+        f"{', '.join(f'0x{va:08X}' for va in title)}, race 0x{race[0]:08X}")
+    return title, race[0]
+
+
 def d_tracking_cards(t, log):
     """Hydro: `_boats_DrawAllTrackingNumbers` puts a card on the screen's edge
     for each boat beside or behind the camera, one `_mesh3d_DrawOrtho(mesh, x,
@@ -2655,6 +2731,8 @@ def emit(t, tables, log):
     hooks = d_hooks(t, log)
     glyph = d_text_glyphs(t, log)
     fin_flags, fin_bit = d_finish_stats(t, log)
+    title_sites, race_site = d_splash_loads(t, log)
+    title_sites += [0] * (MAX["splash"] - len(title_sites))
     track_lo, track_hi, track_k = d_tracking_cards(t, log)
     gtext = d_gametext(t, log)
     hud_txt = d_hud_text_vars(t, log)
@@ -2765,6 +2843,10 @@ def emit(t, tables, log):
          "Hydro: bytes per glyph record, from _text_PrintStr's lea pair"),
         ("text_glyph_x", glyph["text_glyph_x"],
          "Hydro: offset of a record's pen x, stored from _Text_fX"),
+        ("splash_title_site", title_sites,
+         "the title splash's load after START, by each route (d_splash_loads)"),
+        ("splash_race_site", race_site,
+         "the pre-race splash's load (d_splash_loads)"),
         ("hud_finish_flags", fin_flags,
          "Hydro: _hud_text_Draw's flags word, from _hud_text_SetupFinishStats"),
         ("hud_finish_bit", fin_bit,
@@ -3091,7 +3173,10 @@ def emit(t, tables, log):
         w(f"    .{f} = 0x{v:08X},\n")
     w("\n")
     for f, v, note in fields:
-        w(f"    .{f} = 0x{v:08X},".ljust(46) + f"/* {note} */\n")
+        if isinstance(v, list):
+            w(f"    .{f} = {{ {', '.join(f'0x{x:08X}' for x in v)} }},  /* {note} */\n")
+        else:
+            w(f"    .{f} = 0x{v:08X},".ljust(46) + f"/* {note} */\n")
     w("\n")
     for name, arr, cnt in [("glide", f"GLIDE_{tid}", len(tables["glide"])),
                            ("imp", f"IMP_{tid}", len(tables["imp"])),

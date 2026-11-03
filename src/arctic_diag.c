@@ -55,6 +55,9 @@ static __attribute__((noreturn)) void diag_exit(int how, int code)
     LOGI("arctic: operator system exit %d%s", code,
          how == TO_GAME ? "; the game follows" : "");
     log_close();
+    /* Out altogether ends the round trip as the game's own exit does. */
+    if (how == QUIT)
+        handoff_exit(code);
     ExitProcess((UINT)code);
 }
 
@@ -428,6 +431,8 @@ static HWND WINAPI b_CreateWindowExA(DWORD ex, LPCSTR cls, LPCSTR name,
                           NULL, menu, inst, lp);
     if (!wnd)
         return NULL;
+    /* Then where the game was: the launcher's monitor, or the primary. */
+    handoff_centre_window(wnd);
     s_wnd = wnd;
     s_diag_proc = (WNDPROC)SetWindowLongPtrA(wnd, GWLP_WNDPROC,
                                              (LONG_PTR)host_proc);

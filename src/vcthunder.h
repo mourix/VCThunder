@@ -470,6 +470,13 @@ int  glide_bind(void);
  * covers the stretch before the first frame, which is where a port of a new
  * title spends its first several attempts. */
 void glide_watchdog_arm(void);
+/* Escape, a close and the window's messages, answered on the game thread
+ * between frames. A caller that holds that thread for longer than a frame
+ * calls it as it waits. */
+void glide_answer_window(void);
+/* Tell the hang watchdog the game thread is held on purpose (a splash hold),
+ * so it does not report the gap as a stall. Nests; must be balanced. */
+void watchdog_hold(int on);
 
 /* -------------------------------------------------------------- nvram.c: */
 
@@ -746,6 +753,13 @@ uint32_t timebase_hz(void);
 void timebase_pause(int on);
 int  timebase_paused(void);
 
+/* --------------------------------------------------------- splash_hold.c: */
+
+/* Hold the title splash after START and the pre-race splash on screen for the
+ * time a cabinet load kept them there. Does nothing in a title without the
+ * sites. */
+void splash_hold_install(void);
+
 /* ------------------------------------------------------------- window.c: */
 
 /* The backend's window is the game's window: Hydro passes grSstWinOpen a null
@@ -801,6 +815,37 @@ launcher_result_t launcher_run(const char *ini_path);
 /* A CHD to start importing as the launcher opens: one dropped on the exe. */
 void launcher_queue_import(const wchar_t *file);
 
+/* ------------------------------------------------------------ handoff.c: */
+
+/* Play: the curtain in the launcher's place, and the launcher's monitor and
+ * the way back remembered for the game. */
+void handoff_play(HWND launcher, const char *name, COLORREF colour);
+/* Whether the curtain is still waiting for handoff_lift(). */
+int  handoff_curtain_up(void);
+/* The game's window is up: the curtain goes and `game` takes the foreground. */
+void handoff_lift(HWND game);
+/* The launcher's monitor's work area, or the primary one's for a game not
+ * started from the launcher. 0 if neither can be read. */
+int  handoff_work_area(RECT *work);
+/* Where a w x h window goes centred in that work area; 0, and x and y
+ * untouched, if there is none. */
+int  handoff_centre(int w, int h, int *x, int *y);
+/* Whether `h` is the curtain: never a game's window, however large. */
+int  handoff_is_curtain(HWND h);
+/* Move a game window that opened on another monitor onto the launcher's. */
+void handoff_place(HWND game);
+/* Centre a window in handoff_work_area(), in physical pixels whatever this
+ * process's DPI awareness. */
+void handoff_centre_window(HWND h);
+/* Before a process exit: a clean one from a game the launcher started opens
+ * the launcher again. */
+void handoff_exit(int code);
+/* Around starting another VCThunder process for this game (arctic_spawn()):
+ * 1 passes it the launcher's monitor and the way back, 0 stops passing them. */
+void handoff_env(int set);
+/* The launcher, reopened by a game: the monitor that game came from, once. */
+int  handoff_return_monitor(RECT *monitor);
+
 /* The DLL's entry point, called by VCThunder.exe (src/stub.c). Never
  * returns: its return address is inside memory the game takes over. */
 __declspec(dllexport) int shim_run(void);
@@ -845,6 +890,7 @@ typedef struct {
     char upscale_2d[16];  /* bilinear | catmull_rom | fsr1, above 1x       */
     char texmag[16];      /* bilinear | catmull_rom: 3D textures, above 1x */
     char frame_rate[4];   /* 30 | 60: 60 adds an in-between picture each tick */
+    char vsync[8];        /* auto | off: tear-free presentation, or immediate */
     /* Which entry of the GAME'S OWN video-mode table _init3dfx_Init selects.
      * -1 = whatever the game asked for, which is the cabinet's mode 1. Mode 2
      * is 640x480 and exists here to match an 86Box oracle frame; it is NOT
@@ -941,9 +987,14 @@ int  config_default_ini(const void **data, unsigned long *size);
  * Command-line values have final precedence. A missing file preserves defaults. */
 int  config_load_shared(shim_config_t *c, const char *path);
 int  config_load_title(shim_config_t *c, const char *path, const char *title);
+/* A title that reads another's sections (`inherits`) then this: its own
+ * [<title>.*] sections, of which only vct_setting_is_own() keys apply. */
+int  config_load_own(shim_config_t *c, const char *path, const char *title,
+                     const char *inherits);
 /* Anything the shared pass could not report because the log was not open yet.
  * Call once, immediately after log_open. */
 void config_report_notes(void);
+/* 1 to run, 0 on a bad argument, -1 when --help was printed. */
 int  config_parse_argv(shim_config_t *c, int argc, char **argv);
 /* Settles [graphics] keys that can contradict each other; call once, after
  * the ini and the command line and before anything reads them. */

@@ -417,6 +417,7 @@ void shim_exit(int code, const char *reason)
     diego_shutdown();
     profile_shutdown();
     log_close();
+    handoff_exit(code);
     ExitProcess((UINT)code);
 }
 
@@ -436,6 +437,7 @@ static __attribute__((noreturn)) void host_exit(int code)
     game_unmap();
     patch_shutdown();
     log_close();
+    handoff_exit(code);
     ExitProcess((UINT)code);
 }
 
@@ -558,8 +560,9 @@ __declspec(dllexport) int shim_run(void)
     if (arctic_operator_requested()) {
         config_defaults(&g_cfg);
         config_load_shared(&g_cfg, "vcthunder.ini");
-        if (!config_parse_argv(&g_cfg, argc, argv))
-            ExitProcess(2);
+        int parsed = config_parse_argv(&g_cfg, argc, argv);
+        if (parsed <= 0)
+            ExitProcess(parsed < 0 ? 0 : 2);
         /* Which title's operator system is in the command line the game was
          * started with: arctic_spawn() guarantees the title word is there.
          * Selected here because everything below reads the title's tables. */
@@ -609,8 +612,9 @@ __declspec(dllexport) int shim_run(void)
          * no game and so opens no log to truncate. */
         if (ingest_is_command(argc, argv))
             ExitProcess((UINT)ingest_cli(g_cfg.data_dir));
-        if (!config_parse_argv(&g_cfg, argc, argv))
-            ExitProcess(2);
+        int parsed = config_parse_argv(&g_cfg, argc, argv);
+        if (parsed <= 0)
+            ExitProcess(parsed < 0 ? 0 : 2);
     }
 
     log_open(g_cfg.log_file, g_cfg.log_level);
@@ -715,6 +719,9 @@ __declspec(dllexport) int shim_run(void)
 
     if (!r2_name_install())
         goto fail;
+
+    /* After the unpack: the two call sites are CODE the unpack writes. */
+    splash_hold_install();
 
     /* Start host input only after DATA/.bss exists: the poller calls the
      * game's own decoder, whose state lives in that region.

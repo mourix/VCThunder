@@ -439,6 +439,42 @@ static void test_flac(void)
           "flac: a lost frame sync is refused");
 }
 
+/* ---- huffman trees that over-fill their codes -------------------------------
+ *
+ * The huff codec's small tree, lengths read 3 bits at a time: one length,
+ * where the rest start, then one per code until a 7. Codes of 8 bits or fewer
+ * decode through a 256-entry table, so a tree with more codes of one length
+ * than that length has room for wrote past it. */
+
+static void test_huff_tree(void)
+{
+    uint8_t out[4];
+    bw_t w;
+    int i;
+
+    memset(&w, 0, sizeof w);
+    bw_put(&w, 1, 3);
+    bw_put(&w, 0, 3);
+    for (i = 1; i < 24; i++)
+        bw_put(&w, 1, 3);
+    bw_align(&w);
+    bw_put(&w, 0, 16);
+    check(!chd_huff_decode(w.buf, w.bits / 8, out, sizeof out),
+          "huff: 24 codes of one bit are refused");
+
+    /* Six codes of two bits pass the pairing check at every length. */
+    memset(&w, 0, sizeof w);
+    bw_put(&w, 2, 3);
+    bw_put(&w, 0, 3);
+    for (i = 1; i < 6; i++)
+        bw_put(&w, 2, 3);
+    bw_put(&w, 7, 3);
+    bw_align(&w);
+    bw_put(&w, 0, 16);
+    check(!chd_huff_decode(w.buf, w.bits / 8, out, sizeof out),
+          "huff: six codes of two bits are refused");
+}
+
 /* ---- an NTFS volume in memory ---------------------------------------------- *
  *
  * 512-byte sectors, 1 KB clusters, 1 KB MFT records and index blocks, at byte
@@ -1219,6 +1255,7 @@ int main(void)
     check(chd_crc16("", 0, 0xFFFF) == 0xFFFF, "CRC-16 of nothing is its seed");
     test_fat();
     test_flac();
+    test_huff_tree();
     test_ntfs();
     test_cd();
     test_iso();

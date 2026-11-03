@@ -308,7 +308,7 @@ static int parse_attrs(ntfs_t *v, file_t *f, const uint8_t *rec, uint64_t n)
         if (type == AT_END)
             return 1;
         if (at + 16 > v->rec_size || (len = le32(rec + at + 4)) < 16 ||
-            at + len > v->rec_size) {
+            len > v->rec_size - at) {
             say(v->err, v->errsz, "MFT record %llu: attribute 0x%X overruns "
                 "its record", (unsigned long long)n, type);
             return 0;

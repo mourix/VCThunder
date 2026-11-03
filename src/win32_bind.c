@@ -43,7 +43,7 @@ static const char *never_bind(const char *decorated)
 static const char *const SUPPORT[] = {
     "ole32.dll", "combase.dll", "oleaut32.dll", "advapi32.dll", "gdi32.dll",
     "shell32.dll", "shcore.dll", "version.dll", "imm32.dll",
-    "dxgi.dll", "d3d11.dll", "d3d9.dll", "d3dcompiler_47.dll", "dwmapi.dll",
+    "dxgi.dll", "d3d11.dll", "d3d9.dll", "dwmapi.dll",
     "setupapi.dll", "cfgmgr32.dll", "bcrypt.dll", "winmm.dll",
     /* WASAPI. audio_preload() opens the endpoint before the headers go, which
      * loads these anyway; listed so a device that appears later cannot try. */
@@ -67,7 +67,11 @@ static HANDLE WINAPI ov_CreateFileA(LPCSTR name, DWORD access, DWORD share,
     int writing = (access & (GENERIC_WRITE | FILE_APPEND_DATA)) != 0;
     const char *path = fs_map_path_mode(name, buf, sizeof buf,
                                         writing ? FS_WRITE : FS_READ);
-    HANDLE h = CreateFileA(path, access, share, sa, disp, flags, tmpl);
+    HANDLE h;
+
+    if (!path)
+        return INVALID_HANDLE_VALUE;
+    h = CreateFileA(path, access, share, sa, disp, flags, tmpl);
 
     if (h == INVALID_HANDLE_VALUE)
         LOGW("CreateFileA FAILED '%s' (from '%s') access=0x%08lX err=%lu",
@@ -84,7 +88,9 @@ static BOOL WINAPI ov_DeleteFileA(LPCSTR name)
     char buf[MAX_PATH];
     /* Only ever out of the save directory: a delete that reached the dump
      * would be the one write this host must never make. */
-    return DeleteFileA(fs_map_path_mode(name, buf, sizeof buf, FS_DELETE));
+    const char *path = fs_map_path_mode(name, buf, sizeof buf, FS_DELETE);
+
+    return path && DeleteFileA(path);
 }
 
 static BOOL WINAPI ov_SetCurrentDirectoryA(LPCSTR name)

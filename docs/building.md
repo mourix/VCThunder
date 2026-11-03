@@ -112,6 +112,7 @@ make tools      # build/glide-replay.exe, the capture replay / golden-frame harn
 make check      # the local CI: scans, link check, build, tests, generated/ vs the dumps
 make check-full # the same, ignoring the stamps on the two checks that cache
 make defs       # maintainer: regenerate generated/ from ALL titles' dumps
+make shaders    # maintainer, Windows only: recompile the GPU shaders to DXBC
 make pack       # deliver the binaries into run/vcthunder/
 make pack-ini   # overwrite the run directory's ini with the shipped defaults
 make pack-cfg   # the pack's ini and launchers only: seeds them, never overwrites
@@ -194,6 +195,11 @@ In order:
    number.
 4. The files go to `data/<title>.part/`, and **only once the executable written there verifies
    is it renamed into place**. A failure, a cancel or a full disk leaves nothing behind.
+5. **The disk's file names and huffman trees are its data, and are checked as such.** A name that
+   could leave the folder or that Windows would rewrite (`..`, a `:`, a `/`, a trailing dot or
+   space, a device name like `NUL`) fails the import in the sizing pass, before anything is
+   written; a tree whose code lengths over-fill their bits fails the CHD's open. The old folder a
+   Replace removes is removed as a link when it is a junction: what it points at is not touched.
 
 **Arctic Thunder's disk is a Windows 2000 install on one NTFS volume**, read by `src/ntfs.c`.
 Nothing is merged: the plaintext install package's game folder becomes `data/arctic/` and its

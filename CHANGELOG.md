@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.5
+
+### Graphics
+
+- **No more tearing.** The GPU renderer now shows each picture at the display's refresh, without
+  making the game wait for it.
+- **Ultimate Arctic Thunder can have its own bezel art.** It uses Arctic Thunder's until its row
+  in the Bezel box is changed.
+- **Less GPU-renderer work per frame**: textures upload three to six times faster, and the 2D
+  layer copies less. No pixel changes.
+
+### Hydro Thunder and Offroad Thunder
+
+- **The splash screens stay up.** The title splash after START now holds and the screen before 
+  a race now show up correctly.
+
+### Linux
+
+- **Runs under Wine and Proton.** The GPU renderer's shaders ship precompiled, because Wine's own
+  shader compiler drew the water, the road and the players black.
+
+### Launcher
+
+- **Fullscreen, and every screen size.** *Display: Windowed or Fullscreen* on the Graphics page
+  is one setting for the launcher and the games. The launcher's design scales to its window or
+  screen, from a Steam Deck to a 4K television; small windows keep the compact layout.
+- **Touch-sized controls**, and dragging a page scrolls it.
+- **From the menu to the game and back**: no desktop between them, the game opens on the
+  launcher's monitor, and closing a game brings the launcher back.
+- **Restore defaults twice keeps your own file** as the backup.
+
+### Import
+
+- **A crafted CHD can no longer write outside the game's folder**, and a huffman table in one
+  that over-fills its codes is refused instead of overrunning memory.
+- **Malformed NTFS, FAT and CHD headers are refused** where a size could wrap and overrun memory.
+- **Replacing a game whose folder is a junction removes the link** and leaves what it points at
+  alone; it used to empty the target.
+
 ## 0.4
 
 ### Arctic Thunder

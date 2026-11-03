@@ -1364,6 +1364,14 @@ static void test_defaults_restore(void)
     check(text && strstr(text, "render_scale = 3") != NULL,
           "the file as it was is kept beside it");
     free(text);
+    /* A SECOND RESTORE OVER THE DEFAULTS KEEPS IT: backing up the defaults
+     * would put them over the one copy of the user's own file. */
+    check(model_defaults_restore(shipped, sizeof shipped - 1, why, sizeof why),
+          "restoring the defaults again succeeds");
+    text = read_bytes(other);
+    check(text && strstr(text, "render_scale = 3") != NULL,
+          "and the file kept is still the user's own");
+    free(text);
     /* AND AN APPLY AFTERWARDS DOES NOT TOUCH IT: Apply's own backup is .bak,
      * and it would otherwise hold the defaults after the first one. */
     snprintf(model_slot((unsigned)setting_find("graphics", "render_scale")),
@@ -1403,7 +1411,7 @@ static int count_of(const char *text, const char *needle)
 static void test_bezel_rows(void)
 {
     char path[MAX_PATH], why[256], art[MAX_PATH], dest[MAX_PATH], dir[MAX_PATH];
-    char value[INI_VALUE_CAP], shown[MAX_PATH], *text;
+    char value[INI_VALUE_CAP], shown[MAX_PATH], missing[MAX_PATH], *text;
     int changed = 0;
 
     check(open_model("bezel.ini",
@@ -1469,6 +1477,116 @@ static void test_bezel_rows(void)
     check(!model_bezel_get(1, shown, sizeof shown) &&
           !strcmp(shown, "bezels/offroad.png"),
           "bezel: art left off is still named, so it can be turned back on");
+
+    /* ONE COPY FAILING LEAVES EVERY CABINET'S ART AS IT WAS: offroad's new
+     * art is copied before arctic's missing file fails, and must not land. */
+    check(write_bytes(art, "art that must not land"),
+          "bezel: scratch art rewritten");
+    model_bezel_choose(1, art);
+    snprintf(missing, sizeof missing, "%s\\no-such-art.png", s_folder);
+    model_bezel_choose(2, missing);
+    check(model_save(why, sizeof why, &changed) != MODEL_SAVE_OK,
+          "bezel: a copy that fails fails the Apply");
+    text = read_bytes(dest);
+    check(text && !strcmp(text, "newer art"),
+          "bezel: and the art copied before it did not land");
+    free(text);
+    snprintf(missing, sizeof missing, "%s.new", dest);
+    check(GetFileAttributesA(missing) == INVALID_FILE_ATTRIBUTES,
+          "bezel: no temporary copy is left behind");
+    model_close();
+
+    DeleteFileA(dest);
+    snprintf(dir, sizeof dir, "%s", dest);
+    *strrchr(dir, '\\') = '\0';
+    RemoveDirectoryA(dir);
+    DeleteFileA(art);
+}
+
+/* ULTIMATE ARCTIC THUNDER'S ROW: Arctic's art until it has its own, and an
+ * absent line is that answer, so going back to Arctic's takes the line out
+ * rather than writing off. */
+static void test_ultimate_bezel(void)
+{
+    char path[MAX_PATH], why[256], art[MAX_PATH], dest[MAX_PATH], dir[MAX_PATH];
+    char value[INI_VALUE_CAP], shown[MAX_PATH], *text;
+    const int u = MODEL_BEZEL_UARCTIC;
+    int changed = 0;
+
+    check(open_model("ultimate.ini",
+            "[arctic.graphics]\r\n"
+            "bezel = bezels/arctic.png\r\n",
+            path, sizeof path), "the Ultimate ini opened");
+    check(model_bezel_inherits(u) && model_bezel_get(u, shown, sizeof shown) &&
+          !strcmp(shown, "bezels/arctic.png"),
+          "ultimate: with no line its row is Arctic's, on, naming Arctic's art");
+    model_bezel_own(u, shown, sizeof shown);
+    check(!shown[0], "ultimate: and it has no art of its own");
+    check(!model_bezel_inherits(MODEL_TITLE_ARCTIC),
+          "ultimate: a cabinet never inherits");
+
+    model_bezel_set_enabled(u, 0);
+    check(!model_bezel_inherits(u) && !model_bezel_get(u, shown, sizeof shown),
+          "ultimate: turning it off makes the row its own, off");
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK && changed == 1 &&
+          ini_doc_get(model_doc(), "uarctic.graphics", "bezel", value,
+                      sizeof value) && !_stricmp(value, "off"),
+          "ultimate: and Apply writes off in its own section");
+    check(ini_doc_get(model_doc(), "arctic.graphics", "bezel", value,
+                      sizeof value) && !strcmp(value, "bezels/arctic.png"),
+          "ultimate: leaving Arctic's line alone");
+
+    snprintf(art, sizeof art, "%s\\uart.png", s_folder);
+    check(write_bytes(art, "ultimate art"), "ultimate: scratch art written");
+    model_bezel_choose(u, art);
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK && changed == 1 &&
+          model_bezel_copied() == 1, "ultimate: a choice is one key and one copy");
+    model_bezel_destination(u, dest, sizeof dest);
+    text = read_bytes(dest);
+    check(text && !strcmp(text, "ultimate art"),
+          "ultimate: Apply copied the choice to bezels\\uarctic.png");
+    free(text);
+
+    check(model_reopen(), "ultimate: the saved file reopened");
+    model_load();
+    check(!model_bezel_inherits(u) && model_bezel_get(u, shown, sizeof shown) &&
+          !strcmp(shown, "bezels/uarctic.png"),
+          "ultimate: its own art survives a reload");
+    check(model_bezel_get(MODEL_TITLE_ARCTIC, shown, sizeof shown) &&
+          !strcmp(shown, "bezels/arctic.png"), "ultimate: and Arctic's is its own");
+
+    model_bezel_inherit(u);
+    check(model_bezel_inherits(u) && model_bezel_get(u, shown, sizeof shown) &&
+          !strcmp(shown, "bezels/arctic.png"),
+          "ultimate: Same as Arctic shows Arctic's art again");
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK && changed == 1 &&
+          !ini_doc_get(model_doc(), "uarctic.graphics", "bezel", value,
+                       sizeof value),
+          "ultimate: and Apply takes its line out");
+    check(model_reopen(), "ultimate: reopened");
+    model_load();
+    check(model_bezel_inherits(u), "ultimate: inheriting survives a reload");
+    model_bezel_own(u, shown, sizeof shown);
+    check(!strcmp(shown, "bezels/uarctic.png"),
+          "ultimate: its own art is still there to turn back on");
+    check(model_save(why, sizeof why, &changed) == MODEL_SAVE_OK && !changed,
+          "ultimate: an untouched row writes nothing");
+    model_close();
+
+    check(open_model("ultimate-problems.ini",
+            "[uarctic.graphics]\r\n"
+            "bezel = bezels/uarctic.png\r\n"
+            "render_scale = 2\r\n"
+            "[uarctic]\r\n"
+            "bezel = bezels/elsewhere.png\r\n",
+            path, sizeof path), "the Ultimate problems ini opened");
+    scan_ini_problems();
+    check(problem_mentions("[uarctic.graphics] render_scale is not read"),
+          "ultimate: any other key in its section is a line nothing reads");
+    check(!problem_mentions("[uarctic.graphics] bezel"),
+          "ultimate: and its bezel is not");
+    check(problem_mentions("[uarctic] bezel is not read"),
+          "ultimate: its bezel in another of its sections is");
     model_close();
 
     DeleteFileA(dest);
@@ -1494,6 +1612,7 @@ int main(void)
     test_unsafe_video_mode();
     test_ini_problems();
     test_bezel_rows();
+    test_ultimate_bezel();
     test_duplicate_keys();
     test_device_scope();
     test_device_labels();

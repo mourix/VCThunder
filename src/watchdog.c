@@ -34,6 +34,7 @@ static HANDLE  s_render_thread;
 static SRWLOCK s_render_lock = SRWLOCK_INIT;
 static HANDLE  s_watchdog_thread;
 static volatile LONG64 s_last_swap_qpc_atomic;
+static volatile LONG   s_hold_depth;
 static LONG64 s_watchdog_armed_qpc;
 static volatile LONG   s_watchdog_stop;
 
@@ -184,7 +185,7 @@ static DWORD WINAPI watchdog(LPVOID arg)
         /* A modal window loop is a deliberate stop, not a hang: window.c holds
          * the game's clock across it. Reporting the render thread parked in
          * user32 six times is how a useful instrument gets ignored. */
-        if (timebase_paused())
+        if (timebase_paused() || InterlockedCompareExchange(&s_hold_depth, 0, 0))
             continue;
         last = InterlockedCompareExchange64(&s_last_swap_qpc_atomic, 0, 0);
         /* No swap has EVER happened: measure from when the watchdog armed.
@@ -263,6 +264,23 @@ static void watchdog_start(void)
         LOGI("watchdog: armed; reports the render thread's position if frames "
              "stop for %u ms", WATCHDOG_STALL_MS);
 }
+/* A frame the host holds on screen on purpose is not a hang. On release the
+ * heartbeat restarts from now, so the hold is not counted against the next
+ * frame; before the first frame there is no heartbeat to restart. */
+void watchdog_hold(int on)
+{
+    LARGE_INTEGER now;
+
+    if (on) {
+        InterlockedIncrement(&s_hold_depth);
+        return;
+    }
+    QueryPerformanceCounter(&now);
+    if (InterlockedCompareExchange64(&s_last_swap_qpc_atomic, 0, 0))
+        InterlockedExchange64(&s_last_swap_qpc_atomic, (LONG64)now.QuadPart);
+    InterlockedDecrement(&s_hold_depth);
+}
+
 /* ---- the seam (src/glide_int.h) ----------------------------------------- */
 
 /* Both jobs of the swap in one call: record the heartbeat, and on the first

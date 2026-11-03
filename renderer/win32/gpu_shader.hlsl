@@ -1,9 +1,10 @@
 /* gpu_shader.hlsl -- SDL GPU implementation of vcglide's measured pipeline.
  * SPDX-License-Identifier: MIT.  Copyright (c) 2026 VCThunder contributors.
  *
- * This is project-authored HLSL compiled to DXBC by D3DCompiler during
- * vglInit, before the host maps the game image. SDL_GPU consumes that DXBC on
- * its Direct3D 12 backend. The C side deliberately sends decoded RGBA texture
+ * This is project-authored HLSL, compiled to DXBC by Microsoft's D3DCompiler
+ * at build time (`make shaders`, committed as gpu_shader_dxbc.h; every entry
+ * point is listed in gpu_shaders.def). SDL_GPU consumes that DXBC on its
+ * Direct3D 12 backend. The C side deliberately sends decoded RGBA texture
  * levels, so Glide texture-memory formats continue to have one authority:
  * core/tex.c.
  */
