@@ -65,8 +65,8 @@ The import checks the executable inside a CHD against these before it writes any
 |---|---|---|---|
 | **Hydro Thunder** | 1999 | Diego | Playable |
 | **Offroad Thunder** | 2000 | MagicBus | Playable |
-| **Arctic Thunder** | 2001 | (Windows 2000 PC) | Playable |
-| **Ultimate Arctic Thunder** | 2004 | (Windows 2000 PC) | Playable |
+| **Arctic Thunder** | 2001 | Substitute MagicBus | Playable |
+| **Ultimate Arctic Thunder** | 2004 | Substitute MagicBus | Playable |
 
 Link play is an early beta: **only two instances on one machine have ever been linked.** That's it.
 

@@ -13,8 +13,8 @@
 
 ### Hydro Thunder and Offroad Thunder
 
-- **The splash screens stay up.** The title splash after START now holds and the screen before 
-  a race now show up correctly.
+- **The splash screens stay up.** The title splash after START and the screen before a race now
+  stay up as long as they should.
 
 ### Linux
 
@@ -28,7 +28,7 @@
   screen, from a Steam Deck to a 4K television; small windows keep the compact layout.
 - **Touch-sized controls**, and dragging a page scrolls it.
 - **From the menu to the game and back**: no desktop between them, the game opens on the
-  launcher's monitor, and closing a game brings the launcher back.
+  launcher's monitor, and closing a game brings the launcher back on the game's monitor.
 - **Restore defaults twice keeps your own file** as the backup.
 
 ### Import
