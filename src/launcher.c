@@ -949,6 +949,7 @@ static const struct { const char *key, *value, *text; } k_choice_text[] = {
     { "aspect",           "raster",      "As the game draws it" },
     { "aspect",           "4:3",         "4:3"                  },
     { "aspect",           "16:9",        "16:9"                 },
+    { "aspect",           "21:9",        "21:9 - ultrawide"     },
     { "aspect",           "stretch",     "Stretch to the window" },
     { "vcglide_renderer", "auto",        "Automatic"            },
     { "vcglide_renderer", "gpu",         "Graphics card"        },
@@ -963,7 +964,9 @@ static const struct { const char *key, *value, *text; } k_choice_text[] = {
     { "vsync",            "off",         "Off - for variable refresh" },
     { "vsync",            "auto",        "On"                   },
     { "widescreen_hud",   "centre",      "4:3 - original"       },
-    { "widescreen_hud",   "edges",       "16:9 - screen edges"  },
+    { "widescreen_hud",   "edges",       "Wide - screen edges"  },
+    { "widescreen_ratio", "16:9",        "16:9"                 },
+    { "widescreen_ratio", "21:9",        "21:9 - ultrawide"     },
     { "video_mode",       "auto",        "Automatic"            },
     { "video_mode",       "0",           "Mode 0"               },
     { "video_mode",       "1",           "Mode 1"               },
@@ -1142,7 +1145,8 @@ static int scale_row(unsigned index)
 /* The ETS picture, as glide_bind.c's resolve_geometry() works it out: both
  * titles ask for the cabinet's GR_RESOLUTION_512x384 (the mode-1 entry of the
  * game's own video-mode table), raster_height replaces the 384, and
- * widescreen widens to 16:9 of that height. 0 when it cannot be known from
+ * widescreen widens to widescreen_ratio (16:9 or 21:9) of that height. 0 when
+ * it cannot be known from
  * here: a forced video_mode takes the size from the game's own table, which
  * the launcher has not read, and a raster_height being typed may not be a
  * number yet. */
@@ -1171,6 +1175,15 @@ static int title_bool(int title, const char *key)
            on;
 }
 
+/* The widescreen raster's width at `height` rows, as this game would get it. */
+static int title_widescreen_width(int title, int height)
+{
+    char buf[INI_VALUE_CAP];
+
+    return widescreen_ratio_width(title_graphics(title, "widescreen_ratio",
+                                                 buf, sizeof buf), height);
+}
+
 static int picture_raster(int title, int *w, int *h)
 {
     char height_buf[INI_VALUE_CAP], mode_buf[INI_VALUE_CAP];
@@ -1187,8 +1200,9 @@ static int picture_raster(int title, int *w, int *h)
         return 0;
     *h = (int)rows;
     *w = CABINET_RASTER_W;
-    if (title_bool(title, "widescreen") && (*h * 16 + 4) / 9 > *w)
-        *w = (*h * 16 + 4) / 9;
+    if (title_bool(title, "widescreen") &&
+        title_widescreen_width(title, *h) > *w)
+        *w = title_widescreen_width(title, *h);
     return 1;
 }
 
@@ -1262,7 +1276,7 @@ static int title_bezel(int title, int *art_w, int *art_h, int *hole_h)
     return 1;
 }
 
-/* Arctic's picture: 640x480, or its 16:9 raster under widescreen. It ignores
+/* Arctic's picture: 640x480, or its 16:9 or 21:9 raster under widescreen. It ignores
  * aspect, raster_height and video_mode (arctic.c's k_unused). */
 #define ARCTIC_RASTER_W 640
 #define ARCTIC_RASTER_H 480
@@ -1279,7 +1293,7 @@ static int title_scale_size(int title, int row, int scale, int *w, int *h)
     if (title == MODEL_TITLE_ARCTIC) {
         *h = ARCTIC_RASTER_H;
         *w = title_bool(title, "widescreen")
-             ? (ARCTIC_RASTER_H * 16 + 4) / 9 : ARCTIC_RASTER_W;
+             ? title_widescreen_width(title, ARCTIC_RASTER_H) : ARCTIC_RASTER_W;
         raster_h = *h;
         *w *= scale;
         *h *= scale;
@@ -1295,6 +1309,8 @@ static int title_scale_size(int title, int row, int scale, int *w, int *h)
             *w = (*h * 4 + 1) / 3;
         else if (row == SCALE_ROW_WINDOW && aspect_is_16_9(aspect))
             *w = (*h * 16 + 4) / 9;
+        else if (row == SCALE_ROW_WINDOW && aspect_is_21_9(aspect))
+            *w = widescreen_ratio_width("21:9", *h);
         else
             *w *= scale;
     }
@@ -2606,7 +2622,8 @@ static int setting_inert(unsigned index)
         return !_stricmp(renderer, "cpu") ||
                (ini_parse_uint(model_value("graphics", "render_scale"), 1, 8,
                                &scale) && scale == 1);
-    if (!strcmp(d->key, "widescreen_hud"))
+    if (!strcmp(d->key, "widescreen_hud") ||
+        !strcmp(d->key, "widescreen_ratio"))
         return !model_bool("graphics", "widescreen");
     if (!strcmp(d->key, "window_scale"))
         return model_bool("graphics", "fullscreen");

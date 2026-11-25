@@ -311,6 +311,8 @@ void vgl_init(void)
         snprintf(vgl_cfg.aspect, sizeof vgl_cfg.aspect, "4:3");
     else if (_stricmp(vgl_cfg.aspect, "16:9") == 0)
         snprintf(vgl_cfg.aspect, sizeof vgl_cfg.aspect, "16:9");
+    else if (_stricmp(vgl_cfg.aspect, "21:9") == 0)
+        snprintf(vgl_cfg.aspect, sizeof vgl_cfg.aspect, "21:9");
     else if (_stricmp(vgl_cfg.aspect, "stretch") == 0)
         snprintf(vgl_cfg.aspect, sizeof vgl_cfg.aspect, "stretch");
     else {
@@ -428,6 +430,9 @@ void vgl_destination_rect(int fullscreen, int raster_w, int raster_h,
     } else if (_stricmp(vgl_cfg.aspect, "16:9") == 0) {
         target_w = 16;
         target_h = 9;
+    } else if (_stricmp(vgl_cfg.aspect, "21:9") == 0) {
+        target_w = 64;                  /* 21:9 as panels build it: 64:27 */
+        target_h = 27;
     }
     if (target_w <= 0 || target_h <= 0)
         return;

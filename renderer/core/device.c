@@ -178,6 +178,24 @@ int vgl_device_open(void *caller_window, int res_enum, int refresh_enum,
         vgl.presenting = vgl_present_open(caller_window, vgl.w, vgl.h,
                                           vgl_cfg.scale,
                                           refresh_hz(refresh_enum));
+    /* Storage is top-down, so on a lower-left surface taller than the raster
+     * the picture is its BOTTOM rows. The presenters start at the top and are
+     * moved by grClipWindow (native.c), which the ETS titles call; Arctic
+     * never does, so a widescreen surface taller than its 480 rows (21:9's
+     * 1280x1024) showed the empty top of the surface. Start at the bottom. */
+    if (vgl.origin_lower_left && vgl_cfg.raster_height > 0 &&
+        vgl_cfg.raster_height < vgl.h) {
+        int ry = vgl.h - vgl_cfg.raster_height;
+
+        if (vgl.gpu)
+            vgl_gpu_set_raster(0, ry, vgl_cfg.raster_width,
+                               vgl_cfg.raster_height, 0, ry,
+                               vgl_cfg.raster_width, vgl.h);
+        else if (vgl.presenting)
+            vgl_present_raster(0, ry, vgl_cfg.raster_width,
+                               vgl_cfg.raster_height, 0, ry,
+                               vgl_cfg.raster_width, vgl.h);
+    }
     else
         vgl.presenting = vgl.gpu && vgl_cfg.present;
     return 1;
@@ -432,12 +450,19 @@ static void put32(void *p, unsigned off, uint32_t v)
 }
 
 /* Map the visible raster to the bottom of a taller lower-left surface. Apply
- * the resulting row offset to upper-left LFB locks and bound every access. */
+ * the resulting row offset to upper-left LFB locks and bound every access.
+ * Storage is top-down and the presented raster follows the clip window
+ * (native.c), so on a surface opened UPPER-left the raster is already the top
+ * rows and an upper-left lock needs no offset: Hydro's operator menu reopens
+ * the surface that way, and the offset (the pad under a 400-row raster: 80
+ * rows on 16:9's 856x480 surface, 320 on 21:9's 960x720) pushed its page off
+ * the bottom of the picture. */
 static int lfb_row_bias(void)
 {
     int pad;
 
-    if (s_lfb_field_width <= 0 || vgl_cfg.raster_height <= 0)
+    if (s_lfb_field_width <= 0 || vgl_cfg.raster_height <= 0 ||
+        !vgl.origin_lower_left)
         return 0;
     pad = vgl.h - vgl_cfg.raster_height;
     return pad > 0 ? pad : 0;

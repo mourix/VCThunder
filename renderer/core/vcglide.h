@@ -39,7 +39,7 @@ typedef struct {
     char     display_frames[32];/* "A:B", the frames display_dump writes */
     char     title[32];
     char     renderer[16];      /* auto | gpu | cpu */
-    char     aspect[16];        /* raster | 4:3 | 16:9 | stretch */
+    char     aspect[16];        /* raster | 4:3 | 16:9 | 21:9 | stretch */
     char     upscale_2d[16];    /* bilinear | catmull_rom | fsr1 */
     char     texmag[16];        /* bilinear | catmull_rom: 3D texture magnifier */
     char     vsync[8];          /* auto | off: the GPU swapchain's present mode */

@@ -3,7 +3,7 @@
  *
  * The ETS titles' design (widescreen.c) on a game with no symbols: the game
  * keeps its own 640x480 coordinates, the
- * provider draws its picture at the centre of a 16:9 raster (glide3.c, from
+ * provider draws its picture at the centre of a 16:9 or 21:9 raster (glide3.c, from
  * the field published here), and what decides visibility before that move is
  * widened in snow.exe's memory: the culling frustum's corners, the four
  * screen-space clippers' x planes, and the tests of a projected point against
@@ -51,6 +51,9 @@ static void __stdcall hud_draw(uint32_t mode, uint32_t count, void *v,
                                uint32_t stride);
 static int       s_hud;
 static uintptr_t s_snow_base, s_draw_ret;
+/* gobj's sprite loop is hooked for the field test below even when the HUD
+ * stays centred (s_hud 0): s_draw_ret then comes from the HUD table alone. */
+static int       s_cull2d;
 
 int arctic_ws_wanted_width(void)
 {
@@ -192,7 +195,7 @@ static unsigned stub_bytes(const arctic_ws_site_t *s)
 {
     switch (s->kind) {
     case AWS_XSUB: case AWS_XSUBG: case AWS_XDIV: case AWS_JTAB:
-    case AWS_ST1LO:
+    case AWS_ST1LO: case AWS_XRANGE:
         return 32;
     }
     return 0;
@@ -301,6 +304,25 @@ static uint8_t *emit_st1lo(uint8_t *at, const uint8_t *site)
     return at;
 }
 
+/* The x range test for a margin wider than a disp8 reaches (21:9: 249): the
+ * site becomes `call stub; jae out; nop x5` and the stub does the work with a
+ * disp32, `lea ecx,[r+e]; cmp ecx,w+2e+1; ret`, whose flags the jae reads.
+ * ecx is dead at the site, as for the inline form. */
+static uint8_t *emit_xrange(uint8_t *at, const arctic_ws_site_t *s, int32_t e,
+                            uint32_t span)
+{
+    *at++ = 0x8D;
+    *at++ = (uint8_t)(0x88 | s->base);
+    memcpy(at, &e, 4);
+    at += 4;
+    *at++ = 0x81;
+    *at++ = 0xF9;
+    memcpy(at, &span, 4);
+    at += 4;
+    *at++ = 0xC3;
+    return at;
+}
+
 /* `call stub` over `n` bytes, the rest nops. */
 static int call_over(uint8_t *p, size_t n, const uint8_t *stub)
 {
@@ -384,8 +406,23 @@ static int apply(uint8_t *img, uint32_t preferred, const arctic_ws_site_t *s,
         uint32_t span = (uint32_t)(AT->ws->native_w + 2 * (int)e + 1);
         const uint8_t *out = xrange_out(p, s);
 
-        if (s->role != AWS_HI || e > 127.0f || !out)
+        if (s->role != AWS_HI || !out)
             return 0;
+        if (e > 127.0f) {
+            int32_t rel = (int32_t)(out - (p + 7));
+            uint8_t c[12];
+
+            if (rel < -128 || rel > 127)
+                return 0;
+            *tramp = emit_xrange(*tramp, s, (int32_t)e, span);
+            memset(c, 0x90, sizeof c);
+            c[0] = 0xE8;
+            rel = (int32_t)((intptr_t)stub - ((intptr_t)p + 5));
+            memcpy(c + 1, &rel, 4);
+            c[5] = 0x73;
+            c[6] = (uint8_t)(int8_t)(out - (p + 7));
+            return poke(p, c, sizeof c);
+        }
         b[1] |= s->base;
         b[2] = (uint8_t)(int)e;
         memcpy(b + 5, &span, 4);
@@ -474,6 +511,9 @@ int arctic_ws_arm(HMODULE snow, HMODULE gobj, uint32_t preferred)
     s_armed = 1;
     if (!strcmp(g_cfg.widescreen_hud, "edges"))
         hud_arm(snow, gobj);
+    if (!s_hud && gobj && AT->hud && AT->hud->draw_ret)
+        s_draw_ret = (uintptr_t)((uint8_t *)gobj + AT->hud->draw_ret);
+    s_cull2d = s_draw_ret != 0;
     LOGI("widescreen: %u sites widened; the game keeps its %dx%d picture, drawn"
          " at x=%d in a %dx%d raster, and culls and clips x to %d..%d",
          AT->ws->count, AT->ws->native_w, AT->ws->native_h, s_dx,
@@ -503,7 +543,7 @@ void *arctic_ws_bind(const char *imp, void *real)
 {
     if (!s_armed || !real)
         return NULL;
-    if (s_hud && !strcmp(imp, "_grDrawVertexArrayContiguous@16")) {
+    if ((s_hud || s_cull2d) && !strcmp(imp, "_grDrawVertexArrayContiguous@16")) {
         s_real_vac = (vac_fn)real;
         return (void *)hud_draw;
     }
@@ -605,6 +645,35 @@ static void __cdecl hud_created(uint32_t slot, uint32_t obj, uint32_t ra)
 /* Each site's first draw on each side, logged once. */
 static uint8_t s_hud_told[64];
 
+/* A sprite that is not the HUD's is drawn where the game put it, unless it lies
+ * wholly outside the game's own 640 columns. On the cabinet the screen ended
+ * there and such a sprite was never seen; the 2D the game slides in from off
+ * the screen (the TOP 10 DRIVERS rows, Ultimate's too) is exactly that, and the
+ * widened clippers let it show in the widescreen's side strips. One that only
+ * reaches past the edge is still drawn whole. */
+static void draw_in_field(uint32_t mode, uint32_t count, void *v,
+                          uint32_t stride)
+{
+    static int told;
+    float lo = 1e30f, hi = -1e30f, x;
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        memcpy(&x, (const uint8_t *)v + i * stride, 4);
+        if (x < lo) lo = x;
+        if (x > hi) hi = x;
+    }
+    if (count && (hi <= 0.0f || lo >= (float)AT->ws->native_w)) {
+        if (!told++)
+            LOGI("widescreen: a 2D sprite at x %.0f..%.0f is outside the"
+                 " game's %d columns, which the cabinet never showed; such"
+                 " sprites are not drawn in the side strips", (double)lo,
+                 (double)hi, AT->ws->native_w);
+        return;
+    }
+    s_real_vac(mode, count, v, stride);
+}
+
 /* gobj's sprite loop draws each sprite as one fan of its four vertices at
  * sprite + vert_off. A glyph's string, or else the sprite, is the element;
  * the element's own x says which edge it keeps its distance from. The whole
@@ -629,7 +698,7 @@ static void __stdcall hud_draw(uint32_t mode, uint32_t count, void *v,
     h = hud_slot(key, 0);
     site = h < HUD_MAP ? s_hud_map[h].site : 0;
     if (!site) {
-        s_real_vac(mode, count, v, stride);
+        draw_in_field(mode, count, v, stride);
         return;
     }
     memcpy(&x, owner ? (const uint8_t *)(uintptr_t)owner + AT->hud->string_x

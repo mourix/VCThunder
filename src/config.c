@@ -554,7 +554,7 @@ void config_resolve_graphics(shim_config_t *c)
     if (c->widescreen && aspect_is_4_3(c->aspect)) {
         c->widescreen = 0;
         LOGW("graphics: aspect = 4:3 asks for the cabinet's shape, so "
-             "widescreen is off for this run. Set aspect = 16:9 (or raster, "
+             "widescreen is off for this run. Set aspect = 16:9 or 21:9 (or raster, "
              "or stretch) to use it.");
     }
 }

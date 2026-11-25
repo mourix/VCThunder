@@ -220,10 +220,15 @@ static void case_triangle(float dx, int ortho, int margin, int reported,
 static game_profile_t s_profile;
 static const game_hud_t s_hud_table[1] = { { 0, 0, 0, 0, 0, "test element" } };
 
+/* The raster the HUD cases run in: 16:9 (711, origin 99) first, then 21:9
+ * (948, origin 218), so the edges follow whichever widescreen_ratio is on. */
+static int   s_hud_raster = 711;
+static float s_hud_dx = 99.0f;
+
 static void hud_state(void)
 {
-    set_state(99.0f, 0, 0, 1);
-    s_ws_raster_width = 711;
+    set_state(s_hud_dx, 0, 0, 1);
+    s_ws_raster_width = s_hud_raster;
     s_hud_armed = 1;
     s_hud_bias = 0;
     s_hud_pending = 0;
@@ -266,7 +271,7 @@ static void case_hud_element(float first, float later, float want)
              "moves %g (got %g, then %g for x=%g), and %g again outside it",
              (double)first, (double)want, (double)got1, (double)got2,
              (double)later, (double)after);
-    check(got1 == want && got2 == want && after == 99.0f && !s_hud_pending &&
+    check(got1 == want && got2 == want && after == s_hud_dx && !s_hud_pending &&
           s_hud_bias == 0, label);
 }
 
@@ -279,7 +284,7 @@ static void case_hud_disarmed(void)
     hud_state();
     s_hud_armed = 0;
     ws_hud_enter(&scope, 1u, "test element", 0);
-    check(!s_hud_pending && hud_tri(20.0f) == 99.0f,
+    check(!s_hud_pending && hud_tri(20.0f) == s_hud_dx,
           "HUD element with the mode off: the origin alone");
     ws_hud_leave(&scope);
 }
@@ -298,7 +303,7 @@ static void case_hud_after_clear(void)
     ws_hud_enter(&scope, 1u, "test element", 0);
     got = hud_tri(20.0f);
     ws_hud_leave(&scope);
-    check(!s_ws_world_now && got == 99.0f,
+    check(!s_ws_world_now && got == s_hud_dx,
           "HUD element after a buffer clear: the origin alone, page layout");
 }
 
@@ -393,7 +398,7 @@ static void case_track_card(float x, int armed, float want)
     snprintf(label, sizeof label, "tracking card at x=%g, HUD mode %d: moves "
              "%g (got %g), and %g again after it", (double)x, armed,
              (double)want, (double)s_card_got, (double)after);
-    check(s_card_got == want && after == 99.0f && s_hud_bias == 0 &&
+    check(s_card_got == want && after == s_hud_dx && s_hud_bias == 0 &&
           !s_hud_name && !s_ws_ortho_depth, label);
 }
 
@@ -451,6 +456,25 @@ int main(void)
     case_track_card(0.0f, 1, 99.0f);
     case_track_card(122.5f, 0, 149.0f);
     case_track_card(-122.5f, 0, 49.0f);
+
+    /* widescreen_ratio = 21:9: a 948-wide raster, origin 218. The same HUD
+     * lands on the ultrawide raster's own edges (total 0 and 436), the centre
+     * group keeps the origin, and the ramps stay halfway. */
+    s_hud_raster = 948;
+    s_hud_dx = 218.0f;
+    case_hud_element(20.0f, 300.0f, 0.0f);
+    case_hud_element(420.0f, 30.0f, 436.0f);
+    case_hud_element(230.0f, 480.0f, 218.0f);
+    case_hud_element(172.0f, 480.0f, 109.0f);
+    case_hud_element(300.0f, 20.0f, 327.0f);
+    case_hud_disarmed();
+    case_hud_after_clear();
+    case_hud_text(20.0f, 1, 1, -218.0f);
+    case_hud_text(440.0f, 1, 1, 218.0f);
+    case_hud_text(240.0f, 1, 1, 0.0f);
+    case_track_card(253.0f, 1, 436.0f);
+    case_track_card(-253.0f, 1, 0.0f);
+    case_track_card(0.0f, 1, 218.0f);
 
     if (failures) {
         fprintf(stderr, "widescreen shift tests: %d failure(s)\n", failures);

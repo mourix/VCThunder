@@ -2455,6 +2455,7 @@ static void sample_interp(int parm)
     }
     s_ip_ms_snap += now_ms() - tw;
     s_get_state(s_state_blob);
+    ws_sky_pieces_save();
     if (s_state_mode && s_have_prev_state) {
         if (s_orig_sky && s_sky_seen > 1) {
             s_ip_mode = 3;             /* not a Work call: do not record it */
@@ -2478,6 +2479,7 @@ static void sample_interp(int parm)
     ti = now_ms();
     mark_dirty(&s_before);
     restore_dirty(s_before.p);
+    ws_sky_pieces_restore();
     s_ip_ms_restore += now_ms() - ti;
     audio_hold_this_thread(0);
     win32_hold_frees(0);

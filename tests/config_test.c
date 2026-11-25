@@ -216,7 +216,31 @@ static void test_invalid_enum(void)
     load_text(&c, "[graphics]\naspect = 16-9\n");
     check(strcmp(c.aspect, "raster") == 0,
           "a mistyped choice is refused and the default stands");
-    check_says("raster|4:3|16:9|stretch", "and the warning lists the choices");
+    check_says("raster|4:3|16:9|21:9|stretch", "and the warning lists the choices");
+
+    load_text(&c, "[graphics]\naspect = 21:9\n");
+    check(strcmp(c.aspect, "21:9") == 0, "the ultrawide aspect lands");
+}
+
+/* widescreen_ratio: 16:9 by default, 21:9 for an ultrawide, nothing else;
+ * and the raster widths the binding, Arctic and the launcher all take. */
+static void test_widescreen_ratio(void)
+{
+    shim_config_t c;
+
+    load_text(&c, "[graphics]\nwidescreen = true\n");
+    check(strcmp(c.widescreen_ratio, "16:9") == 0, "widescreen_ratio is 16:9 by default");
+    load_text(&c, "[graphics]\nwidescreen_ratio = 21:9\n");
+    check(strcmp(c.widescreen_ratio, "21:9") == 0, "21:9 lands");
+    load_text(&c, "[graphics]\nwidescreen_ratio = 32:9\n");
+    check(strcmp(c.widescreen_ratio, "16:9") == 0, "an unknown ratio is refused");
+    check_says("16:9|21:9", "and the warning lists the choices");
+
+    check(widescreen_ratio_width("16:9", 400) == 711, "16:9 at 400 rows is 711");
+    check(widescreen_ratio_width("21:9", 400) == 948, "21:9 at 400 rows is 948");
+    check(widescreen_ratio_width("16:9", 480) == 853, "16:9 at 480 rows is 853");
+    check(widescreen_ratio_width("21:9", 480) == 1138, "21:9 at 480 rows is 1138");
+    check(widescreen_ratio_width("21:9", 0) == 0, "no rows, no width");
 }
 
 static void test_invalid_bool(void)
@@ -623,6 +647,7 @@ int main(void)
     test_absent_file();
     test_invalid_keeps_the_previous_value();
     test_invalid_enum();
+    test_widescreen_ratio();
     test_invalid_bool();
     test_alias();
     test_misplaced_key_is_applied_and_reported();

@@ -20,6 +20,7 @@
 #define VCT_MAX_HUD_ELEMS   16      /* Offroad 10 HUD/attract draw functions     */
 #define VCT_MAX_HUD_TEXTS   16      /* Offroad 7 race-HUD gametext pointers      */
 #define VCT_MAX_SPLASH_ROUTES 3     /* Offroad 3 routes to its title load        */
+#define VCT_MAX_SKY_PIECE_SITES 48  /* Hydro 37 absolutes into its sky pieces     */
 
 typedef struct { uint32_t va; const char *name; int argbytes; } game_fn_t;
 typedef struct { uint32_t slot; const char *name; } game_imp_t;
@@ -128,6 +129,14 @@ typedef struct game_profile {
      * _boats_DrawAllTrackingNumbers, and the float its bottom cards' x is
      * scaled by. 0 in Offroad, whose racer tags are a ws_racer_tag repair. */
     uint32_t track_ra_lo, track_ra_hi, track_spread;
+    /* Hydro's sky pieces (d_sky_pieces): _sky_Work's static array of
+     * sky_piece_n records, sky_piece_stride bytes each from sky_piece_base,
+     * every absolute in the sky module that reaches into it, and the end
+     * _sky_ModuleInit's record loop stops at. widescreen.c moves the array to
+     * one with room for a 21:9 or rolled quad. All 0 in Offroad. */
+    uint32_t sky_piece_base, sky_piece_stride, sky_piece_n;
+    uint32_t sky_piece_stop_site, sky_piece_stop, sky_piece_count;
+    uint32_t sky_piece_site[VCT_MAX_SKY_PIECE_SITES];
     uint32_t gametext_print, gametext_width, gametext_x, gametext_style;
     uint32_t text_flush, hud_lap_texts, hud_num_laps;
     uint32_t init3dfx_init, init3dfx_hpixels, init3dfx_vpixels;

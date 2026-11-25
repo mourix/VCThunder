@@ -52,7 +52,7 @@ SETTING("graphics", "window_scale",
         SHOW(GROUP_GFX_DISPLAY, "Window size", ST_AUTO_UINT, SF_NONE, WARNING_NONE,
              NULL))
 SETTING("graphics", "aspect",
-        STORE(VCT_STORE_ENUM, aspect, "raster", "raster|4:3|16:9|stretch", 0, 0),
+        STORE(VCT_STORE_ENUM, aspect, "raster", "raster|4:3|16:9|21:9|stretch", 0, 0),
         SHOW(GROUP_GFX_DISPLAY, "Aspect ratio", ST_ENUM,
              SF_ADVANCED | SF_UNSHIPPED, WARNING_NONE, NULL))
 /* Bezel art around the picture: a PNG path, per title in [hydro.graphics],
@@ -103,9 +103,14 @@ SETTING("graphics", "upscale_2d",
              "is a plain stretch."))
 SETTING("graphics", "widescreen",
         STORE(VCT_STORE_BOOL, widescreen, "false", NULL, 0, 0),
-        SHOW(GROUP_GFX_WIDESCREEN, "Widescreen (16:9)", ST_BOOL,
+        SHOW(GROUP_GFX_WIDESCREEN, "Widescreen", ST_BOOL,
              SF_NONE, WARNING_NONE,
              "Shows more of the course at the sides, for a wide screen."))
+SETTING("graphics", "widescreen_ratio",
+        STORE(VCT_STORE_ENUM, widescreen_ratio, "16:9", "16:9|21:9", 0, 0),
+        SHOW(GROUP_GFX_WIDESCREEN, "Widescreen ratio", ST_ENUM,
+             SF_UNSHIPPED, WARNING_NONE,
+             "16:9 for an ordinary wide screen, 21:9 for an ultrawide one."))
 SETTING("graphics", "widescreen_hud",
         STORE(VCT_STORE_ENUM, widescreen_hud, "centre", "centre|edges", 0, 0),
         SHOW(GROUP_GFX_WIDESCREEN, "Widescreen HUD", ST_ENUM,

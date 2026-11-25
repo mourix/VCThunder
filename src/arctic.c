@@ -974,8 +974,8 @@ static void gate_settings(void)
     }
 }
 
-/* window_scale is a whole multiple of the picture (640x480, or its 16:9
- * raster under widescreen), clamped to the primary monitor's work area as the
+/* window_scale is a whole multiple of the picture (640x480, or its 16:9 or
+ * 21:9 raster under widescreen), clamped to the primary monitor's work area as the
  * ETS titles' window clamps it; `auto` is the largest that fits. The operator
  * system's narrower window shares the answer and always fits. */
 static void resolve_window_scale(void)

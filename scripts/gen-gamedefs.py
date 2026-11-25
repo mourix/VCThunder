@@ -47,7 +47,7 @@ OUTDIR = os.path.join(REPO, "generated")
 # Ceilings must match src/game.h. Duplicated deliberately: the
 # generator refusing is a better failure than the shim overrunning an array.
 MAX = {"glide": 96, "imp": 160, "w32": 96, "loop": 32, "hud": 16, "hudtext": 16,
-       "splash": 3}
+       "splash": 3, "skypiece": 48}
 
 # --- hardware boundaries the shim implements itself -----------------------
 #
@@ -1806,6 +1806,90 @@ def d_splash_loads(t, log):
     return title, race[0]
 
 
+def d_sky_pieces(t, log):
+    """Hydro's sky pieces, which the widescreen host moves to a larger array.
+
+    _sky_Work cuts the screen-space sky quad (the bounding box of it, rotated,
+    when the camera rolls) into a piece per 256 columns of its texture, two
+    where the horizon crosses it, and keeps the pieces in a static array of
+    records that _sky_ModuleInit lays out:
+        bf <abs32>          mov edi,first        (a record's vertex block)
+        81 c7 <imm32>       add edi,stride
+        81 ff <abs32>       cmp edi,stop         (first + n * stride)
+    Eight records hold four columns: a quad over 768 wide, or a narrower one
+    rolled, writes past them into the sky's own globals and its texture table.
+
+    The records start at the lowest [reg+disp32] in the module that reaches
+    them (the globals just below are plain [disp32]); every 4-byte absolute in
+    the module inside [base, base + n * stride) is a site, and the loop's stop
+    is reported apart, because it is the array's end rather than a field. The
+    module is _sky_ModuleInit up to the first symbol after the last _sky_ one
+    (the piece writers are static functions with no name of their own).
+    (base, stride, n, stop_site, stop, sites), zeros for a title without it.
+    """
+    import x86len
+    zero = (0, 0, 0, 0, 0, [])
+    init = t.va("_sky_ModuleInit")
+    syms = t.symbols()
+    sky = [v["va"] for n, v in syms.items() if n.startswith("_sky_") and v.get("va")]
+    if not init or not sky:
+        return zero
+    last = max(sky)
+    end = min((v["va"] for v in syms.values() if v.get("va") and v["va"] > last),
+              default=0)
+    if not end or end - init > 0x2000:
+        log("WARN: sky pieces: no end to the sky module")
+        return zero
+    d, base = t.read(), t.image_base
+    insns, va = [], init
+    while va < end:
+        r = x86len.decode(d, va - base, base)
+        if not r:
+            log(f"WARN: sky pieces: undecodable at 0x{va:08X}")
+            return zero
+        insns.append((va, d[va - base:va - base + r[0]]))
+        va += r[0]
+    first = stride = stop = stop_site = 0
+    for va, b in insns:
+        if va >= init + 0x80:
+            break
+        if b[0] == 0xbf and len(b) == 5 and not first:
+            first = int.from_bytes(b[1:5], "little")
+        elif b[:2] == b"\x81\xc7" and len(b) == 6 and first and not stride:
+            stride = int.from_bytes(b[2:6], "little")
+        elif b[:2] == b"\x81\xff" and len(b) == 6 and stride and not stop:
+            stop = int.from_bytes(b[2:6], "little")
+            stop_site = va + 2
+    if not (first and stride and stop > first and (stop - first) % stride == 0):
+        log("WARN: sky pieces: _sky_ModuleInit's record loop not found")
+        return zero
+    n = (stop - first) // stride
+
+    def indexed(b, k):
+        # The 4 bytes follow a ModRM of [reg+disp32], or a SIB under one. Byte
+        # 0 is the opcode, never a ModRM: a1/a3/b8+r carry plain absolutes.
+        return ((k >= 2 and (b[k - 1] & 0xC0) == 0x80) or
+                (k >= 3 and (b[k - 2] & 0xC7) in (0x04, 0x84)))
+
+    near = [(va + k, v, indexed(b, k)) for va, b in insns
+            for k in range(1, len(b) - 3)
+            for v in [int.from_bytes(b[k:k + 4], "little")]
+            if first - stride < v < stop]
+    rel = [v for _, v, ix in near if ix]
+    if not rel:
+        log("WARN: sky pieces: no record-relative access")
+        return zero
+    lo = min(rel)
+    if not lo <= first < lo + stride:
+        log("WARN: sky pieces: the records do not start where the loop does")
+        return zero
+    sites = sorted(s for s, v, _ in near if lo <= v < lo + n * stride)
+    if len(sites) > MAX["skypiece"]:
+        log(f"ERROR: sky piece sites {len(sites)}, ceiling is {MAX['skypiece']}")
+        return zero
+    return lo, stride, n, stop_site, stop, sites
+
+
 def d_tracking_cards(t, log):
     """Hydro: `_boats_DrawAllTrackingNumbers` puts a card on the screen's edge
     for each boat beside or behind the camera, one `_mesh3d_DrawOrtho(mesh, x,
@@ -2734,6 +2818,10 @@ def emit(t, tables, log):
     title_sites, race_site = d_splash_loads(t, log)
     title_sites += [0] * (MAX["splash"] - len(title_sites))
     track_lo, track_hi, track_k = d_tracking_cards(t, log)
+    (sky_lo, sky_stride, sky_n, sky_stop_site, sky_stop,
+     sky_sites) = d_sky_pieces(t, log)
+    sky_count = len(sky_sites)
+    sky_sites = sky_sites + [0] * (MAX["skypiece"] - len(sky_sites))
     gtext = d_gametext(t, log)
     hud_txt = d_hud_text_vars(t, log)
     hud_els = d_hud_elements(t, log)
@@ -2856,6 +2944,16 @@ def emit(t, tables, log):
         ("track_ra_hi", track_hi, "Hydro: and the last"),
         ("track_spread", track_k,
          "Hydro: the float a bottom card's sideways direction is scaled by"),
+        ("sky_piece_base", sky_lo,
+         "Hydro: the first of _sky_Work's piece records (d_sky_pieces)"),
+        ("sky_piece_stride", sky_stride, "Hydro: bytes per piece record"),
+        ("sky_piece_n", sky_n, "Hydro: piece records the game has room for"),
+        ("sky_piece_stop_site", sky_stop_site,
+         "Hydro: _sky_ModuleInit's record loop end, an absolute"),
+        ("sky_piece_stop", sky_stop, "Hydro: and the value it holds"),
+        ("sky_piece_count", sky_count, "Hydro: sky_piece_site entries in use"),
+        ("sky_piece_site", sky_sites,
+         "Hydro: every absolute into the piece records (d_sky_pieces)"),
         ("gametext_x", gtext["gametext_x"],
          "Offroad: offset of a gametext object's x, from __GameTextPrint"),
         ("gametext_style", gtext["gametext_style"],

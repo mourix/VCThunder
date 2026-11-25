@@ -81,8 +81,9 @@ static int s_forced_resolution = -1;
  * Voodoo2 path. */
 
 /* Select the smallest legal Glide surface containing the visible raster. The
- * 512x400 cabinet raster uses 640x400; a 711x400 widescreen raster uses
- * 856x480. Extra surface pixels are excluded from presentation. */
+ * 512x400 cabinet raster uses 640x400; a 711x400 (16:9) widescreen raster uses
+ * 856x480 and a 948x400 (21:9) one 960x720. Extra surface pixels are excluded
+ * from presentation. */
 static int glide_enum_for_raster(int requested, int want_width, int want_height)
 {
     unsigned i;
@@ -113,10 +114,10 @@ static int glide_enum_for_raster(int requested, int want_width, int want_height)
     return best;
 }
 
-/* Return the nearest integer 16:9 width for a fixed raster height. */
+/* Return the nearest integer widescreen_ratio width for a fixed raster height. */
 static int widescreen_width(int height)
 {
-    return height > 0 ? (height * 16 + 4) / 9 : 0;
+    return widescreen_ratio_width(g_cfg.widescreen_ratio, height);
 }
 
 /* Publish the host-known visible raster for each surface open. This preserves
@@ -319,16 +320,18 @@ static int gl_sst_win_open(uintptr_t hwnd, int resolution, int refresh,
             int native_width = GLIDE_RESOLUTION[resolution].width;
 
             if (s_view_width != native_width) {
-                LOGW("geometry: widescreen 16:9; visible raster %dx%d -> "
+                LOGW("geometry: widescreen %s; visible raster %dx%d -> "
                      "%dx%d (nearest integer width). The game is told it has "
                      "%d columns; its vertical resolution remains %d. The "
                      "%dx%d Glide surface is backing storage only.",
+                     g_cfg.widescreen_ratio,
                      native_width, s_view_height, s_view_width, s_view_height,
                      s_view_width, s_view_height, s_game_width, s_game_height);
             } else {
-                LOGW("geometry: widescreen is INERT; a 16:9 raster at %d "
+                LOGW("geometry: widescreen is INERT; a %s raster at %d "
                      "lines is not wider than the game's existing %dx%d",
-                     s_view_height, native_width, s_view_height);
+                     g_cfg.widescreen_ratio, s_view_height, native_width,
+                     s_view_height);
             }
         }
 
