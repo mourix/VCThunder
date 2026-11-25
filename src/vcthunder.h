@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "game.h"
 
@@ -799,6 +800,25 @@ int  window_input_focused(void);    /* the [controls] input_background policy */
  * against `widescreen`, so the two cannot disagree about a forced ratio. */
 int  aspect_is_4_3(const char *aspect);
 int  aspect_is_16_9(const char *aspect);
+int  aspect_is_21_9(const char *aspect);
+
+/* [graphics] widescreen_ratio: the shape `widescreen` widens the raster to.
+ * `21:9` is the 64:27 of 2560x1080 and 5120x2160 panels (3440x1440 is 43:18,
+ * a few columns wider, and keeps thin bars). The nearest integer width for a
+ * raster `height` rows tall; the launcher, the ETS binding and Arctic all ask
+ * here, so the three cannot disagree about a picture's size. */
+static inline int widescreen_ratio_is_21_9(const char *ratio)
+{
+    return ratio && !_stricmp(ratio, "21:9");
+}
+
+static inline int widescreen_ratio_width(const char *ratio, int height)
+{
+    if (height <= 0)
+        return 0;
+    return widescreen_ratio_is_21_9(ratio) ? (height * 64 + 13) / 27
+                                           : (height * 16 + 4) / 9;
+}
 
 /* --------------------------------------------------------------- main.c: */
 
@@ -884,7 +904,7 @@ typedef struct {
     unsigned window_scale;/* integer host-window scale; 0 = largest that fits */
     unsigned render_scale;/* wrapper's internal render multiplier; 1 = native */
     int  fullscreen;      /* start borderless-fullscreen; Alt+Enter toggles   */
-    char aspect[16];      /* raster | 4:3 | 16:9 | stretch; see window.c   */
+    char aspect[16];      /* raster | 4:3 | 16:9 | 21:9 | stretch; window.c */
     char bezel[MAX_PATH]; /* bezel art, a PNG; "off" or "" = none          */
     char dongle[8];       /* auto | virtual | off: the key a title asks for */
     char upscale_2d[16];  /* bilinear | catmull_rom | fsr1, above 1x       */
@@ -896,10 +916,11 @@ typedef struct {
      * is 640x480 and exists here to match an 86Box oracle frame; it is NOT
      * safe for an original arcade monitor. See glide_bind.c. */
     int  video_mode;
-    /* Expand the visible raster to the nearest 16:9 width at its existing
-     * height and select the smallest containing Glide surface. Projection
-     * correction is applied separately. */
+    /* Expand the visible raster to the nearest widescreen_ratio width at its
+     * existing height and select the smallest containing Glide surface.
+     * Projection correction is applied separately. */
     int  widescreen;
+    char widescreen_ratio[8]; /* 16:9 | 21:9: the shape `widescreen` widens to */
     char widescreen_hud[8];   /* centre | edges: where the side HUD goes */
     /* Pass vcglide configuration through the environment before loading it. */
     int  vcglide_threads;          /* rasteriser workers: 0 = one per physical

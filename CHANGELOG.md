@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Graphics
+
+- **21:9 ultrawide.** `[graphics] widescreen_ratio = 21:9` (the launcher's *Widescreen ratio* row,
+  under *Widescreen*) widens the picture to 21:9 instead of 16:9: 948x400 for Hydro and Offroad,
+  1138x480 for Arctic and Ultimate Arctic. `widescreen_hud = edges` puts the dials and side text
+  at the ultrawide's own edges. `aspect` takes `21:9` too.
+
+### Hydro Thunder
+
+- **No crash at the start or end of a race in widescreen.** The sky is cut into pieces the game
+  kept in room for eight; a 21:9 sky, or a 16:9 one with the camera rolled at the finish, needed
+  more and overwrote the sky's texture table. The pieces now have room for 32.
+- **The operator menu shows its whole page in widescreen.** It was pushed down by the surface's
+  spare rows: off the screen at 21:9, its bottom line cut at 16:9.
+
+### Arctic Thunder
+
+- **Starts at 21:9.** One of its widescreen patches only took a margin up to 127 pixels, and 21:9's
+  is 249: the game exited at once. Its picture also came from the empty top of the taller
+  surface 21:9 needs; it is now the bottom, where Arctic draws.
+- **No stray text in the side strips.** 2D the game slides in from off the screen, such as the
+  TOP 10 DRIVERS rows, showed in the widescreen's sides before it reached the table. A sprite wholly
+  outside the game's own picture is no longer drawn, as on the cabinet.
+
 ## 0.5
 
 ### Graphics

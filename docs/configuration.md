@@ -135,8 +135,9 @@ The cabinet's picture is 512x400. Keep `raster_height = 400` and `video_mode = a
 - **Fullscreen is a borderless window** over the game's monitor; Alt+Enter toggles it. The display
   mode never changes; exclusive fullscreen would hang the game. The launcher follows the same
   key (its *Display* row, §1.1), and a game started from it opens on the launcher's monitor.
-- `aspect`: `raster` keeps the game's own shape, `4:3` and `16:9` force that ratio, `stretch` fills
-  the screen. The others add black bars.
+- `aspect`: `raster` keeps the game's own shape, `4:3`, `16:9` and `21:9` force that ratio,
+  `stretch` fills the screen. The others add black bars. `21:9` is 64:27, the shape of a
+  2560x1080 or 5120x2160 ultrawide.
 - `window_scale` sizes the window as a multiple of the raster; it cannot be resized. `auto`, the
   default, takes the largest multiple that fits the screen.
 - `render_scale` renders the 3D scene at a higher resolution on the GPU. HUD and menus stay native
@@ -185,9 +186,14 @@ The cabinet's picture is 512x400. Keep `raster_height = 400` and `video_mode = a
 default raster it gives a 711x400 picture, with the HUD and menus left where the game put them.
 A title missing an address it needs, or `aspect = 4:3`, turns it off with a warning.
 
+`widescreen_ratio` says how wide: `16:9` (the default) or `21:9` for an ultrawide screen. `21:9`
+is 64:27, so the default raster becomes 948x400 and Arctic's 640x480 becomes 1138x480. A
+3440x1440 screen is a little wider still (43:18) and keeps a thin black bar at each side. It can
+be set per title in `[<title>.graphics]` like `widescreen`.
+
 `widescreen_hud` says where the HUD goes under `widescreen`. `centre` (the default) leaves it in
 the cabinet's 4:3 field. `edges` moves what sits in the left or right third of that field out to
-the widescreen's edges, at the distance the cabinet kept from its own: in a race the dials, the
+the widescreen's edges (the 16:9 or the 21:9 raster's, whichever `widescreen_ratio` gives), at the distance the cabinet kept from its own: in a race the dials, the
 map, the lap time and the place and lap text; in attract the logo and web address (Hydro) or the
 demo logo (Offroad; its credit line stays put). The centre group stays put, and so does anything
 drawn over a full-screen 4:3 page, menus and high-score tables included.
@@ -540,9 +546,10 @@ trims (§4.3.1).
 | `texmag` | `catmull_rom` | `bilinear` \| `catmull_rom`; 3D textures above `render_scale` 1 (§3.2) |
 | `frame_rate` | `30` | `30` \| `60`; 60 draws an interpolated picture between the game's own (§3.4) |
 | `vsync` | `auto` | `auto` \| `off`; `auto` never tears, `off` is for G-Sync/FreeSync; GPU only (§3.4) |
-| `aspect` | `raster` | `raster` \| `4:3` \| `16:9` \| `stretch`; `4:3` turns `widescreen` off |
+| `aspect` | `raster` | `raster` \| `4:3` \| `16:9` \| `21:9` \| `stretch`; `4:3` turns `widescreen` off |
 | `bezel` | `off` | a PNG path, relative to the pack; usually per title, and the one `[uarctic.*]` key (§3.2) |
-| `widescreen` | `false` | 711x400 Hor+ (§3.3) |
+| `widescreen` | `false` | 711x400 Hor+, or 948x400 with `widescreen_ratio = 21:9` (§3.3) |
+| `widescreen_ratio` | `16:9` | `16:9` \| `21:9`; the shape `widescreen` widens to (§3.3) |
 | `widescreen_hud` | `centre` | `centre` \| `edges`; race HUD and attract overlay under `widescreen` (§3.3) |
 | `raster_height` | `400` | `auto` gives 512x384 and **cuts the top off full-screen bitmaps** |
 | `video_mode` | `auto` | **`2` is 640x480 and may damage an original monitor** |

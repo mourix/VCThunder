@@ -471,6 +471,11 @@ int aspect_is_16_9(const char *aspect)
     return _stricmp(aspect, "16:9") == 0;
 }
 
+int aspect_is_21_9(const char *aspect)
+{
+    return _stricmp(aspect, "21:9") == 0;
+}
+
 static int s_bezel_w, s_bezel_h, s_bezel_hole_h;
 
 void window_set_bezel(int art_w, int art_h, int hole_h)
@@ -506,6 +511,8 @@ static void client_size_for(int scale, int *w, int *h)
         *w = (*h * 4 + 1) / 3;          /* the cabinet monitor's 4:3 */
     else if (aspect_is_16_9(g_cfg.aspect))
         *w = (*h * 16 + 4) / 9;         /* standard widescreen */
+    else if (aspect_is_21_9(g_cfg.aspect))
+        *w = widescreen_ratio_width("21:9", *h);   /* ultrawide, 64:27 */
     else
         *w = s_view_w * scale;          /* raster, and stretch while windowed */
 }

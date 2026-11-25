@@ -39,7 +39,8 @@ void glide_black_margins(void);
 
 /* ---- the geometry, for a title that opens its own surface (Arctic) ------ */
 
-/* The nearest integer 16:9 width for a raster height. */
+/* The nearest integer widescreen_ratio width (16:9 or 21:9) for a raster
+ * height. */
 int  glide_widescreen_width(int height);
 /* The smallest legal surface enum containing a raster, else `requested`, and
  * that enum's size. */
@@ -81,6 +82,12 @@ typedef struct {
 } ws_scopes_t;
 void ws_scopes_save(ws_scopes_t *s);
 void ws_scopes_restore(const ws_scopes_t *s);
+/* Hydro's sky pieces live in the host once widescreen has moved them, outside
+ * the game memory drawinterp puts back after an in-between: it saves them
+ * before its in-between's _sky_Work and restores them with the rest. No-ops
+ * when they have not moved. */
+void ws_sky_pieces_save(void);
+void ws_sky_pieces_restore(void);
 /* The byte offset a READ_ONLY LFB lock should be displaced by, or 0.
  *
  * Hydro projects a lens flare in the game's native field and the primitive seam

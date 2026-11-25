@@ -1022,7 +1022,7 @@ static void ws_sky_build(sky_fn real, const char *which,
 
     if (!real)
         return;
-    if (s_ws_dx <= 0.0f || !G->viewport_half_hres_f) {
+    if (s_ws_dx <= 0.0f || !G->viewport_half_hres_f || !s_ws_sky_wide) {
         real(a0, a1, a2, a3);
         return;
     }
@@ -1056,6 +1056,119 @@ static void __cdecl gl_sky_init(uint32_t a0, uint32_t a1, uint32_t a2,
                                 uint32_t a3)
 {
     ws_sky_build(s_real_sky_init, "_sky_Init", a0, a1, a2, a3);
+}
+
+/* HYDRO'S SKY PIECES, MOVED TO AN ARRAY WITH ROOM FOR A WIDE QUAD.
+ *
+ * _sky_Work cuts the sky quad, or its bounding box when the camera rolls,
+ * into a piece per 256 texture columns, two where the horizon crosses, and
+ * keeps them in a static array of eight 248-byte records. Eight is four
+ * columns: the cabinet's 512 always fits, a 711-wide 16:9 quad fits unrolled,
+ * but a 948-wide 21:9 one, or a 16:9 one rolled at the finish, needs five or
+ * six, and the extra records land on the sky's own globals and on the texture
+ * table _sky_Draw reads straight after them: the game then dereferences a
+ * float (256.0) as a texture and the race start, or its end, crashes.
+ *
+ * Narrowing the quad would only move the limit, since a roll widens the box
+ * again. So the array moves instead: every absolute in the sky module that
+ * reaches it (d_sky_pieces: 37 in Hydro) is rewritten to the same offset in
+ * one of WS_SKY_PIECES records here, and _sky_ModuleInit's record loop is
+ * given the new end so it initialises all of them. Each site is checked
+ * against the value the table says it holds before anything is written; any
+ * mismatch writes nothing and leaves the sky at the cabinet's width. Sixteen
+ * columns is a quad 3800 wide; a rolled 21:9 box is at most 1030. */
+#define WS_SKY_PIECES           32u
+#define WS_SKY_PIECE_MAX_STRIDE 256u
+static uint8_t s_sky_pieces[WS_SKY_PIECES * WS_SKY_PIECE_MAX_STRIDE];
+/* drawinterp's in-between runs _sky_Work again at interpolated angles and
+ * then puts the game's memory back. The array is no longer in that memory, so
+ * it is put back here (ws_sky_pieces_save/restore, glide_int.h). */
+static uint8_t s_sky_pieces_saved[sizeof s_sky_pieces];
+static size_t  s_sky_pieces_bytes;      /* 0 until the array has moved */
+
+static uint32_t rd_u32(uint32_t va)
+{
+    uint32_t v;
+
+    memcpy(&v, (const void *)(uintptr_t)va, 4);
+    return v;
+}
+
+static void wr_u32(uint32_t va, uint32_t v)
+{
+    memcpy((void *)(uintptr_t)va, &v, 4);
+    FlushInstructionCache(GetCurrentProcess(), (void *)(uintptr_t)va, 4);
+}
+
+static int ws_sky_pieces_move(void)
+{
+    const uint32_t base = G->sky_piece_base, stride = G->sky_piece_stride;
+    const uint32_t n = G->sky_piece_n, count = G->sky_piece_count;
+    const uint32_t end = base + n * stride;
+    const uint32_t to = (uint32_t)(uintptr_t)s_sky_pieces;
+    uint32_t i;
+
+    if (!base || !stride || !n || !count || !G->sky_piece_stop_site) {
+        LOGW("geometry: widescreen; this title's table has no sky-piece "
+             "array (regenerate generated/), so the sky stays at the "
+             "cabinet's width");
+        return 0;
+    }
+    if (stride > WS_SKY_PIECE_MAX_STRIDE || n >= WS_SKY_PIECES ||
+        count > VCT_MAX_SKY_PIECE_SITES) {
+        LOGE("geometry: widescreen; sky pieces of %u bytes x %u in %u sites "
+             "do not fit the host's array; the sky stays at the cabinet's "
+             "width", stride, n, count);
+        return 0;
+    }
+    for (i = 0; i < count; i++) {
+        uint32_t site = G->sky_piece_site[i], v = site ? rd_u32(site) : 0;
+
+        if (!site || v < base || v >= end) {
+            LOGE("geometry: widescreen; sky-piece site %u at 0x%08X holds "
+                 "0x%08X, outside the records 0x%08X..0x%08X; nothing moved, "
+                 "the sky stays at the cabinet's width", i, site, v, base,
+                 end - 1);
+            return 0;
+        }
+    }
+    if (rd_u32(G->sky_piece_stop_site) != G->sky_piece_stop) {
+        LOGE("geometry: widescreen; _sky_ModuleInit's record loop at 0x%08X "
+             "does not end at 0x%08X; nothing moved, the sky stays at the "
+             "cabinet's width", G->sky_piece_stop_site, G->sky_piece_stop);
+        return 0;
+    }
+    /* The game's records as they stand, then copies of its first for the
+     * rest: whether or not _sky_ModuleInit has run, every record has the
+     * constant vertex fields only it writes. */
+    memcpy(s_sky_pieces, (const void *)(uintptr_t)base, n * stride);
+    for (i = n; i < WS_SKY_PIECES; i++)
+        memcpy(s_sky_pieces + i * stride, s_sky_pieces, stride);
+    for (i = 0; i < count; i++) {
+        uint32_t site = G->sky_piece_site[i];
+
+        wr_u32(site, rd_u32(site) - base + to);
+    }
+    wr_u32(G->sky_piece_stop_site, G->sky_piece_stop - base + to +
+                                   (WS_SKY_PIECES - n) * stride);
+    s_sky_pieces_bytes = (size_t)WS_SKY_PIECES * stride;
+    LOGI("geometry: widescreen; the sky's %u piece records (0x%08X, %u bytes "
+         "each) moved to %u at %p through %u sites, so a wide or rolled sky "
+         "quad cannot cut more pieces than there is room for",
+         n, base, stride, WS_SKY_PIECES, (void *)s_sky_pieces, count);
+    return 1;
+}
+
+void ws_sky_pieces_save(void)
+{
+    if (s_sky_pieces_bytes)
+        memcpy(s_sky_pieces_saved, s_sky_pieces, s_sky_pieces_bytes);
+}
+
+void ws_sky_pieces_restore(void)
+{
+    if (s_sky_pieces_bytes)
+        memcpy(s_sky_pieces, s_sky_pieces_saved, s_sky_pieces_bytes);
 }
 
 /* Hydro's tracking cards mark a boat beside or behind the camera on the
@@ -1686,6 +1799,11 @@ static void widescreen_arm(void)
                      "backdrop will cover the native field only and the side "
                      "strips will be black wherever the world does not cover "
                      "them");
+            else if (!ws_sky_pieces_move())
+                LOGE("geometry: widescreen; the sky's pieces could not be "
+                     "given room for a wide quad, so the backdrop keeps the "
+                     "cabinet's width and the side strips are black wherever "
+                     "the world does not cover them");
             else {
                 s_ws_sky_wide = 1;
                 LOGI("geometry: widescreen; both sky-quad builders are "
